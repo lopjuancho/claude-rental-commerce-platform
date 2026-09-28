@@ -520,45 +520,24 @@ Flow: draft quote (no inventory) → `request_booking(quote)` creates `booking_r
 - **Buffers** are applied once at write time into `occupied_period`; the org/variant buffer at booking time is preserved even if defaults later change.
 - **Product-level blocks** apply to all units of all variants; **unit-level** maintenance blocks remove only that unit from the candidate set.
 
-### 6.2 Functions (sketch)
+### 6.2 Functions (implemented: `supabase/migrations/20260928000800_availability.sql`)
 
-```sql
--- Read path: advisory answer for search / AI / UI.
-create function app.check_availability(
-  p_organization_id uuid, p_variant_id uuid,
-  p_rental_period tstzrange, p_quantity int
-) returns table (available boolean, available_quantity int, reasons text[])
-language sql stable security definer set search_path = '' as $$ … $$;
+| Function | Who | Purpose |
+|---|---|---|
+| `check_availability(org, variant, start, end, qty, override_lead_time)` | staff (org.read), system | Exact counts, reasons, occupied window |
+| `check_public_availability(org, variant, start, end, qty)` | anon, staff, system | `available` + `limited` only (D14); published products of active orgs; lead time always enforced |
+| `reserve_inventory(org, items jsonb, status, source, replaces, override_lead_time, notes)` | staff (availability.write), system (holds only) | The only way to consume inventory; multi-item, atomic; optional atomic hold replacement |
+| `confirm_reservation(id, ignore_weather)` | staff, system | Live hold → confirmed. Expired → `RA004`. Confirmed weather block → `RA002` unless staff override |
+| `renew_hold(id)` | staff, system | Extends a live hold by `booking_hold_minutes`, at most `max_hold_renewals` times |
+| `release_reservation(id)` | staff, system (holds only) | Hold → released; confirmed → cancelled (staff only) |
+| `sweep_expired_holds()` | system | Housekeeping only |
+| `confirm_weather_block(id)` / `lift_weather_block(id)` | staff only | Confirming flags overlapping bookings; never cancels |
 
--- Write path: the ONLY way to consume inventory.
-create function app.reserve_inventory(
-  p_organization_id uuid,
-  p_reservation_id  uuid,
-  p_variant_id      uuid,
-  p_rental_period   tstzrange,
-  p_quantity        int,
-  p_status          reservation_status,       -- 'held' | 'confirmed'
-  p_hold_expires_at timestamptz
-) returns setof public.reservation_allocations
-language plpgsql security definer set search_path = '' as $$
-begin
-  -- 1. authorize: caller is member with availability.write, OR system context (service_role)
-  -- 2. validate tenant: variant and reservation belong to p_organization_id
-  -- 3. lock: pg_advisory_xact_lock on variant
-  -- 4. release expired holds for this variant
-  -- 5. compute occupied_period from buffers; check org/product/variant blocks and rules
-  -- 6. serialized: select p_quantity free active units
-  --      where not exists overlapping active allocation / unit block
-  --      order by label for update skip locked;
-  --    if fewer than p_quantity → raise 'INSUFFICIENT_AVAILABILITY'
-  --    pooled: peak-usage check against pooled_quantity − blocked quantity
-  -- 7. insert allocations (exclusion constraint is the final guard)
-end $$;
-```
+Errors use SQLSTATE class `RA`: RA001 insufficient availability, RA002 blocked, RA003 outside lead time, RA004 hold expired, RA005 not found (including other tenants' data), RA006 invalid request/state, RA007 renewal limit.
 
-The availability "reasons" vocabulary is shared with TypeScript: `OK`, `INSUFFICIENT_QUANTITY`, `BLACKOUT`, `MAINTENANCE`, `OUTSIDE_LEAD_TIME`, `CLOSED_DAY`, `VARIANT_INACTIVE`, `PRODUCT_UNPUBLISHED`.
+Concurrency: per-variant `pg_advisory_xact_lock` (taken in sorted order: no deadlocks) + the unit exclusion constraint. A mutation test that removed both guards (with a widened race window) double-booked the last unit; with them, exactly one of ten concurrent requests wins.
 
-### 6.3 Required test scenarios
+### 6.3 Required test scenarios (implemented in `tests/integration/availability.test.ts` and `weather-blocks.test.ts`)
 
 1. Qty 1, A = Sat 12:00–18:00 confirmed, B = Sat 15:00–20:00 → B rejected.
 2. Qty 1, A = 12:00–18:00, B = 18:00–22:00, zero buffers → allowed (half-open). With 60-min buffers → rejected.

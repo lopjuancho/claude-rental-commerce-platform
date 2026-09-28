@@ -8,7 +8,7 @@ First tenant: Tiky Jumps Inflatables LLC (onboarded as data, not code).
 - [MVP.md](./MVP.md): Phase 1 scope, milestones, acceptance criteria
 - [docs/decisions/](./docs/decisions/README.md): architecture decision records
 
-**Status:** Milestones 1 (foundation, auth, tenancy) and 2 (catalog, media, inventory, CSV import) implemented.
+**Status:** Milestones 1 (foundation, auth, tenancy), 2 (catalog, media, inventory, CSV import) and 3 (availability engine, holds, blocks, weather) implemented.
 
 ## Stack
 

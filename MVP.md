@@ -68,6 +68,8 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 - **Tests:** RLS matrix for catalog tables + storage; anon cannot see unpublished products, `internal_notes` or unverified media; import re-run updates instead of duplicating; invalid CSV rows reported, not imported; cross-org media path rejected; slug uniqueness per org (same slug allowed in two orgs); invalid specs rejected (max_age < min_age, neither wet nor dry).
 
 ### M3 — Availability engine
+
+**Status: implemented 2026-09-28.** See §9 for follow-ups.
 - `domain/availability` (intervals, buffers, peak capacity) — pure and exhaustively tested.
 - Weather blocks (ADR 0010): staff-confirmed, flag overlapping bookings, `WEATHER_BLOCK` for wind-sensitive products.
 - Migration `0005`; `check_availability` and `reserve_inventory` SQL functions; holds with expiry; blocks; rules (lead time, closed days).
@@ -141,4 +143,14 @@ Still open:
 - **Product relations (add-ons)** have schema + RLS but no admin UI yet (needed with pricing in M4).
 - **Import size:** 5,000 rows / 5 MB per file, processed in the request. Larger catalogs would need a background job.
 - **Tiky Jumps bundle:** owner email, domains, branding, depot address, maximum delivery distance, wind sensitivity for tents/trains/foam, and policies still to be filled in (`seeds/tenants/tiky-jumps/README.md`).
+
+## 9. M3 follow-ups (carried forward)
+
+- **Booking requests** (`booking_requests` table, public "request booking" flow creating 15-minute holds through the system context) are M5. The engine already supports system-context holds, renewal and atomic replacement.
+- **Quote/event links** on reservations are plain columns until those tables exist (M5 adds the foreign keys).
+- **Overnight rules** (`overnight_allowed`, next-day pickup) and **multi-day pricing** are pricing/quote rules (M4/M5). Availability already handles overnight and multi-day periods as ranges, capped by `max_rental_days` (org setting, default 14).
+- **Declarative availability rules** (closed weekdays, max events per day) are not implemented. Blackout blocks cover closures for now.
+- **Hold sweeper schedule:** `sweep_expired_holds()` exists. A Cloudflare cron trigger to call it is deployment work. Correctness never depends on it.
+- **Weather data feed:** blocks from a weather API would be created as `proposed` by the system context. Only staff can confirm (enforced).
+- **Calendar view:** the admin shows an upcoming list, a checker, blocks and weather. A visual calendar is M8.
 

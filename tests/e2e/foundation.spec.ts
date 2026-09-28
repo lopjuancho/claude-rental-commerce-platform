@@ -38,7 +38,14 @@ test("invitation page never accepts on GET", async ({ page }) => {
 });
 
 test("catalog admin pages require sign-in", async ({ page }) => {
-  for (const path of ["/admin/catalog", "/admin/catalog/import", "/admin/catalog/categories"]) {
+  for (const path of [
+    "/admin/catalog",
+    "/admin/catalog/import",
+    "/admin/catalog/categories",
+    "/admin/availability",
+    "/admin/availability/blocks",
+    "/admin/availability/weather",
+  ]) {
     await page.goto(path);
     await expect(page).toHaveURL(new RegExp(`/sign-in\\?next=${encodeURIComponent(path)}$`));
   }
