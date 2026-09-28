@@ -1,0 +1,836 @@
+# Database Design
+
+> Status: **Proposed — Phase 1 schema, pre-implementation.** SQL below is a design sketch; the authoritative version will be the files in `supabase/migrations/` created in Milestones 1–5.
+> See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the surrounding system.
+
+## 1. Conventions
+
+| Convention | Rule | Why |
+|---|---|---|
+| Primary keys | `id uuid default gen_random_uuid()` | Non-enumerable, safe in URLs, mergeable across environments. |
+| Tenant key | `organization_id uuid not null` on **every** tenant-owned table, including children | RLS becomes a single indexed predicate per table; no joins in policies. |
+| Tenant-safe FKs | Parents declare `unique (organization_id, id)`; children reference `(organization_id, parent_id)` | The DB itself rejects cross-tenant references. |
+| Money | `bigint` minor units, column suffix `_cents`; currency on the organization | No floating-point errors. |
+| Rates | `integer` basis points, suffix `_bps` (975 = 9.75%) | Exact percentage arithmetic. |
+| Time | `timestamptz` for instants; `tstzrange` `[)` for periods; `organizations.timezone` (IANA) for local interpretation | Correct DST behavior; half-open ranges allow back-to-back bookings. |
+| Durations | `integer` minutes, suffix `_minutes` | Simple arithmetic, no `interval` ambiguity. |
+| Enums | PostgreSQL enums for closed, code-coupled sets (status, role); lookup tables for tenant-editable sets | Enums are cheap to extend (`alter type … add value`). |
+| Timestamps | `created_at`, `updated_at` (trigger-maintained) on all mutable tables | |
+| Soft delete | `archived_at timestamptz` on catalog/customer entities; quotes/reservations use status | Historical quotes must keep referencing archived products. |
+| Naming | snake_case, plural table names | |
+| Schemas | `public` (tables exposed via PostgREST under RLS), `app` (helper functions, not exposed), `private` (system-only tables if needed) | Keeps helpers out of the API surface. |
+| Extensions | `pgcrypto`, `btree_gist`, `pg_trgm`, `citext` | Exclusion constraints, fuzzy search, case-insensitive email. |
+
+## 2. Entity overview
+
+```
+organizations ─┬─ organization_domains
+               ├─ organization_settings (1:1)  branding, contact, operational defaults
+               ├─ organization_policies        versioned public policies
+               ├─ organization_members ── auth.users ── user_profiles
+               ├─ organization_invitations
+               ├─ categories ── product_categories ── products ─┬─ product_variants ─┬─ inventory_units
+               │                                                ├─ product_media     └─ (pooled_quantity)
+               │                                                └─ product_relations (add-ons)
+               ├─ availability_rules
+               ├─ availability_blocks            (org / product / variant / unit scope)
+               ├─ reservations ── reservation_allocations   (the ONLY consumer of inventory)
+               ├─ service_areas ── service_area_rules
+               ├─ pricing_rules, tax_rates
+               ├─ customers ── events ── quotes ─┬─ quote_items
+               │                                 └─ quote_charges
+               ├─ conversations ── conversation_messages
+               │                └─ ai_actions
+               ├─ organization_counters         (quote numbers)
+               └─ audit_logs
+ global:  role_permissions
+```
+
+### Changes from the initial table list, and why
+
+- `organization_users` → **`organization_members`** (membership with role) — clearer, and allows invitation/suspension status.
+- `business_settings` → **`organization_settings`** (1:1, branding + contact + defaults) + **`organization_policies`** (many, versioned). Policies are content the AI quotes verbatim, so they need versioning and publish state; settings are scalar config.
+- **`organization_domains`** added for host-based tenant resolution.
+- **`product_categories`** join table added: a combo can be both "Bounce Houses" and "Water Slides".
+- **`product_relations`** added as the seam for add-ons/accessories ("generator", "extra slide lane").
+- `reservations` split into **`reservations`** (header: why inventory is taken — a quote, a manual block for a staff booking, later an order) and **`reservation_allocations`** (what is taken: unit or pooled quantity, and when). Allocations are what the availability engine counts and what the exclusion constraint protects.
+- **`quote_charges`** added next to `quote_items`: delivery, discounts, fees, taxes and manual adjustments are not products and should not be fake quote items.
+- **`tax_rates`** separated from `pricing_rules` — tax is legally distinct and configured differently.
+- **`service_area_rules`** separated from `service_areas` so one zone can match many ZIPs/cities, and future radius/mileage rules are new rule types.
+- **`role_permissions`** (global) added so authorization checks permissions, not role names.
+- **`organization_counters`** added for gap-tolerant, per-tenant sequential quote numbers.
+- **`orders`** intentionally **not** created in Phase 1 (no payments/contracts). Accepted quote + confirmed reservation covers Phase 1; `orders` will be introduced with payments and will take ownership of reservations.
+
+## 3. Tenancy, identity, access
+
+```sql
+create type org_status as enum ('active','suspended','onboarding','closed');
+create type org_role   as enum ('owner','admin','office','staff');   -- later: 'driver','warehouse'
+
+create table organizations (
+  id            uuid primary key default gen_random_uuid(),
+  slug          text not null unique check (slug ~ '^[a-z0-9](-?[a-z0-9])*$'),
+  name          text not null,                  -- display name: "Tiky Jumps"
+  legal_name    text,                           -- "Tiky Jumps Inflatables LLC"
+  status        org_status not null default 'onboarding',
+  timezone      text not null,                  -- IANA, e.g. 'America/Chicago'
+  currency      char(3) not null default 'USD',
+  country_code  char(2) not null default 'US',
+  plan          text,                           -- SaaS plan seam
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+
+create table organization_domains (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  hostname         citext not null unique,      -- 'tikyjumps.com', 'tiky-jumps.<platform>'
+  is_primary       boolean not null default false,
+  verified_at      timestamptz
+);
+
+create table organization_settings (             -- 1:1 with organizations
+  organization_id       uuid primary key references organizations(id) on delete cascade,
+  -- branding
+  logo_media_path       text,
+  primary_color         text check (primary_color ~ '^#[0-9a-fA-F]{6}$'),
+  secondary_color       text check (secondary_color ~ '^#[0-9a-fA-F]{6}$'),
+  -- contact
+  contact_phone         text,
+  sms_phone             text,
+  contact_email         citext,
+  website_url           text,
+  address_line1 text, city text, state text, postal_code text,
+  -- operational defaults
+  default_setup_buffer_minutes     integer not null default 60  check (default_setup_buffer_minutes >= 0),
+  default_teardown_buffer_minutes  integer not null default 60  check (default_teardown_buffer_minutes >= 0),
+  default_event_start_time         time    not null default '10:00',
+  default_rental_duration_minutes  integer not null default 360,
+  min_booking_lead_time_minutes    integer not null default 1440,
+  quote_valid_days                 integer not null default 7,
+  booking_hold_minutes             integer not null default 60,
+  -- assistant
+  assistant_enabled      boolean not null default false,
+  assistant_display_name text,
+  assistant_greeting     text,
+  updated_at             timestamptz not null default now()
+);
+
+create table organization_policies (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  policy_type      text not null,   -- 'cancellation','weather','deposit','delivery','safety','other'
+  title            text not null,
+  body             text not null,
+  version          integer not null default 1,
+  is_published     boolean not null default false,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id)
+);
+
+create table user_profiles (
+  id          uuid primary key references auth.users(id) on delete cascade,
+  full_name   text,
+  phone       text,
+  avatar_path text,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table organization_members (
+  organization_id uuid not null references organizations(id) on delete cascade,
+  user_id         uuid not null references auth.users(id) on delete cascade,
+  role            org_role not null,
+  status          text not null default 'active' check (status in ('active','suspended')),
+  created_at      timestamptz not null default now(),
+  primary key (organization_id, user_id)
+);
+create index on organization_members (user_id);
+
+create table organization_invitations (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  email            citext not null,
+  role             org_role not null,
+  token_hash       text not null unique,       -- store only a hash of the token
+  invited_by       uuid references auth.users(id),
+  expires_at       timestamptz not null,
+  accepted_at      timestamptz
+);
+
+create table role_permissions (                  -- global, seeded by migration
+  role        org_role not null,
+  permission  text not null,                     -- 'catalog.read','catalog.write','quotes.write',...
+  primary key (role, permission)
+);
+```
+
+**Initial permission matrix** (seeded):
+
+| Permission | owner | admin | office | staff |
+|---|:-:|:-:|:-:|:-:|
+| `org.read` (dashboard, catalog, calendar) | ✓ | ✓ | ✓ | ✓ |
+| `catalog.write` (products, categories, media, inventory) | ✓ | ✓ | ✓ | |
+| `availability.write` (blocks, reservations) | ✓ | ✓ | ✓ | |
+| `customers.read` / `customers.write` | ✓ | ✓ | ✓ | read |
+| `events.write`, `quotes.write` | ✓ | ✓ | ✓ | |
+| `conversations.read` | ✓ | ✓ | ✓ | |
+| `pricing.write` (rules, tax, service areas) | ✓ | ✓ | | |
+| `settings.write` (branding, policies, defaults) | ✓ | ✓ | | |
+| `members.manage` | ✓ | ✓ (not owner role) | | |
+| `audit.read` | ✓ | ✓ | | |
+| `org.delete` / ownership transfer | ✓ | | | |
+
+(Exact matrix to be confirmed with Tiky Jumps; changing it is a data migration.)
+
+## 4. Catalog
+
+```sql
+create type pricing_type    as enum ('per_event','hourly','daily','per_unit');
+create type tracking_mode   as enum ('serialized','pooled');
+create type event_type      as enum ('birthday','school','church','corporate','community',
+                                     'graduation','festival','wedding','sports','holiday','other');
+create type media_kind      as enum ('image','video');
+
+create table categories (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  parent_id        uuid,
+  name             text not null,
+  slug             text not null,
+  description      text,
+  sort_order       integer not null default 0,
+  is_published     boolean not null default true,
+  archived_at      timestamptz,
+  unique (organization_id, id),
+  unique (organization_id, slug),
+  foreign key (organization_id, parent_id) references categories(organization_id, id)
+);
+
+create table products (
+  id                        uuid primary key default gen_random_uuid(),
+  organization_id           uuid not null references organizations(id) on delete cascade,
+  primary_category_id       uuid,
+  name                      text not null,
+  slug                      text not null,
+  short_description         text,
+  description               text,
+  -- merchandising
+  is_published              boolean not null default false,
+  is_featured               boolean not null default false,
+  sort_order                integer not null default 0,
+  -- pricing headline (detailed rules in pricing_rules)
+  pricing_type              pricing_type not null default 'per_event',
+  base_price_cents          bigint not null check (base_price_cents >= 0),
+  included_duration_minutes integer check (included_duration_minutes > 0),   -- e.g. 360 for "6 hours"
+  minimum_rental_minutes    integer check (minimum_rental_minutes > 0),
+  -- suitability (AI-searchable, typed)
+  wet_allowed               boolean not null default false,
+  dry_allowed               boolean not null default true,
+  minimum_age               smallint check (minimum_age >= 0),
+  maximum_age               smallint check (maximum_age >= minimum_age),
+  recommended_capacity      smallint check (recommended_capacity > 0),       -- simultaneous riders
+  max_rider_weight_lbs      smallint,
+  ideal_event_types         event_type[] not null default '{}',
+  indoor_allowed            boolean not null default false,
+  outdoor_allowed           boolean not null default true,
+  allowed_surfaces          text[] not null default '{}',                      -- 'grass','concrete','asphalt','indoor_floor'
+  -- physical requirements (feet / minutes)
+  space_length_ft           numeric(5,1) check (space_length_ft > 0),
+  space_width_ft            numeric(5,1) check (space_width_ft > 0),
+  space_height_ft           numeric(5,1) check (space_height_ft > 0),
+  power_outlets_required    smallint check (power_outlets_required >= 0),
+  power_notes               text,                                             -- e.g. "1 dedicated 20A circuit within 50 ft"
+  water_required            boolean not null default false,
+  operator_required         boolean not null default false,
+  setup_minutes             integer check (setup_minutes >= 0),
+  teardown_minutes          integer check (teardown_minutes >= 0),
+  -- discovery
+  tags                      text[] not null default '{}',                     -- lower-case, normalized
+  extra_specs               jsonb not null default '{}'::jsonb,               -- display-only, never used for claims
+  search_vector             tsvector generated always as (…) stored,          -- name/short_description/tags
+  -- internal
+  internal_notes            text,                                             -- NEVER exposed publicly or to AI
+  archived_at               timestamptz,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id),
+  unique (organization_id, slug),
+  check (wet_allowed or dry_allowed),
+  foreign key (organization_id, primary_category_id) references categories(organization_id, id)
+);
+create index on products using gin (tags);
+create index on products using gin (search_vector);
+create index on products using gin (name gin_trgm_ops);
+
+create table product_categories (
+  organization_id uuid not null,
+  product_id      uuid not null,
+  category_id     uuid not null,
+  primary key (product_id, category_id),
+  foreign key (organization_id, product_id)  references products(organization_id, id)  on delete cascade,
+  foreign key (organization_id, category_id) references categories(organization_id, id) on delete cascade
+);
+
+create table product_variants (
+  id                          uuid primary key default gen_random_uuid(),
+  organization_id             uuid not null,
+  product_id                  uuid not null,
+  name                        text not null default 'Default',
+  sku                         text,
+  is_default                  boolean not null default false,
+  price_override_cents        bigint check (price_override_cents >= 0),
+  tracking_mode               tracking_mode not null default 'serialized',
+  pooled_quantity             integer check (pooled_quantity >= 0),          -- only for pooled
+  setup_buffer_minutes        integer,                                       -- null → org default
+  teardown_buffer_minutes     integer,
+  is_active                   boolean not null default true,
+  archived_at                 timestamptz,
+  unique (organization_id, id),
+  unique (organization_id, sku),
+  foreign key (organization_id, product_id) references products(organization_id, id) on delete cascade,
+  check ((tracking_mode = 'pooled') = (pooled_quantity is not null))
+);
+create unique index one_default_variant on product_variants (product_id) where is_default;
+
+create table inventory_units (                                -- serialized variants only
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  variant_id       uuid not null,
+  label            text not null,                            -- "Unit #2", serial, internal name
+  status           text not null default 'active' check (status in ('active','retired')),
+  condition_notes  text,
+  acquired_on      date,
+  unique (organization_id, id),
+  foreign key (organization_id, variant_id) references product_variants(organization_id, id)
+);
+
+create table product_media (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  product_id       uuid not null,
+  kind             media_kind not null default 'image',
+  storage_provider text not null default 'supabase',        -- seam for R2 migration
+  storage_path     text not null,                           -- '{organization_id}/products/{product_id}/{file}'
+  alt_text         text,
+  width integer, height integer,
+  sort_order       integer not null default 0,
+  is_primary       boolean not null default false,
+  foreign key (organization_id, product_id) references products(organization_id, id) on delete cascade
+);
+
+create table product_relations (                             -- add-ons / accessories / requirements
+  organization_id    uuid not null,
+  product_id         uuid not null,
+  related_product_id uuid not null,
+  relation_type      text not null check (relation_type in ('addon','recommended','requires')),
+  primary key (product_id, related_product_id, relation_type),
+  foreign key (organization_id, product_id)         references products(organization_id, id) on delete cascade,
+  foreign key (organization_id, related_product_id) references products(organization_id, id) on delete cascade
+);
+```
+
+**Relational vs JSONB reasoning.** Anything the assistant filters on or makes a claim about (capacity, ages, wet/dry, dimensions, power, water, operator, event types, surfaces) is a typed column with `CHECK` constraints — this is what lets `search_products` be precise and lets the grounding validator verify that a cited attribute exists. `extra_specs` JSONB exists only for display-only oddities (e.g. "number of basketball hoops") and the assistant is instructed/validated not to rely on it for suitability claims. `tags` and `ideal_event_types` are arrays (not join tables) because they are small, filter-only, and GIN-indexable; tags will move to a table if tenants need managed tag vocabularies.
+
+**Quantity** is not a column on `products`: it is derived — count of active `inventory_units` for serialized variants, or `pooled_quantity` for pooled ones. A generated `product_inventory_summary` view exposes it for admin and search.
+
+## 5. Availability rules & blocks
+
+```sql
+create type block_reason as enum ('blackout','maintenance','repair','private_use','other');
+
+create table availability_blocks (
+  id                 uuid primary key default gen_random_uuid(),
+  organization_id    uuid not null references organizations(id) on delete cascade,
+  -- scope: exactly one of these is set, or none = whole organization
+  product_id         uuid,
+  variant_id         uuid,
+  inventory_unit_id  uuid,
+  period             tstzrange not null check (not isempty(period)),
+  reason             block_reason not null,
+  quantity           integer check (quantity > 0),   -- pooled partial blocks (e.g. 20 chairs damaged)
+  notes              text,
+  created_by         uuid references auth.users(id),
+  created_at         timestamptz not null default now(),
+  check (num_nonnulls(product_id, variant_id, inventory_unit_id) <= 1),
+  foreign key (organization_id, product_id)        references products(organization_id, id),
+  foreign key (organization_id, variant_id)        references product_variants(organization_id, id),
+  foreign key (organization_id, inventory_unit_id) references inventory_units(organization_id, id)
+);
+create index on availability_blocks using gist (organization_id, period);
+
+create table availability_rules (                  -- declarative constraints, Zod-validated params
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  product_id       uuid,                          -- null = org-wide
+  rule_type        text not null check (rule_type in
+                     ('min_lead_time','closed_weekdays','booking_window_days','max_events_per_day')),
+  params           jsonb not null,                -- e.g. {"weekdays":[0]} ; validated in app + CHECK on jsonb shape
+  is_active        boolean not null default true,
+  foreign key (organization_id, product_id) references products(organization_id, id)
+);
+```
+
+## 6. Reservations & the availability engine
+
+```sql
+create type reservation_status as enum ('held','confirmed','released','cancelled','completed');
+create type reservation_source as enum ('quote','manual','import');
+
+create table reservations (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  source           reservation_source not null,
+  quote_id         uuid,
+  event_id         uuid,
+  status           reservation_status not null default 'held',
+  hold_expires_at  timestamptz,
+  created_by       uuid references auth.users(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id),
+  check (status <> 'held' or hold_expires_at is not null)
+);
+
+create table reservation_allocations (
+  id                 uuid primary key default gen_random_uuid(),
+  organization_id    uuid not null,
+  reservation_id     uuid not null,
+  variant_id         uuid not null,
+  inventory_unit_id  uuid,                 -- set for serialized, null for pooled
+  quantity           integer not null default 1 check (quantity > 0),
+  rental_period      tstzrange not null,   -- what the customer booked
+  occupied_period    tstzrange not null,   -- rental_period expanded by setup/teardown buffers
+  status             reservation_status not null,          -- denormalized from header for the constraint
+  hold_expires_at    timestamptz,
+  foreign key (organization_id, reservation_id)    references reservations(organization_id, id) on delete cascade,
+  foreign key (organization_id, variant_id)        references product_variants(organization_id, id),
+  foreign key (organization_id, inventory_unit_id) references inventory_units(organization_id, id),
+  check (inventory_unit_id is null or quantity = 1),
+  check (occupied_period @> rental_period),
+
+  -- THE double-booking guarantee for serialized units:
+  constraint no_unit_double_booking exclude using gist (
+    inventory_unit_id with =,
+    occupied_period   with &&
+  ) where (inventory_unit_id is not null and status in ('held','confirmed'))
+);
+create index on reservation_allocations using gist (variant_id, occupied_period)
+  where status in ('held','confirmed');
+```
+
+### 6.1 Why this design
+
+- **Exclusion constraint** gives a database-level guarantee for the common case (each bounce house is one physical unit). Two concurrent transactions trying to allocate the same unit for overlapping periods cannot both commit — the second fails with `23P01`, which the function maps to `INSUFFICIENT_AVAILABILITY`.
+- **Expired holds and the constraint:** because `now()` cannot appear in a constraint predicate, an expired-but-not-yet-swept hold would still block the unit at the constraint level. `reserve_inventory` therefore first releases expired holds on the candidate variant (`update … set status='released' where status='held' and hold_expires_at <= now()`) inside the same transaction, and the read path ignores them by predicate. The sweeper job is then only housekeeping.
+- **Pooled stock** (chairs) cannot use an exclusion constraint (it is a sum, not a pairwise conflict). `reserve_inventory` takes `pg_advisory_xact_lock(hashtextextended(variant_id::text, 0))`, computes peak concurrent usage over the requested window, and inserts only if `peak + requested ≤ pooled_quantity − blocked_quantity`. All writers to a pooled variant go through this function, so the lock serializes them.
+- **Peak usage, not sum:** for pooled items, three reservations that each overlap the request but not each other only consume the max concurrent amount. The function computes the maximum over the boundary points of overlapping allocations (a small sweep-line in SQL), mirrored by `domain/availability/capacity.ts` in TypeScript for unit tests.
+- **Denormalized status:** `reservation_allocations.status`/`hold_expires_at` are copied from the header by trigger on every header status change (in the same transaction), because an exclusion constraint's `WHERE` can only see the row's own columns.
+- **Buffers** are applied once at write time into `occupied_period`; the org/variant buffer at booking time is preserved even if defaults later change.
+- **Product-level blocks** apply to all units of all variants; **unit-level** maintenance blocks remove only that unit from the candidate set.
+
+### 6.2 Functions (sketch)
+
+```sql
+-- Read path: advisory answer for search / AI / UI.
+create function app.check_availability(
+  p_organization_id uuid, p_variant_id uuid,
+  p_rental_period tstzrange, p_quantity int
+) returns table (available boolean, available_quantity int, reasons text[])
+language sql stable security definer set search_path = '' as $$ … $$;
+
+-- Write path: the ONLY way to consume inventory.
+create function app.reserve_inventory(
+  p_organization_id uuid,
+  p_reservation_id  uuid,
+  p_variant_id      uuid,
+  p_rental_period   tstzrange,
+  p_quantity        int,
+  p_status          reservation_status,       -- 'held' | 'confirmed'
+  p_hold_expires_at timestamptz
+) returns setof public.reservation_allocations
+language plpgsql security definer set search_path = '' as $$
+begin
+  -- 1. authorize: caller is member with availability.write, OR system context (service_role)
+  -- 2. validate tenant: variant and reservation belong to p_organization_id
+  -- 3. lock: pg_advisory_xact_lock on variant
+  -- 4. release expired holds for this variant
+  -- 5. compute occupied_period from buffers; check org/product/variant blocks and rules
+  -- 6. serialized: select p_quantity free active units
+  --      where not exists overlapping active allocation / unit block
+  --      order by label for update skip locked;
+  --    if fewer than p_quantity → raise 'INSUFFICIENT_AVAILABILITY'
+  --    pooled: peak-usage check against pooled_quantity − blocked quantity
+  -- 7. insert allocations (exclusion constraint is the final guard)
+end $$;
+```
+
+The availability "reasons" vocabulary is shared with TypeScript: `OK`, `INSUFFICIENT_QUANTITY`, `BLACKOUT`, `MAINTENANCE`, `OUTSIDE_LEAD_TIME`, `CLOSED_DAY`, `VARIANT_INACTIVE`, `PRODUCT_UNPUBLISHED`.
+
+### 6.3 Required test scenarios
+
+1. Qty 1, A = Sat 12:00–18:00 confirmed, B = Sat 15:00–20:00 → B rejected.
+2. Qty 1, A = 12:00–18:00, B = 18:00–22:00, zero buffers → allowed (half-open). With 60-min buffers → rejected.
+3. Qty 3, three overlapping confirmed → fourth rejected; a non-overlapping fourth → allowed.
+4. Pooled 100 chairs: 60 at 10–14, 60 at 15–19 → both OK (peak 60); 50 more at 13–16 → rejected (peak 110).
+5. Expired hold does not block; active hold does.
+6. Cancelled/released allocations do not block.
+7. Unit in maintenance excluded; other units still available.
+8. Org blackout date blocks everything.
+9. Multi-day (Fri 17:00 → Sun 12:00) conflicts with a Saturday booking.
+10. Overnight across DST change computes correct occupied period.
+11. **Race:** 10 concurrent `reserve_inventory` for the last unit → exactly 1 success, 9 × `INSUFFICIENT_AVAILABILITY`; same for pooled last-N.
+12. Cross-tenant: reserve org B's variant with org A context → rejected.
+
+## 7. Delivery / service areas
+
+```sql
+create table service_areas (
+  id                     uuid primary key default gen_random_uuid(),
+  organization_id        uuid not null references organizations(id) on delete cascade,
+  name                   text not null,                 -- "Zone A – Memphis metro"
+  delivery_fee_cents     bigint not null default 0 check (delivery_fee_cents >= 0),
+  minimum_order_cents    bigint check (minimum_order_cents >= 0),
+  requires_manual_review boolean not null default false,
+  priority               integer not null default 0,    -- most specific match wins
+  is_active              boolean not null default true,
+  unique (organization_id, id)
+);
+
+create table service_area_rules (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  service_area_id  uuid not null,
+  rule_type        text not null check (rule_type in ('postal_code','city')),  -- later: 'radius','mileage','polygon'
+  postal_code      text,
+  city             citext,
+  state            text,
+  foreign key (organization_id, service_area_id) references service_areas(organization_id, id) on delete cascade,
+  check ((rule_type = 'postal_code' and postal_code is not null)
+      or (rule_type = 'city' and city is not null and state is not null))
+);
+create unique index on service_area_rules (organization_id, postal_code) where rule_type = 'postal_code';
+```
+
+Resolution order: exact postal code → city+state → not served. Ties broken by `priority`. Result includes `requires_manual_review`, surfaced to the AI as "a team member will confirm delivery". Mileage support later adds `rule_type = 'mileage'` + params (base fee, per-mile rate, max miles) evaluated through a `DistanceProvider`.
+
+## 8. Pricing
+
+```sql
+create table pricing_rules (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  name             text not null,
+  rule_type        text not null check (rule_type in (
+                     'extra_hour','overnight','additional_day','quantity_tier',
+                     'date_surcharge','discount_percent','discount_fixed','minimum_charge')),
+  scope            text not null check (scope in ('organization','category','product','variant')),
+  category_id uuid, product_id uuid, variant_id uuid,
+  params           jsonb not null,           -- validated per rule_type by Zod (e.g. {"amount_cents":5000})
+  priority         integer not null default 0,
+  valid_from date, valid_to date,
+  discount_code    citext,                   -- null = automatic
+  is_active        boolean not null default true,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id),
+  foreign key (organization_id, category_id) references categories(organization_id, id),
+  foreign key (organization_id, product_id)  references products(organization_id, id),
+  foreign key (organization_id, variant_id)  references product_variants(organization_id, id)
+);
+
+create table tax_rates (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  name             text not null,             -- "TN state + local"
+  rate_bps         integer not null check (rate_bps between 0 and 5000),
+  applies_to_rentals  boolean not null default true,
+  applies_to_delivery boolean not null default false,
+  is_default       boolean not null default false,
+  is_active        boolean not null default true
+);
+```
+
+Base price is on the product/variant (`base_price_cents`, `included_duration_minutes`, `price_override_cents`) because every product has exactly one; rules modify it. `params` is JSONB **by design** here: each rule type has a different shape, the set is small and code-owned, and the Zod schema per `rule_type` is the contract (a DB `CHECK` validates required keys). Pricing results are not stored in `pricing_rules`; quotes store snapshots.
+
+## 9. Customers, events, quotes
+
+```sql
+create type quote_status as enum ('draft','sent','viewed','accepted','declined','expired','cancelled');
+create type indoor_outdoor as enum ('indoor','outdoor','both','unknown');
+
+create table customers (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  first_name text, last_name text,
+  email            citext,
+  phone_e164       text check (phone_e164 ~ '^\+[1-9][0-9]{7,14}$'),
+  sms_opt_in       boolean not null default false,
+  email_opt_in     boolean not null default false,
+  source           text not null default 'web',     -- 'web','assistant','admin','import'
+  notes            text,
+  archived_at      timestamptz,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id),
+  check (email is not null or phone_e164 is not null)
+);
+create unique index on customers (organization_id, email) where email is not null;
+create unique index on customers (organization_id, phone_e164) where phone_e164 is not null;
+
+create table events (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  customer_id      uuid,
+  event_type       event_type,
+  title            text,
+  event_date       date,                           -- local date (org tz)
+  start_time       time, end_time time,            -- local times as the customer states them
+  rental_period    tstzrange,                      -- computed server-side from date/time + org tz
+  address_line1 text, address_line2 text, city text, state text, postal_code text,
+  latitude numeric(9,6), longitude numeric(9,6),  -- routing seam
+  guest_count      integer check (guest_count >= 0),
+  children_count   integer check (children_count >= 0),
+  age_min smallint, age_max smallint check (age_max >= age_min),
+  budget_min_cents bigint, budget_max_cents bigint check (budget_max_cents >= budget_min_cents),
+  indoor_outdoor   indoor_outdoor not null default 'unknown',
+  water_available  boolean,
+  power_available  boolean,
+  surface_type     text,                           -- 'grass','concrete','asphalt','indoor_floor','other'
+  notes            text,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id),
+  foreign key (organization_id, customer_id) references customers(organization_id, id)
+);
+create index on events (organization_id, event_date);
+
+create table organization_counters (
+  organization_id uuid not null references organizations(id) on delete cascade,
+  counter_name    text not null,              -- 'quote'
+  next_value      bigint not null default 1000,
+  prefix          text,                       -- 'TJ-'
+  primary key (organization_id, counter_name)
+);
+
+create table quotes (
+  id                 uuid primary key default gen_random_uuid(),
+  organization_id    uuid not null,
+  quote_number       text not null,
+  customer_id        uuid,
+  event_id           uuid,
+  conversation_id    uuid,
+  status             quote_status not null default 'draft',
+  currency           char(3) not null,
+  subtotal_cents     bigint not null default 0,
+  discount_cents     bigint not null default 0,  -- stored positive, subtracted
+  delivery_cents     bigint not null default 0,
+  tax_cents          bigint not null default 0,
+  total_cents        bigint not null default 0,
+  pricing_snapshot   jsonb,                      -- full itemized engine output + engine_version
+  expires_at         timestamptz,
+  sent_at timestamptz, viewed_at timestamptz, accepted_at timestamptz,
+  created_by_type    text not null check (created_by_type in ('user','ai','system')),
+  created_by         uuid references auth.users(id),
+  customer_notes text, internal_notes text,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (organization_id, id),
+  unique (organization_id, quote_number),
+  foreign key (organization_id, customer_id) references customers(organization_id, id),
+  foreign key (organization_id, event_id)    references events(organization_id, id),
+  check (total_cents = subtotal_cents - discount_cents + delivery_cents + tax_cents)
+);
+
+create table quote_items (
+  id                  uuid primary key default gen_random_uuid(),
+  organization_id     uuid not null,
+  quote_id            uuid not null,
+  product_id          uuid not null,
+  variant_id          uuid not null,
+  quantity            integer not null check (quantity > 0),
+  rental_period       tstzrange,
+  product_name        text not null,             -- snapshot at quote time
+  unit_price_cents    bigint not null,
+  line_total_cents    bigint not null,
+  sort_order          integer not null default 0,
+  foreign key (organization_id, quote_id)   references quotes(organization_id, id) on delete cascade,
+  foreign key (organization_id, product_id) references products(organization_id, id),
+  foreign key (organization_id, variant_id) references product_variants(organization_id, id)
+);
+
+create table quote_charges (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  quote_id         uuid not null,
+  kind             text not null check (kind in ('extra_time','delivery','fee','discount','tax','adjustment')),
+  label            text not null,
+  amount_cents     bigint not null,              -- negative for discounts
+  source_rule_id   uuid,                         -- pricing_rules / tax_rates / service_areas id
+  foreign key (organization_id, quote_id) references quotes(organization_id, id) on delete cascade
+);
+```
+
+Quote totals are computed only by the pricing engine and written through `quoteService`; the `CHECK` ensures the stored totals are internally consistent. Status transitions are validated by a `BEFORE UPDATE` trigger (`draft→sent→viewed→accepted|declined|expired`, `* → cancelled` except from `accepted`), mirrored in `domain/quotes/stateMachine.ts`.
+
+## 10. Conversations & AI actions
+
+```sql
+create type conversation_status as enum ('active','awaiting_customer','needs_human','converted','closed');
+create type message_role as enum ('user','assistant','tool','system_note');
+
+create table conversations (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  channel          text not null default 'web',     -- 'web' now; 'sms','admin' later
+  visitor_id       text,                            -- opaque signed cookie id for anonymous visitors
+  customer_id      uuid,
+  event_id         uuid,
+  status           conversation_status not null default 'active',
+  event_draft      jsonb not null default '{}'::jsonb,  -- Zod-validated slot state; promoted to events row
+  prompt_version   text,
+  message_count    integer not null default 0,
+  tool_call_count  integer not null default 0,
+  token_usage      integer not null default 0,
+  last_message_at  timestamptz,
+  created_at timestamptz not null default now(),
+  unique (organization_id, id),
+  foreign key (organization_id, customer_id) references customers(organization_id, id),
+  foreign key (organization_id, event_id)    references events(organization_id, id)
+);
+
+create table conversation_messages (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  conversation_id  uuid not null,
+  role             message_role not null,
+  content          text,
+  structured       jsonb,                   -- recommendations/questions payload for assistant turns
+  created_at       timestamptz not null default now(),
+  foreign key (organization_id, conversation_id) references conversations(organization_id, id) on delete cascade
+);
+
+create table ai_actions (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  conversation_id  uuid,
+  message_id       uuid,
+  tool_name        text not null,
+  tool_call_id     text,                    -- provider id; idempotency key with conversation_id
+  input            jsonb,
+  output           jsonb,
+  status           text not null check (status in ('ok','rejected_validation','rejected_policy','error','guardrail_violation')),
+  error_code       text,
+  duration_ms      integer,
+  model            text,
+  prompt_version   text,
+  created_at       timestamptz not null default now(),
+  unique (conversation_id, tool_call_id),
+  foreign key (organization_id, conversation_id) references conversations(organization_id, id) on delete cascade
+);
+create index on ai_actions (organization_id, created_at desc);
+```
+
+`event_draft` is JSONB intentionally: it is transient, partially filled working state whose shape evolves with the assistant; it is promoted to a typed `events` row once `create_event` runs.
+
+## 11. Audit log
+
+```sql
+create table audit_logs (
+  id               bigint generated always as identity primary key,
+  organization_id  uuid references organizations(id),
+  actor_type       text not null check (actor_type in ('user','ai','system','public')),
+  actor_user_id    uuid,
+  ai_action_id     uuid,
+  action           text not null,          -- 'product.updated','quote.sent','member.role_changed'
+  entity_type      text not null,
+  entity_id        uuid,
+  changes          jsonb,                  -- {field: [old, new]} for trigger-written rows
+  ip_address       inet,
+  user_agent       text,
+  request_id       text,
+  created_at       timestamptz not null default now()
+);
+create index on audit_logs (organization_id, created_at desc);
+create index on audit_logs (organization_id, entity_type, entity_id);
+-- No UPDATE/DELETE privileges for any API role; inserts only via app.write_audit() or triggers.
+```
+
+## 12. RLS strategy
+
+### 12.1 Helper functions (schema `app`, not exposed via PostgREST)
+
+```sql
+create function app.is_member(p_org uuid) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (
+    select 1 from public.organization_members m
+    where m.organization_id = p_org and m.user_id = auth.uid() and m.status = 'active');
+$$;
+
+create function app.has_permission(p_org uuid, p_permission text) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (
+    select 1 from public.organization_members m
+    join public.role_permissions rp on rp.role = m.role
+    where m.organization_id = p_org and m.user_id = auth.uid()
+      and m.status = 'active' and rp.permission = p_permission);
+$$;
+```
+
+`SECURITY DEFINER` avoids recursive RLS on `organization_members`. Policies wrap calls as `(select app.has_permission(...))` so Postgres evaluates them once per statement (initPlan) rather than per row.
+
+### 12.2 Policy template (applied to every tenant table)
+
+```sql
+alter table products enable row level security;
+alter table products force row level security;
+
+create policy products_select on products for select to authenticated
+  using ((select app.has_permission(organization_id, 'org.read')));
+
+create policy products_insert on products for insert to authenticated
+  with check ((select app.has_permission(organization_id, 'catalog.write')));
+
+create policy products_update on products for update to authenticated
+  using      ((select app.has_permission(organization_id, 'catalog.write')))
+  with check ((select app.has_permission(organization_id, 'catalog.write')));
+
+create policy products_delete on products for delete to authenticated
+  using ((select app.has_permission(organization_id, 'catalog.write')));
+```
+
+Rules:
+
+- **Default deny:** RLS enabled + forced on every table in `public`; a CI check fails if any table lacks RLS or policies (query `pg_class.relrowsecurity`).
+- `organization_id` is **immutable** after insert (trigger), so an UPDATE cannot move a row to another tenant.
+- No policies for `anon` on base tables. Public catalog access goes through **explicit-column views** (`public_catalog_products`, `public_catalog_categories`, `public_product_media`) owned by a restricted role, filtered to `is_published and archived_at is null and organization.status = 'active'`, excluding `internal_notes`, costs, unit labels. `anon` gets `select` on the views only. (Supabase's linter flags security-definer views; these are the deliberate exceptions, documented in an ADR.)
+- `audit_logs`, `ai_actions`: select for `audit.read` / `conversations.read`; no insert/update/delete for API roles (writes via definer functions / system context).
+- `role_permissions`: readable by `authenticated`, writable by nobody via API.
+- `organizations`: members can select their orgs; update requires `settings.write`; insert only via `app.create_organization()` (makes caller owner) or system context.
+- **Storage:** bucket `product-media`, object path prefix `{organization_id}/…`; `storage.objects` policies check `app.has_permission((storage.foldername(name))[1]::uuid, 'catalog.write')` for writes; public read for published media via signed or public URLs (Decision D6).
+
+### 12.3 Isolation test matrix
+
+Automated: for every table in `public`, generate cases {anon, user-A-owner, user-A-staff, user-B-owner} × {select, insert, update, delete} on a row belonging to org A, and assert the expected outcome. The test enumerates tables from `information_schema` so **a new table without a policy/test fails CI**.
+
+## 13. Seed & import structure
+
+- `supabase/seed.sql` — deterministic dev fixtures: three fictional orgs ("Acme Party Rentals", "FunTime Rentals", "Test Tenant B"), users for each role, a small catalog, service areas, pricing rules. No real customer data.
+- `seeds/tenants/<slug>/` — a **tenant import bundle** (data only):
+  ```
+  organization.json    # name, slug, timezone, branding, contact
+  policies.json
+  categories.json
+  products.json        # typed fields matching §4; validated by the same Zod schemas as the admin UI
+  service_areas.json
+  pricing_rules.json
+  media/manifest.json  # file → product slug, alt text, sort order
+  ```
+- `scripts/import-tenant.ts <slug> --env=<env>` — validates the bundle, upserts by `(organization_id, slug)` (idempotent), uploads media, writes an audit entry. Tiky Jumps is onboarded with this same tool that any future tenant would use.
+
+## 14. Migration plan
+
+| Migration | Milestone |
+|---|---|
+| `0001_extensions_and_helpers` (extensions, `app` schema, `updated_at` trigger, immutable-org trigger) | M1 |
+| `0002_tenancy` (organizations, domains, settings, policies, profiles, members, invitations, role_permissions, RLS) | M1 |
+| `0003_audit` | M1 |
+| `0004_catalog` (categories, products, variants, units, media, relations, public views, storage policies) | M2 |
+| `0005_availability` (blocks, rules, reservations, allocations, functions) | M3 |
+| `0006_service_areas_pricing` (service areas, rules, pricing rules, tax rates) | M4 |
+| `0007_customers_events_quotes` (+ counters, status trigger) | M5 |
+| `0008_conversations_ai` | M7 |
