@@ -60,6 +60,87 @@ export type Database = {
           },
         ];
       };
+      availability_blocks: {
+        Row: {
+          created_at: string;
+          created_by: string | null;
+          id: string;
+          inventory_unit_id: string | null;
+          notes: string | null;
+          organization_id: string;
+          period: unknown;
+          product_id: string | null;
+          quantity: number | null;
+          reason: Database["public"]["Enums"]["block_reason"];
+          updated_at: string;
+          variant_id: string | null;
+        };
+        Insert: {
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          inventory_unit_id?: string | null;
+          notes?: string | null;
+          organization_id: string;
+          period: unknown;
+          product_id?: string | null;
+          quantity?: number | null;
+          reason: Database["public"]["Enums"]["block_reason"];
+          updated_at?: string;
+          variant_id?: string | null;
+        };
+        Update: {
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          inventory_unit_id?: string | null;
+          notes?: string | null;
+          organization_id?: string;
+          period?: unknown;
+          product_id?: string | null;
+          quantity?: number | null;
+          reason?: Database["public"]["Enums"]["block_reason"];
+          updated_at?: string;
+          variant_id?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "availability_blocks_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "availability_blocks_organization_id_inventory_unit_id_fkey";
+            columns: ["organization_id", "inventory_unit_id"];
+            isOneToOne: false;
+            referencedRelation: "inventory_units";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "availability_blocks_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "availability_blocks_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "availability_blocks_organization_id_variant_id_fkey";
+            columns: ["organization_id", "variant_id"];
+            isOneToOne: false;
+            referencedRelation: "product_variants";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
       categories: {
         Row: {
           archived_at: string | null;
@@ -520,6 +601,8 @@ export type Database = {
           free_delivery_miles: number | null;
           logo_mark_media_path: string | null;
           logo_media_path: string | null;
+          max_hold_renewals: number;
+          max_rental_days: number;
           maximum_delivery_miles: number | null;
           mileage_basis: Database["public"]["Enums"]["mileage_basis"];
           mileage_rounding_method: Database["public"]["Enums"]["mileage_rounding"];
@@ -561,6 +644,8 @@ export type Database = {
           free_delivery_miles?: number | null;
           logo_mark_media_path?: string | null;
           logo_media_path?: string | null;
+          max_hold_renewals?: number;
+          max_rental_days?: number;
           maximum_delivery_miles?: number | null;
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
           mileage_rounding_method?: Database["public"]["Enums"]["mileage_rounding"];
@@ -602,6 +687,8 @@ export type Database = {
           free_delivery_miles?: number | null;
           logo_mark_media_path?: string | null;
           logo_media_path?: string | null;
+          max_hold_renewals?: number;
+          max_rental_days?: number;
           maximum_delivery_miles?: number | null;
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
           mileage_rounding_method?: Database["public"]["Enums"]["mileage_rounding"];
@@ -1101,6 +1188,199 @@ export type Database = {
           },
         ];
       };
+      reservation_allocations: {
+        Row: {
+          created_at: string;
+          hold_expires_at: string | null;
+          id: string;
+          inventory_unit_id: string | null;
+          occupied_period: unknown;
+          organization_id: string;
+          quantity: number;
+          rental_period: unknown;
+          reservation_id: string;
+          status: Database["public"]["Enums"]["reservation_status"];
+          variant_id: string;
+        };
+        Insert: {
+          created_at?: string;
+          hold_expires_at?: string | null;
+          id?: string;
+          inventory_unit_id?: string | null;
+          occupied_period: unknown;
+          organization_id: string;
+          quantity?: number;
+          rental_period: unknown;
+          reservation_id: string;
+          status: Database["public"]["Enums"]["reservation_status"];
+          variant_id: string;
+        };
+        Update: {
+          created_at?: string;
+          hold_expires_at?: string | null;
+          id?: string;
+          inventory_unit_id?: string | null;
+          occupied_period?: unknown;
+          organization_id?: string;
+          quantity?: number;
+          rental_period?: unknown;
+          reservation_id?: string;
+          status?: Database["public"]["Enums"]["reservation_status"];
+          variant_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "reservation_allocations_organization_id_inventory_unit_id_fkey";
+            columns: ["organization_id", "inventory_unit_id"];
+            isOneToOne: false;
+            referencedRelation: "inventory_units";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "reservation_allocations_organization_id_reservation_id_fkey";
+            columns: ["organization_id", "reservation_id"];
+            isOneToOne: false;
+            referencedRelation: "reservations";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "reservation_allocations_organization_id_variant_id_fkey";
+            columns: ["organization_id", "variant_id"];
+            isOneToOne: false;
+            referencedRelation: "product_variants";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      reservation_flags: {
+        Row: {
+          availability_block_id: string | null;
+          created_at: string;
+          id: string;
+          kind: Database["public"]["Enums"]["reservation_flag_kind"];
+          message: string;
+          organization_id: string;
+          reservation_id: string;
+          resolved_at: string | null;
+          resolved_by: string | null;
+          status: string;
+          weather_block_id: string | null;
+        };
+        Insert: {
+          availability_block_id?: string | null;
+          created_at?: string;
+          id?: string;
+          kind: Database["public"]["Enums"]["reservation_flag_kind"];
+          message: string;
+          organization_id: string;
+          reservation_id: string;
+          resolved_at?: string | null;
+          resolved_by?: string | null;
+          status?: string;
+          weather_block_id?: string | null;
+        };
+        Update: {
+          availability_block_id?: string | null;
+          created_at?: string;
+          id?: string;
+          kind?: Database["public"]["Enums"]["reservation_flag_kind"];
+          message?: string;
+          organization_id?: string;
+          reservation_id?: string;
+          resolved_at?: string | null;
+          resolved_by?: string | null;
+          status?: string;
+          weather_block_id?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "reservation_flags_organization_id_availability_block_id_fkey";
+            columns: ["organization_id", "availability_block_id"];
+            isOneToOne: false;
+            referencedRelation: "availability_blocks";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "reservation_flags_organization_id_reservation_id_fkey";
+            columns: ["organization_id", "reservation_id"];
+            isOneToOne: false;
+            referencedRelation: "reservations";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "reservation_flags_organization_id_weather_block_id_fkey";
+            columns: ["organization_id", "weather_block_id"];
+            isOneToOne: false;
+            referencedRelation: "weather_blocks";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      reservations: {
+        Row: {
+          booking_request_id: string | null;
+          confirmed_at: string | null;
+          created_at: string;
+          created_by: string | null;
+          ended_at: string | null;
+          event_id: string | null;
+          hold_expires_at: string | null;
+          hold_renewals: number;
+          id: string;
+          notes: string | null;
+          organization_id: string;
+          quote_id: string | null;
+          replaced_by: string | null;
+          source: Database["public"]["Enums"]["reservation_source"];
+          status: Database["public"]["Enums"]["reservation_status"];
+          updated_at: string;
+        };
+        Insert: {
+          booking_request_id?: string | null;
+          confirmed_at?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          ended_at?: string | null;
+          event_id?: string | null;
+          hold_expires_at?: string | null;
+          hold_renewals?: number;
+          id?: string;
+          notes?: string | null;
+          organization_id: string;
+          quote_id?: string | null;
+          replaced_by?: string | null;
+          source: Database["public"]["Enums"]["reservation_source"];
+          status: Database["public"]["Enums"]["reservation_status"];
+          updated_at?: string;
+        };
+        Update: {
+          booking_request_id?: string | null;
+          confirmed_at?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          ended_at?: string | null;
+          event_id?: string | null;
+          hold_expires_at?: string | null;
+          hold_renewals?: number;
+          id?: string;
+          notes?: string | null;
+          organization_id?: string;
+          quote_id?: string | null;
+          replaced_by?: string | null;
+          source?: Database["public"]["Enums"]["reservation_source"];
+          status?: Database["public"]["Enums"]["reservation_status"];
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "reservations_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       role_permissions: {
         Row: {
           permission: string;
@@ -1142,6 +1422,131 @@ export type Database = {
           updated_at?: string;
         };
         Relationships: [];
+      };
+      weather_block_targets: {
+        Row: {
+          category_id: string | null;
+          organization_id: string;
+          product_id: string | null;
+          weather_block_id: string;
+        };
+        Insert: {
+          category_id?: string | null;
+          organization_id: string;
+          product_id?: string | null;
+          weather_block_id: string;
+        };
+        Update: {
+          category_id?: string | null;
+          organization_id?: string;
+          product_id?: string | null;
+          weather_block_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "weather_block_targets_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_block_targets_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_block_targets_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_block_targets_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_block_targets_organization_id_weather_block_id_fkey";
+            columns: ["organization_id", "weather_block_id"];
+            isOneToOne: false;
+            referencedRelation: "weather_blocks";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      weather_blocks: {
+        Row: {
+          confirmed_at: string | null;
+          confirmed_by: string | null;
+          created_at: string;
+          created_by: string | null;
+          hazard: Database["public"]["Enums"]["weather_hazard"];
+          id: string;
+          lifted_at: string | null;
+          lifted_by: string | null;
+          observed_unit: string | null;
+          observed_value: number | null;
+          organization_id: string;
+          period: unknown;
+          reason: string;
+          scope: Database["public"]["Enums"]["weather_block_scope"];
+          source: string;
+          status: Database["public"]["Enums"]["weather_block_status"];
+          updated_at: string;
+        };
+        Insert: {
+          confirmed_at?: string | null;
+          confirmed_by?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          hazard: Database["public"]["Enums"]["weather_hazard"];
+          id?: string;
+          lifted_at?: string | null;
+          lifted_by?: string | null;
+          observed_unit?: string | null;
+          observed_value?: number | null;
+          organization_id: string;
+          period: unknown;
+          reason: string;
+          scope?: Database["public"]["Enums"]["weather_block_scope"];
+          source?: string;
+          status?: Database["public"]["Enums"]["weather_block_status"];
+          updated_at?: string;
+        };
+        Update: {
+          confirmed_at?: string | null;
+          confirmed_by?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          hazard?: Database["public"]["Enums"]["weather_hazard"];
+          id?: string;
+          lifted_at?: string | null;
+          lifted_by?: string | null;
+          observed_unit?: string | null;
+          observed_value?: number | null;
+          organization_id?: string;
+          period?: unknown;
+          reason?: string;
+          scope?: Database["public"]["Enums"]["weather_block_scope"];
+          source?: string;
+          status?: Database["public"]["Enums"]["weather_block_status"];
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "weather_blocks_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       weather_hazard_rules: {
         Row: {
@@ -1354,7 +1759,45 @@ export type Database = {
     };
     Functions: {
       accept_invitation: { Args: { p_token: string }; Returns: string };
+      check_availability: {
+        Args: {
+          p_end: string;
+          p_organization_id: string;
+          p_override_lead_time?: boolean;
+          p_quantity?: number;
+          p_start: string;
+          p_variant_id: string;
+        };
+        Returns: {
+          available: boolean;
+          available_quantity: number;
+          capacity: number;
+          occupied_end: string;
+          occupied_start: string;
+          reasons: string[];
+          requested_quantity: number;
+        }[];
+      };
+      check_public_availability: {
+        Args: {
+          p_end: string;
+          p_organization_id: string;
+          p_quantity?: number;
+          p_start: string;
+          p_variant_id: string;
+        };
+        Returns: {
+          available: boolean;
+          limited: boolean;
+          reasons: string[];
+        }[];
+      };
       commit_product_import: { Args: { p_batch_id: string }; Returns: Json };
+      confirm_reservation: {
+        Args: { p_ignore_weather?: boolean; p_reservation_id: string };
+        Returns: undefined;
+      };
+      confirm_weather_block: { Args: { p_weather_block_id: string }; Returns: number };
       create_organization: {
         Args: {
           p_legal_name?: string;
@@ -1365,6 +1808,7 @@ export type Database = {
         };
         Returns: string;
       };
+      lift_weather_block: { Args: { p_weather_block_id: string }; Returns: undefined };
       record_audit_event: {
         Args: {
           p_action: string;
@@ -1375,6 +1819,23 @@ export type Database = {
           p_request_id?: string;
         };
         Returns: number;
+      };
+      release_reservation: {
+        Args: { p_reservation_id: string };
+        Returns: Database["public"]["Enums"]["reservation_status"];
+      };
+      renew_hold: { Args: { p_reservation_id: string }; Returns: string };
+      reserve_inventory: {
+        Args: {
+          p_items: Json;
+          p_notes?: string;
+          p_organization_id: string;
+          p_override_lead_time?: boolean;
+          p_replaces_reservation_id?: string;
+          p_source?: Database["public"]["Enums"]["reservation_source"];
+          p_status?: Database["public"]["Enums"]["reservation_status"];
+        };
+        Returns: string;
       };
       resolve_organization_by_host: {
         Args: { p_host: string };
@@ -1416,9 +1877,11 @@ export type Database = {
           website_url: string;
         }[];
       };
+      sweep_expired_holds: { Args: Record<PropertyKey, never>; Returns: number };
     };
     Enums: {
       audit_actor_type: "user" | "ai" | "system" | "public";
+      block_reason: "blackout" | "maintenance" | "repair" | "private_use" | "staff_hold" | "other";
       event_type:
         | "birthday"
         | "school"
@@ -1443,7 +1906,12 @@ export type Database = {
       org_status: "onboarding" | "active" | "suspended" | "closed";
       pricing_type: "per_event" | "hourly" | "daily" | "per_unit";
       product_relation_type: "addon" | "recommended" | "requires";
+      reservation_flag_kind: "availability_block" | "weather_block";
+      reservation_source: "booking_request" | "manual" | "import";
+      reservation_status: "held" | "confirmed" | "released" | "cancelled" | "completed";
       tracking_mode: "serialized" | "pooled";
+      weather_block_scope: "all_sensitive" | "selected";
+      weather_block_status: "proposed" | "confirmed" | "lifted";
       weather_hazard: "wind" | "lightning" | "rain" | "severe_weather" | "temperature" | "custom";
     };
     CompositeTypes: {
@@ -1557,6 +2025,7 @@ export const Constants = {
   public: {
     Enums: {
       audit_actor_type: ["user", "ai", "system", "public"],
+      block_reason: ["blackout", "maintenance", "repair", "private_use", "staff_hold", "other"],
       event_type: [
         "birthday",
         "school",
@@ -1582,7 +2051,12 @@ export const Constants = {
       org_status: ["onboarding", "active", "suspended", "closed"],
       pricing_type: ["per_event", "hourly", "daily", "per_unit"],
       product_relation_type: ["addon", "recommended", "requires"],
+      reservation_flag_kind: ["availability_block", "weather_block"],
+      reservation_source: ["booking_request", "manual", "import"],
+      reservation_status: ["held", "confirmed", "released", "cancelled", "completed"],
       tracking_mode: ["serialized", "pooled"],
+      weather_block_scope: ["all_sensitive", "selected"],
+      weather_block_status: ["proposed", "confirmed", "lifted"],
       weather_hazard: ["wind", "lightning", "rain", "severe_weather", "temperature", "custom"],
     },
   },

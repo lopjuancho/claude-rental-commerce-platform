@@ -19,6 +19,41 @@ function ensureImportBatch(org: TestOrg): Promise<string> {
   return entry;
 }
 
+const reservationCache = new Map<string, Promise<string>>();
+function ensureReservation(org: TestOrg): Promise<string> {
+  let entry = reservationCache.get(org.id);
+  if (!entry) {
+    entry = (async () => {
+      const c = await ensureCatalog(org);
+      const r = await admin<{ id: string }>(
+        "insert into public.reservations (organization_id, source, status) values ($1, 'manual', 'confirmed') returning id",
+        [org.id],
+      );
+      await admin(
+        `insert into public.reservation_allocations (organization_id, reservation_id, variant_id, quantity, rental_period, occupied_period, status)
+         values ($1, $2, $3, 1, tstzrange('2030-03-01 12:00Z', '2030-03-01 16:00Z'), tstzrange('2030-03-01 11:00Z', '2030-03-01 17:00Z'), 'confirmed')`,
+        [org.id, r.rows[0]!.id, c.variantId],
+      );
+      return r.rows[0]!.id;
+    })();
+    reservationCache.set(org.id, entry);
+  }
+  return entry;
+}
+
+const weatherCache = new Map<string, Promise<string>>();
+function ensureWeatherBlock(org: TestOrg): Promise<string> {
+  let entry = weatherCache.get(org.id);
+  if (!entry) {
+    entry = admin<{ id: string }>(
+      "insert into public.weather_blocks (organization_id, hazard, period, reason) values ($1, 'wind', tstzrange('2030-04-01', '2030-04-02'), 'test') returning id",
+      [org.id],
+    ).then((r) => r.rows[0]!.id);
+    weatherCache.set(org.id, entry);
+  }
+  return entry;
+}
+
 export const GLOBAL_TABLES = ["role_permissions"] as const;
 
 /** Tables keyed to a user rather than an organization; covered by dedicated tests. */
@@ -189,6 +224,59 @@ export const TENANT_TABLES: Record<
       await admin(
         "insert into public.weather_hazard_rules (organization_id, category_id, hazard, sensitive, threshold_value, threshold_unit) values ($1, $2, 'wind', true, 15, 'mph') on conflict do nothing",
         [org.id, c.categoryId],
+      );
+    },
+  },
+  availability_blocks: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const c = await ensureCatalog(org);
+      await admin(
+        "insert into public.availability_blocks (organization_id, product_id, period, reason) values ($1, $2, tstzrange('2030-01-01', '2030-01-02'), 'maintenance')",
+        [org.id, c.productId],
+      );
+    },
+  },
+  reservations: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureReservation(org);
+    },
+  },
+  reservation_allocations: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureReservation(org);
+    },
+  },
+  reservation_flags: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const rid = await ensureReservation(org);
+      const c = await ensureCatalog(org);
+      await admin(
+        `with b as (insert into public.availability_blocks (organization_id, product_id, period, reason)
+                    values ($1, $2, tstzrange('2030-02-01', '2030-02-02'), 'other') returning id)
+         insert into public.reservation_flags (organization_id, reservation_id, kind, availability_block_id, message)
+         select $1, $3, 'availability_block', b.id, 'test' from b on conflict do nothing`,
+        [org.id, c.productId, rid],
+      );
+    },
+  },
+  weather_blocks: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureWeatherBlock(org);
+    },
+  },
+  weather_block_targets: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const w = await ensureWeatherBlock(org);
+      const c = await ensureCatalog(org);
+      await admin(
+        "insert into public.weather_block_targets (organization_id, weather_block_id, product_id) values ($1, $2, $3) on conflict do nothing",
+        [org.id, w, c.productId],
       );
     },
   },

@@ -72,6 +72,7 @@ describe("schema coverage", () => {
       where n.nspname = 'public' and has_function_privilege('anon', p.oid, 'execute')
       order by 1`);
     expect(rows.map((r) => r.proname)).toEqual([
+      "check_public_availability",
       "resolve_organization_by_host",
       "resolve_organization_by_slug",
     ]);

@@ -7,7 +7,7 @@ import { testDatabaseUrl } from "./config";
  * transaction as the `anon`, `authenticated` or `service_role` role with JWT claims set in
  * `request.jwt.claims`, and is rolled back unless `commit: true`.
  */
-export const pool = new pg.Pool({ connectionString: testDatabaseUrl(), max: 10 });
+export const pool = new pg.Pool({ connectionString: testDatabaseUrl(), max: 25 });
 
 export type Actor =
   { kind: "anon" } | { kind: "service" } | { kind: "user"; id: string; email: string };
