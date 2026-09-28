@@ -77,8 +77,6 @@ export type Database = {
           sort_order: number;
           teardown_buffer_minutes: number | null;
           updated_at: string;
-          wind_sensitive: boolean | null;
-          wind_threshold_mph: number | null;
         };
         Insert: {
           archived_at?: string | null;
@@ -96,8 +94,6 @@ export type Database = {
           sort_order?: number;
           teardown_buffer_minutes?: number | null;
           updated_at?: string;
-          wind_sensitive?: boolean | null;
-          wind_threshold_mph?: number | null;
         };
         Update: {
           archived_at?: string | null;
@@ -115,8 +111,6 @@ export type Database = {
           sort_order?: number;
           teardown_buffer_minutes?: number | null;
           updated_at?: string;
-          wind_sensitive?: boolean | null;
-          wind_threshold_mph?: number | null;
         };
         Relationships: [
           {
@@ -464,6 +458,7 @@ export type Database = {
           body: string;
           created_at: string;
           id: string;
+          is_placeholder: boolean;
           is_published: boolean;
           organization_id: string;
           policy_type: string;
@@ -475,6 +470,7 @@ export type Database = {
           body: string;
           created_at?: string;
           id?: string;
+          is_placeholder?: boolean;
           is_published?: boolean;
           organization_id: string;
           policy_type: string;
@@ -486,6 +482,7 @@ export type Database = {
           body?: string;
           created_at?: string;
           id?: string;
+          is_placeholder?: boolean;
           is_published?: boolean;
           organization_id?: string;
           policy_type?: string;
@@ -505,6 +502,7 @@ export type Database = {
       };
       organization_settings: {
         Row: {
+          accent_color: string | null;
           address_line1: string | null;
           assistant_display_name: string | null;
           assistant_enabled: boolean;
@@ -518,7 +516,9 @@ export type Database = {
           default_rental_duration_minutes: number;
           default_setup_buffer_minutes: number;
           default_teardown_buffer_minutes: number;
+          favicon_media_path: string | null;
           free_delivery_miles: number | null;
+          logo_mark_media_path: string | null;
           logo_media_path: string | null;
           maximum_delivery_miles: number | null;
           mileage_basis: Database["public"]["Enums"]["mileage_basis"];
@@ -541,9 +541,9 @@ export type Database = {
           state: string | null;
           updated_at: string;
           website_url: string | null;
-          wind_threshold_mph: number | null;
         };
         Insert: {
+          accent_color?: string | null;
           address_line1?: string | null;
           assistant_display_name?: string | null;
           assistant_enabled?: boolean;
@@ -557,7 +557,9 @@ export type Database = {
           default_rental_duration_minutes?: number;
           default_setup_buffer_minutes?: number;
           default_teardown_buffer_minutes?: number;
+          favicon_media_path?: string | null;
           free_delivery_miles?: number | null;
+          logo_mark_media_path?: string | null;
           logo_media_path?: string | null;
           maximum_delivery_miles?: number | null;
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
@@ -580,9 +582,9 @@ export type Database = {
           state?: string | null;
           updated_at?: string;
           website_url?: string | null;
-          wind_threshold_mph?: number | null;
         };
         Update: {
+          accent_color?: string | null;
           address_line1?: string | null;
           assistant_display_name?: string | null;
           assistant_enabled?: boolean;
@@ -596,7 +598,9 @@ export type Database = {
           default_rental_duration_minutes?: number;
           default_setup_buffer_minutes?: number;
           default_teardown_buffer_minutes?: number;
+          favicon_media_path?: string | null;
           free_delivery_miles?: number | null;
+          logo_mark_media_path?: string | null;
           logo_media_path?: string | null;
           maximum_delivery_miles?: number | null;
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
@@ -619,7 +623,6 @@ export type Database = {
           state?: string | null;
           updated_at?: string;
           website_url?: string | null;
-          wind_threshold_mph?: number | null;
         };
         Relationships: [
           {
@@ -971,8 +974,6 @@ export type Database = {
           updated_at: string;
           water_required: boolean;
           wet_allowed: boolean;
-          wind_sensitive: boolean | null;
-          wind_threshold_mph: number | null;
         };
         Insert: {
           allowed_surfaces?: string[];
@@ -1024,8 +1025,6 @@ export type Database = {
           updated_at?: string;
           water_required?: boolean;
           wet_allowed?: boolean;
-          wind_sensitive?: boolean | null;
-          wind_threshold_mph?: number | null;
         };
         Update: {
           allowed_surfaces?: string[];
@@ -1077,8 +1076,6 @@ export type Database = {
           updated_at?: string;
           water_required?: boolean;
           wet_allowed?: boolean;
-          wind_sensitive?: boolean | null;
-          wind_threshold_mph?: number | null;
         };
         Relationships: [
           {
@@ -1145,6 +1142,84 @@ export type Database = {
           updated_at?: string;
         };
         Relationships: [];
+      };
+      weather_hazard_rules: {
+        Row: {
+          category_id: string | null;
+          created_at: string;
+          hazard: Database["public"]["Enums"]["weather_hazard"];
+          id: string;
+          notes: string | null;
+          organization_id: string;
+          product_id: string | null;
+          sensitive: boolean;
+          threshold_unit: string | null;
+          threshold_value: number | null;
+          updated_at: string;
+        };
+        Insert: {
+          category_id?: string | null;
+          created_at?: string;
+          hazard: Database["public"]["Enums"]["weather_hazard"];
+          id?: string;
+          notes?: string | null;
+          organization_id: string;
+          product_id?: string | null;
+          sensitive: boolean;
+          threshold_unit?: string | null;
+          threshold_value?: number | null;
+          updated_at?: string;
+        };
+        Update: {
+          category_id?: string | null;
+          created_at?: string;
+          hazard?: Database["public"]["Enums"]["weather_hazard"];
+          id?: string;
+          notes?: string | null;
+          organization_id?: string;
+          product_id?: string | null;
+          sensitive?: boolean;
+          threshold_unit?: string | null;
+          threshold_value?: number | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "weather_hazard_rules_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_hazard_rules_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_hazard_rules_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "weather_hazard_rules_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "weather_hazard_rules_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
       };
     };
     Views: {
@@ -1249,9 +1324,8 @@ export type Database = {
           space_width_ft: number | null;
           tags: string[] | null;
           water_required: boolean | null;
+          weather_sensitivities: Json | null;
           wet_allowed: boolean | null;
-          wind_sensitive: boolean | null;
-          wind_threshold_mph: number | null;
         };
         Relationships: [
           {
@@ -1305,31 +1379,41 @@ export type Database = {
       resolve_organization_by_host: {
         Args: { p_host: string };
         Returns: {
+          accent_color: string;
           contact_email: string;
           contact_phone: string;
           currency: string;
+          favicon_media_path: string;
           id: string;
+          logo_mark_media_path: string;
           logo_media_path: string;
           name: string;
           primary_color: string;
           secondary_color: string;
           slug: string;
+          sms_phone: string;
           timezone: string;
+          website_url: string;
         }[];
       };
       resolve_organization_by_slug: {
         Args: { p_slug: string };
         Returns: {
+          accent_color: string;
           contact_email: string;
           contact_phone: string;
           currency: string;
+          favicon_media_path: string;
           id: string;
+          logo_mark_media_path: string;
           logo_media_path: string;
           name: string;
           primary_color: string;
           secondary_color: string;
           slug: string;
+          sms_phone: string;
           timezone: string;
+          website_url: string;
         }[];
       };
     };
@@ -1360,6 +1444,7 @@ export type Database = {
       pricing_type: "per_event" | "hourly" | "daily" | "per_unit";
       product_relation_type: "addon" | "recommended" | "requires";
       tracking_mode: "serialized" | "pooled";
+      weather_hazard: "wind" | "lightning" | "rain" | "severe_weather" | "temperature" | "custom";
     };
     CompositeTypes: {
       [_ in never]: never;
@@ -1498,6 +1583,7 @@ export const Constants = {
       pricing_type: ["per_event", "hourly", "daily", "per_unit"],
       product_relation_type: ["addon", "recommended", "requires"],
       tracking_mode: ["serialized", "pooled"],
+      weather_hazard: ["wind", "lightning", "rain", "severe_weather", "temperature", "custom"],
     },
   },
 } as const;

@@ -182,6 +182,16 @@ export const TENANT_TABLES: Record<
       );
     },
   },
+  weather_hazard_rules: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const c = await ensureCatalog(org);
+      await admin(
+        "insert into public.weather_hazard_rules (organization_id, category_id, hazard, sensitive, threshold_value, threshold_unit) values ($1, $2, 'wind', true, 15, 'mph') on conflict do nothing",
+        [org.id, c.categoryId],
+      );
+    },
+  },
   organization_invitations: {
     orgColumn: "organization_id",
     ensureRow: async (org) => {

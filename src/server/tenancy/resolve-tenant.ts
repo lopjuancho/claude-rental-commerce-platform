@@ -18,12 +18,21 @@ export interface ResolvedTenant {
   readonly name: string;
   readonly timezone: string;
   readonly currency: string;
+  /** All optional: a tenant without branding renders with neutral platform defaults. */
   readonly branding: {
-    readonly logoMediaPath: string | null;
+    readonly logoPath: string | null;
+    readonly logoMarkPath: string | null;
+    readonly faviconPath: string | null;
     readonly primaryColor: string | null;
     readonly secondaryColor: string | null;
+    readonly accentColor: string | null;
   };
-  readonly contact: { readonly phone: string | null; readonly email: string | null };
+  readonly contact: {
+    readonly phone: string | null;
+    readonly smsPhone: string | null;
+    readonly email: string | null;
+    readonly websiteUrl: string | null;
+  };
   readonly resolvedBy: "host" | "dev-slug";
 }
 
@@ -34,10 +43,15 @@ interface TenantRow {
   timezone: string;
   currency: string;
   logo_media_path: string | null;
+  logo_mark_media_path: string | null;
+  favicon_media_path: string | null;
   primary_color: string | null;
   secondary_color: string | null;
+  accent_color: string | null;
   contact_phone: string | null;
+  sms_phone: string | null;
   contact_email: string | null;
+  website_url: string | null;
 }
 
 function toTenant(row: TenantRow, resolvedBy: ResolvedTenant["resolvedBy"]): ResolvedTenant {
@@ -48,11 +62,19 @@ function toTenant(row: TenantRow, resolvedBy: ResolvedTenant["resolvedBy"]): Res
     timezone: row.timezone,
     currency: row.currency,
     branding: {
-      logoMediaPath: row.logo_media_path,
+      logoPath: row.logo_media_path,
+      logoMarkPath: row.logo_mark_media_path,
+      faviconPath: row.favicon_media_path,
       primaryColor: row.primary_color,
       secondaryColor: row.secondary_color,
+      accentColor: row.accent_color,
     },
-    contact: { phone: row.contact_phone, email: row.contact_email },
+    contact: {
+      phone: row.contact_phone,
+      smsPhone: row.sms_phone,
+      email: row.contact_email,
+      websiteUrl: row.website_url,
+    },
     resolvedBy,
   } as ResolvedTenant;
 }

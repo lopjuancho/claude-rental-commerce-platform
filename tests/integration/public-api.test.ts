@@ -39,16 +39,21 @@ describe("resolve_organization_by_host (anonymous tenant resolution)", () => {
     const [row] = await resolve(`${active.slug}.example.test`);
     expect(Object.keys(row as object).sort()).toEqual(
       [
+        "accent_color",
         "contact_email",
         "contact_phone",
         "currency",
+        "favicon_media_path",
         "id",
+        "logo_mark_media_path",
         "logo_media_path",
         "name",
         "primary_color",
         "secondary_color",
         "slug",
+        "sms_phone",
         "timezone",
+        "website_url",
       ].sort(),
     );
   });

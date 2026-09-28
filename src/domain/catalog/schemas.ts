@@ -31,8 +31,6 @@ export const categoryInputSchema = z.object({
   teardownBufferMinutes: minutes.nullish(),
   includedDurationMinutes: z.int().positive().max(20160).nullish(),
   overnightAllowed: z.boolean().nullish(),
-  windSensitive: z.boolean().nullish(),
-  windThresholdMph: z.int().positive().max(200).nullish(),
 });
 export type CategoryInput = z.infer<typeof categoryInputSchema>;
 
@@ -55,8 +53,6 @@ export const productInputSchema = z
     teardownBufferMinutes: minutes.nullish(),
     minBookingLeadTimeMinutes: z.int().min(0).max(525600).nullish(),
     overnightAllowed: z.boolean().nullish(),
-    windSensitive: z.boolean().nullish(),
-    windThresholdMph: z.int().positive().max(200).nullish(),
     wetAllowed: z.boolean().default(false),
     dryAllowed: z.boolean().default(true),
     minimumAge: z.int().min(0).max(120).nullish(),

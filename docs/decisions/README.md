@@ -14,5 +14,6 @@ Decision IDs (D1…) refer to the list in `ARCHITECTURE.md` §12.
 | [0007](./0007-local-db-testing.md) | DB integration tests run against Postgres with a Supabase auth shim when Docker images are unavailable | Accepted 2026-09-28 |
 | [0008](./0008-edge-middleware-on-cloudflare.md) | Edge `middleware.ts` instead of Node `proxy.ts` until OpenNext supports it officially | Accepted 2026-09-28 |
 | [0009](./0009-delivery-distance-pricing.md) | D15: road-distance delivery pricing behind a `DistanceProvider`; manual review instead of guessed fees | Accepted 2026-09-28 |
-| [0010](./0010-wind-safety.md) | D16: wind sensitivity + thresholds as configuration; staff-confirmed weather blocks; no automatic cancellations | Accepted 2026-09-28 |
+| [0010](./0010-wind-safety.md) | D16: per-hazard weather rules (wind, lightning, rain, severe weather, temperature, custom); staff-confirmed weather blocks; no automatic cancellations | Accepted 2026-09-28 |
 | [0011](./0011-import-adapters.md) | Import adapters map source formats (ERS is one) onto the canonical product model | Accepted 2026-09-28 |
+| [0012](./0012-branding-and-policies.md) | Tenant branding assets (logo, mark, favicon, 3 colours) and unpublishable placeholder policies | Accepted 2026-09-28 |

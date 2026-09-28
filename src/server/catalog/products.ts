@@ -28,8 +28,6 @@ function toRow(p: ProductInput) {
     teardown_buffer_minutes: p.teardownBufferMinutes ?? null,
     min_booking_lead_time_minutes: p.minBookingLeadTimeMinutes ?? null,
     overnight_allowed: p.overnightAllowed ?? null,
-    wind_sensitive: p.windSensitive ?? null,
-    wind_threshold_mph: p.windThresholdMph ?? null,
     wet_allowed: p.wetAllowed,
     dry_allowed: p.dryAllowed,
     minimum_age: p.minimumAge ?? null,

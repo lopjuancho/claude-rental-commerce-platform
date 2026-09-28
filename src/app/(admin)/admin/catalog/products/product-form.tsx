@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
+import { type WeatherRuleValue, WeatherRulesEditor } from "@/components/weather-rules-editor";
 import {
   ANCHORING_METHODS,
   EVENT_TYPES,
@@ -17,7 +18,10 @@ import type { Database } from "@/types/database";
 import { saveProductAction } from "./actions";
 
 type ProductRow = Database["public"]["Tables"]["products"]["Row"];
-export type ProductFormValues = Partial<ProductRow> & { categoryIds?: string[] };
+export type ProductFormValues = Partial<ProductRow> & {
+  categoryIds?: string[];
+  weatherRules?: WeatherRuleValue[];
+};
 
 const hours = (minutes: number | null | undefined) => (minutes == null ? "" : String(minutes / 60));
 const money = (cents: number | null | undefined) => (cents == null ? "" : (cents / 100).toFixed(2));
@@ -125,7 +129,7 @@ export function ProductForm({
             <FormField
               id="primaryCategoryId"
               label="Primary category"
-              hint="Drives category-level rules such as included hours and wind sensitivity."
+              hint="Drives category-level rules such as included hours and weather sensitivity."
             >
               <NativeSelect
                 id="primaryCategoryId"
@@ -431,22 +435,18 @@ export function ProductForm({
               label="Overnight allowed"
               value={v.overnight_allowed}
             />
-            <TriStateField
-              id="windSensitive"
-              name="windSensitive"
-              label="Wind sensitive"
-              value={v.wind_sensitive}
+          </div>
+          <div className="grid gap-2">
+            <span className="text-sm font-semibold">Weather sensitivity</span>
+            <p className="text-xs text-muted-foreground">
+              Leave on “Category rule” unless the manufacturer specifies something different for
+              this item.
+            </p>
+            <WeatherRulesEditor
+              rules={v.weatherRules ?? []}
+              inheritLabel="Category rule"
+              disabled={!canWrite}
             />
-            <FormField id="windThresholdMph" label="Wind threshold (mph)">
-              <Input
-                id="windThresholdMph"
-                name="windThresholdMph"
-                type="number"
-                min="1"
-                max="200"
-                defaultValue={v.wind_threshold_mph ?? ""}
-              />
-            </FormField>
           </div>
         </Section>
 

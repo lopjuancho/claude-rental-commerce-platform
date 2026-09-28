@@ -21,6 +21,7 @@ import {
   setVariantInventory,
   updateProduct,
 } from "@/server/catalog/products";
+import { readHazardRuleForm, saveHazardRules } from "@/server/catalog/weather-rules";
 import { FormReader } from "@/server/forms";
 
 function readProduct(fd: FormData) {
@@ -45,8 +46,6 @@ function readProduct(fd: FormData) {
     teardownBufferMinutes: f.int("teardownBufferMinutes"),
     minBookingLeadTimeMinutes: f.hoursAsMinutes("leadTimeHours"),
     overnightAllowed: f.triState("overnightAllowed"),
-    windSensitive: f.triState("windSensitive"),
-    windThresholdMph: f.int("windThresholdMph"),
     wetAllowed: f.checkbox("wetAllowed"),
     dryAllowed: f.checkbox("dryAllowed"),
     minimumAge: f.int("minimumAge"),
@@ -80,11 +79,13 @@ export async function saveProductAction(_prev: FormState, fd: FormData): Promise
     const id = new FormReader(fd).text("id");
     if (id) {
       await updateProduct(z.uuid().parse(id), readProduct(fd));
+      await saveHazardRules({ level: "product", productId: id }, readHazardRuleForm(fd));
       revalidatePath(`/admin/catalog/products/${id}`);
       revalidatePath("/admin/catalog");
       return { status: "success", message: "Product saved." };
     }
     createdId = await createProduct(readProduct(fd));
+    await saveHazardRules({ level: "product", productId: createdId }, readHazardRuleForm(fd));
   } catch (error) {
     return toFormError(error);
   }

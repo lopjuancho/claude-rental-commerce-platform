@@ -10,7 +10,7 @@ export async function listCategories() {
   const { data, error } = await db
     .from("categories")
     .select(
-      "id, parent_id, name, slug, description, sort_order, is_published, setup_buffer_minutes, teardown_buffer_minutes, included_duration_minutes, overnight_allowed, wind_sensitive, wind_threshold_mph, archived_at",
+      "id, parent_id, name, slug, description, sort_order, is_published, setup_buffer_minutes, teardown_buffer_minutes, included_duration_minutes, overnight_allowed, archived_at",
     )
     .eq("organization_id", ctx.organizationId)
     .is("archived_at", null)
@@ -34,8 +34,6 @@ function toRow(input: ReturnType<typeof categoryInputSchema.parse>) {
     teardown_buffer_minutes: input.teardownBufferMinutes ?? null,
     included_duration_minutes: input.includedDurationMinutes ?? null,
     overnight_allowed: input.overnightAllowed ?? null,
-    wind_sensitive: input.windSensitive ?? null,
-    wind_threshold_mph: input.windThresholdMph ?? null,
   };
 }
 

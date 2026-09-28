@@ -44,6 +44,7 @@ export async function applyTenantBundle(
     const settings: Record<string, unknown> = {
       primary_color: s.primaryColor,
       secondary_color: s.secondaryColor,
+      accent_color: s.accentColor,
       contact_phone: s.contactPhone,
       sms_phone: s.smsPhone,
       contact_email: s.contactEmail,
@@ -53,7 +54,6 @@ export async function applyTenantBundle(
       default_rental_duration_minutes: s.defaultRentalDurationMinutes,
       min_booking_lead_time_minutes: s.minBookingLeadTimeMinutes,
       overnight_allowed: s.overnightAllowed,
-      wind_threshold_mph: s.windThresholdMph,
       quote_valid_days: s.quoteValidDays,
       booking_hold_minutes: s.bookingHoldMinutes,
       primary_depot_address_line1: s.primaryDepot?.addressLine1,
@@ -91,17 +91,38 @@ export async function applyTenantBundle(
       }
     }
 
-    for (const c of bundle.categories) {
+    const upsertRule = async (
+      rule: TenantBundle["weatherRules"][number],
+      categoryId: string | null,
+    ) => {
       await db.query(
+        `insert into public.weather_hazard_rules (organization_id, category_id, hazard, sensitive, threshold_value, threshold_unit)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (organization_id, category_id, product_id, hazard) do update set
+           sensitive = excluded.sensitive, threshold_value = excluded.threshold_value, threshold_unit = excluded.threshold_unit`,
+        [
+          organizationId,
+          categoryId,
+          rule.hazard,
+          rule.sensitive,
+          rule.thresholdValue ?? null,
+          rule.thresholdUnit ?? null,
+        ],
+      );
+    };
+    for (const rule of bundle.weatherRules) await upsertRule(rule, null);
+
+    for (const c of bundle.categories) {
+      const category = await db.query<{ id: string }>(
         `insert into public.categories (organization_id, name, slug, sort_order, included_duration_minutes, setup_buffer_minutes,
-                                        teardown_buffer_minutes, overnight_allowed, wind_sensitive, wind_threshold_mph)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                        teardown_buffer_minutes, overnight_allowed)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
          on conflict (organization_id, slug) do update set
            name = excluded.name, sort_order = excluded.sort_order,
            included_duration_minutes = excluded.included_duration_minutes,
            setup_buffer_minutes = excluded.setup_buffer_minutes, teardown_buffer_minutes = excluded.teardown_buffer_minutes,
-           overnight_allowed = excluded.overnight_allowed, wind_sensitive = excluded.wind_sensitive,
-           wind_threshold_mph = excluded.wind_threshold_mph`,
+           overnight_allowed = excluded.overnight_allowed
+         returning id`,
         [
           organizationId,
           c.name,
@@ -111,21 +132,32 @@ export async function applyTenantBundle(
           c.setupBufferMinutes ?? null,
           c.teardownBufferMinutes ?? null,
           c.overnightAllowed ?? null,
-          c.windSensitive ?? null,
-          c.windThresholdMph ?? null,
         ],
       );
+      for (const rule of c.weather) await upsertRule(rule, category.rows[0]!.id);
     }
 
     for (const p of bundle.policies) {
+      if (p.placeholder) {
+        // Never overwrite real wording with a placeholder.
+        await db.query(
+          `insert into public.organization_policies (organization_id, policy_type, title, body, is_published, is_placeholder)
+           select $1, $2, $3, $4, false, true
+           where not exists (select 1 from public.organization_policies where organization_id = $1 and policy_type = $2)`,
+          [organizationId, p.type, p.title, p.body],
+        );
+        continue;
+      }
       const found = await db.query<{ id: string }>(
-        "select id from public.organization_policies where organization_id = $1 and policy_type = $2 and title = $3",
-        [organizationId, p.type, p.title],
+        "select id from public.organization_policies where organization_id = $1 and policy_type = $2 order by is_placeholder, created_at limit 1",
+        [organizationId, p.type],
       );
       if (found.rows[0]) {
         await db.query(
-          "update public.organization_policies set version = version + (body <> $2)::int, body = $2, is_published = $3 where id = $1",
-          [found.rows[0].id, p.body, p.published],
+          `update public.organization_policies
+           set version = version + (body <> $2)::int, title = $3, body = $2, is_published = $4, is_placeholder = false
+           where id = $1`,
+          [found.rows[0].id, p.body, p.title, p.published],
         );
       } else {
         await db.query(

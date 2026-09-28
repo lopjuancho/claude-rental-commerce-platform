@@ -8,6 +8,7 @@ import { requireStaff } from "@/server/auth/context";
 import { listCategories } from "@/server/catalog/categories";
 import { signedMediaUrls } from "@/server/catalog/media";
 import { getProduct, type ProductDetail } from "@/server/catalog/products";
+import { listHazardRules } from "@/server/catalog/weather-rules";
 import { archiveProductAction } from "../actions";
 import { ProductForm } from "../product-form";
 import { InventoryPanel } from "./inventory-panel";
@@ -28,7 +29,10 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
     throw e;
   }
   const canWrite = ctx.permissions.has("catalog.write");
-  const categories = await listCategories();
+  const [categories, weatherRules] = await Promise.all([
+    listCategories(),
+    listHazardRules({ level: "product", productId: product.id }),
+  ]);
   const variant = product.product_variants.find((v) => v.is_default) ?? product.product_variants[0];
   const media = [...product.product_media].sort(
     (a, b) => Number(b.is_primary) - Number(a.is_primary) || a.sort_order - b.sort_order,
@@ -60,7 +64,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
       <ProductForm
         canWrite={canWrite}
         categories={categories.map((c) => ({ id: c.id, name: c.name }))}
-        values={{ ...row, categoryIds: product_categories.map((c) => c.category_id) }}
+        values={{ ...row, categoryIds: product_categories.map((c) => c.category_id), weatherRules }}
       />
       {variant ? (
         <Card>

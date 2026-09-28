@@ -69,10 +69,16 @@ insert into public.organization_policies (organization_id, policy_type, title, b
    'Placeholder policy text for local development.', true);
 
 -- Fictional catalog for local development (no real business data or photos).
-insert into public.categories (id, organization_id, name, slug, sort_order, wind_sensitive, included_duration_minutes) values
-  ('11000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'Bounce Houses', 'bounce-houses', 10, true, null),
-  ('11000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', 'Water Slides', 'water-slides', 20, true, 240),
-  ('11000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000001', 'Tables & Chairs', 'tables-and-chairs', 30, null, null)
+insert into public.categories (id, organization_id, name, slug, sort_order, included_duration_minutes) values
+  ('11000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'Bounce Houses', 'bounce-houses', 10, null),
+  ('11000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', 'Water Slides', 'water-slides', 20, 240),
+  ('11000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000001', 'Tables & Chairs', 'tables-and-chairs', 30, null)
+on conflict do nothing;
+
+insert into public.weather_hazard_rules (organization_id, category_id, hazard, sensitive, threshold_value, threshold_unit) values
+  ('10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001', 'wind', true, 20, 'mph'),
+  ('10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000002', 'wind', true, 20, 'mph'),
+  ('10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000002', 'lightning', true, null, null)
 on conflict do nothing;
 
 insert into public.products (id, organization_id, primary_category_id, name, slug, short_description, is_published,

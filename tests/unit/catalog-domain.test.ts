@@ -56,7 +56,6 @@ describe("resolveRentalConfig (ADR 0003 override chain)", () => {
     defaultRentalDurationMinutes: 360,
     minBookingLeadTimeMinutes: 720,
     overnightAllowed: false,
-    windThresholdMph: 15,
   };
 
   it("falls back to organization settings", () => {
@@ -66,31 +65,23 @@ describe("resolveRentalConfig (ADR 0003 override chain)", () => {
       includedDurationMinutes: 360,
       minBookingLeadTimeMinutes: 720,
       overnightAllowed: false,
-      windSensitive: false,
-      windThresholdMph: 15,
     });
   });
 
-  it("category overrides organization (Water Slides = 4 hours, wind sensitive)", () => {
-    const r = resolveRentalConfig({
-      organization,
-      category: { includedDurationMinutes: 240, windSensitive: true },
-    });
+  it("category overrides organization (Water Slides = 4 hours)", () => {
+    const r = resolveRentalConfig({ organization, category: { includedDurationMinutes: 240 } });
     expect(r.includedDurationMinutes).toBe(240);
-    expect(r.windSensitive).toBe(true);
-    expect(r.windThresholdMph).toBe(15);
   });
 
   it("product overrides category; variant overrides product for buffers", () => {
     const r = resolveRentalConfig({
       organization,
-      category: { setupBufferMinutes: 90, windSensitive: true, windThresholdMph: 20 },
-      product: { setupBufferMinutes: 30, windSensitive: false },
+      category: { setupBufferMinutes: 90, overnightAllowed: true },
+      product: { setupBufferMinutes: 30, overnightAllowed: false },
       variant: { setupBufferMinutes: 45 },
     });
     expect(r.setupBufferMinutes).toBe(45);
-    expect(r.windSensitive).toBe(false);
-    expect(r.windThresholdMph).toBe(20);
+    expect(r.overnightAllowed).toBe(false);
   });
 
   it("zero is a real value, not 'inherit'", () => {
@@ -103,7 +94,6 @@ describe("resolveRentalConfig (ADR 0003 override chain)", () => {
     expect(resolveRentalConfig({})).toMatchObject({
       setupBufferMinutes: 60,
       minBookingLeadTimeMinutes: 720,
-      windThresholdMph: null,
     });
   });
 });

@@ -1,5 +1,6 @@
 /**
  * The ADR 0003 override chain: variant → product → category → organization → platform default.
+ * (Weather sensitivity has its own per-hazard resolver in src/domain/weather.)
  * `null`/`undefined` at a level means "inherit". Pure, so availability/pricing code and the
  * database function share one tested definition of precedence.
  */
@@ -9,8 +10,6 @@ export const PLATFORM_DEFAULTS = {
   includedDurationMinutes: 360,
   minBookingLeadTimeMinutes: 720,
   overnightAllowed: false,
-  windSensitive: false,
-  windThresholdMph: null,
 } as const;
 
 type Maybe<T> = T | null | undefined;
@@ -21,7 +20,6 @@ export interface OrganizationLevel {
   defaultRentalDurationMinutes: number;
   minBookingLeadTimeMinutes: number;
   overnightAllowed: boolean;
-  windThresholdMph: Maybe<number>;
 }
 
 export interface CategoryLevel {
@@ -29,8 +27,6 @@ export interface CategoryLevel {
   teardownBufferMinutes?: Maybe<number>;
   includedDurationMinutes?: Maybe<number>;
   overnightAllowed?: Maybe<boolean>;
-  windSensitive?: Maybe<boolean>;
-  windThresholdMph?: Maybe<number>;
 }
 
 export interface ProductLevel extends CategoryLevel {
@@ -48,9 +44,6 @@ export interface ResolvedRentalConfig {
   includedDurationMinutes: number;
   minBookingLeadTimeMinutes: number;
   overnightAllowed: boolean;
-  windSensitive: boolean;
-  /** Only meaningful when windSensitive; null means no threshold configured anywhere. */
-  windThresholdMph: number | null;
 }
 
 function first<T>(...values: Maybe<T>[]): T | undefined {
@@ -92,9 +85,5 @@ export function resolveRentalConfig(levels: {
     overnightAllowed:
       first(p?.overnightAllowed, c?.overnightAllowed, o?.overnightAllowed) ??
       PLATFORM_DEFAULTS.overnightAllowed,
-    windSensitive: first(p?.windSensitive, c?.windSensitive) ?? PLATFORM_DEFAULTS.windSensitive,
-    windThresholdMph:
-      first(p?.windThresholdMph, c?.windThresholdMph, o?.windThresholdMph) ??
-      PLATFORM_DEFAULTS.windThresholdMph,
   };
 }

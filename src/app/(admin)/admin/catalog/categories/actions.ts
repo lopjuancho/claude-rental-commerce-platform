@@ -6,6 +6,7 @@ import type { FormState } from "@/components/form-message";
 import { slugify } from "@/domain/catalog/slug";
 import { toFormError } from "@/server/actions";
 import { archiveCategory, createCategory, updateCategory } from "@/server/catalog/categories";
+import { readHazardRuleForm, saveHazardRules } from "@/server/catalog/weather-rules";
 import { FormReader } from "@/server/forms";
 
 function readCategory(fd: FormData) {
@@ -22,16 +23,16 @@ function readCategory(fd: FormData) {
     teardownBufferMinutes: f.int("teardownBufferMinutes"),
     includedDurationMinutes: f.hoursAsMinutes("includedHours"),
     overnightAllowed: f.triState("overnightAllowed"),
-    windSensitive: f.triState("windSensitive"),
-    windThresholdMph: f.int("windThresholdMph"),
   };
 }
 
 export async function saveCategoryAction(_prev: FormState, fd: FormData): Promise<FormState> {
   try {
     const id = new FormReader(fd).text("id");
-    if (id) await updateCategory(z.uuid().parse(id), readCategory(fd));
-    else await createCategory(readCategory(fd));
+    const categoryId = id ? z.uuid().parse(id) : null;
+    if (categoryId) await updateCategory(categoryId, readCategory(fd));
+    const savedId = categoryId ?? (await createCategory(readCategory(fd)));
+    await saveHazardRules({ level: "category", categoryId: savedId }, readHazardRuleForm(fd));
     revalidatePath("/admin/catalog/categories");
     return { status: "success", message: id ? "Category saved." : "Category created." };
   } catch (error) {

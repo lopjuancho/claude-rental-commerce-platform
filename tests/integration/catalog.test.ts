@@ -187,13 +187,18 @@ describe("public catalog views (anonymous storefront)", () => {
   let unpublished: string;
   let archived: string;
   let windCategory: string;
+  let trainCategory: string;
+  let train: string;
 
   beforeAll(async () => {
+    windCategory = await category(a);
+    trainCategory = await category(a);
     await admin(
-      "update public.organization_settings set wind_threshold_mph = 15 where organization_id = $1",
-      [a.id],
+      `insert into public.weather_hazard_rules (organization_id, category_id, hazard, sensitive, threshold_value, threshold_unit)
+       values ($1, $2, 'wind', true, 15, 'mph'), ($1, $2, 'lightning', true, null, null), ($1, $3, 'wind', false, null, null)`,
+      [a.id, windCategory, trainCategory],
     );
-    windCategory = await category(a, { wind_sensitive: true });
+    train = await product(a, { is_published: true, primary_category_id: trainCategory });
     published = await product(a, {
       is_published: true,
       primary_category_id: windCategory,
@@ -244,17 +249,22 @@ describe("public catalog views (anonymous storefront)", () => {
     }
   });
 
-  it("resolves wind sensitivity through the category and organization (ADR 0010)", async () => {
-    const row = await anon(
+  it("exposes resolved weather sensitivities per hazard (ADR 0010)", async () => {
+    const rows = await anon(
       async (sql) =>
         (
-          await sql(
-            "select wind_sensitive, wind_threshold_mph from public.public_catalog_products where id = $1",
-            [published],
+          await sql<{ id: string; weather_sensitivities: unknown }>(
+            "select id, weather_sensitivities from public.public_catalog_products where id = any($1)",
+            [[published, train]],
           )
-        ).rows[0],
+        ).rows,
     );
-    expect(row).toEqual({ wind_sensitive: true, wind_threshold_mph: 15 });
+    const byId = new Map(rows.map((r) => [r.id, r.weather_sensitivities]));
+    expect(byId.get(published)).toEqual([
+      { hazard: "wind", threshold_value: 15, threshold_unit: "mph" },
+      { hazard: "lightning", threshold_value: null, threshold_unit: null },
+    ]);
+    expect(byId.get(train)).toEqual([]);
   });
 
   it("hides media whose usage rights are unverified", async () => {

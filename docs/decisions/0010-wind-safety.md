@@ -1,19 +1,34 @@
-# 0010 — Wind safety: information plus a staff-confirmed operational rule (D16)
+# 0010 — Weather safety: per-hazard rules plus staff-confirmed weather blocks (D16)
 
-**Status:** Accepted 2026-09-28 · Settings columns in M2; weather blocks in M3
+**Status:** Accepted 2026-09-28 · Revised 2026-09-28: generalised from wind-only to all weather hazards
 
 ## Decision
 
-### Configuration (override chain from ADR 0003: product → category → organization)
-- `wind_sensitive` — category and product (product `null` = inherit from category; category `null` = not sensitive).
-- `wind_threshold_mph` — organization, category and product. Replaces the earlier `max_wind_mph` name.
-- Tiky Jumps initial configuration: organization `wind_threshold_mph = 15`; inflatable categories `wind_sensitive = true`.
+### Hazards
+`wind`, `lightning`, `rain`, `severe_weather`, `temperature`, `custom` (manual safety). Wind is one hazard among several, not a special case.
+
+### Sensitivity rules (`weather_hazard_rules`)
+One row per (scope, hazard). Scope is the organization default, a category, or a product.
+- `sensitive`: `true` = affected. `false` = explicitly **not** affected, e.g. a trackless train and wind.
+- Optional operating limit: `threshold_value` plus `threshold_unit` (mph, km/h, °F, °C, in/h), e.g. wind 15 mph or temperature 100 °F.
+- Resolution per hazard: **product → primary category → organization**; the most specific level wins. A level that says "sensitive" without a limit inherits the limit from a less specific level. No rule at any level = not sensitive.
+- The same resolver is implemented in SQL (`app.product_hazard_rules`) and TypeScript (`src/domain/weather/resolve.ts`), and unit and integration tests pin both.
+- These rules replace the M2 `wind_sensitive` / `wind_threshold_mph` columns; existing values were migrated.
+
+**Why the inflatable limit sits on categories, not the organization:** an organization-wide 15 mph wind default would be inherited by any category later marked wind-sensitive (e.g. tents). Tents, foam equipment and mechanical attractions need their own manufacturer/operational limits, so a default must never leak onto them.
+
+Tiky Jumps configuration (tenant bundle, not code):
+- Bounce Houses, Water Slides, Combos, Interactives: wind, sensitive, 15 mph.
+- Trackless Trains: wind, explicitly not sensitive.
+- Tents, Foam Parties: no rule yet (to be confirmed).
+- Mechanical/special attractions: product-level rules as needed.
 
 ### Weather blocks (M3)
-`weather_blocks`: organization, `period tstzrange`, `reason`, `status` (`proposed` | `confirmed` | `lifted`), `source` (`staff` | `weather_api`), optional observed/forecast wind speed, and the affected scope (all wind-sensitive products, or specific categories/products through join tables). `created_by`, `confirmed_by`, `confirmed_at`.
+`weather_blocks`: organization, hazard, `period`, `status` (`proposed` → `confirmed` → `lifted`), `source` (`staff` | `weather_api`), reason, optional observed value + unit, and scope:
+- `all_sensitive`: every product whose resolved rule for that hazard is sensitive. If the block records an observed value in the same unit as the product's limit, the product is blocked only when observed ≥ limit. Without a comparable value it is blocked (conservative).
+- `selected`: exactly the listed products/categories (`weather_block_targets`), regardless of sensitivity. This is the manual safety block.
 
 Rules:
-- Only **confirmed** blocks affect availability: wind-sensitive products overlapping a confirmed block report `WEATHER_BLOCK`.
-- Blocks from weather data are created as **proposed** and only raise warnings. Staff must confirm them.
-- Overlapping existing bookings are **flagged** for staff review, never automatically cancelled or refunded. Cancellation is a manual staff action.
-- Customer-facing text and the assistant show the threshold as safety information. The assistant must not say a wind-sensitive unit can operate during an active block. It relays `WEATHER_BLOCK` and says staff will confirm.
+- Only **confirmed** blocks affect availability (`WEATHER_BLOCK`). **Proposed** blocks (e.g. from a weather API) only warn.
+- Confirming a block **flags** overlapping reservations for staff review (`reservation_flags`). Nothing is cancelled or refunded automatically; cancellation is a manual staff action.
+- The assistant never says a product can operate while a confirmed block applies to it. It relays `WEATHER_BLOCK` and says staff will confirm.

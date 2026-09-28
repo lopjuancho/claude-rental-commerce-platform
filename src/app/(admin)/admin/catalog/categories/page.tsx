@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requireStaff } from "@/server/auth/context";
 import { listCategories } from "@/server/catalog/categories";
+import { listCategoryHazardRules } from "@/server/catalog/weather-rules";
 import { archiveCategoryAction } from "./actions";
 import { CategoryForm } from "./category-form";
 
@@ -11,7 +12,7 @@ export const metadata: Metadata = { title: "Categories" };
 export default async function CategoriesPage() {
   const ctx = await requireStaff("org.read");
   const canWrite = ctx.permissions.has("catalog.write");
-  const categories = await listCategories();
+  const [categories, rules] = await Promise.all([listCategories(), listCategoryHazardRules()]);
   const parents = categories.map((c) => ({ id: c.id, name: c.name }));
 
   return (
@@ -37,7 +38,13 @@ export default async function CategoriesPage() {
               <span className="font-medium">{c.name}</span>
               <span className="text-xs text-muted-foreground">
                 {c.is_published ? "Published" : "Hidden"}
-                {c.wind_sensitive ? " · wind sensitive" : ""}
+                {(rules.get(c.id) ?? [])
+                  .filter((r) => r.sensitive)
+                  .map(
+                    (r) =>
+                      ` · ${r.hazard.replace("_", " ")}${r.threshold_value ? ` ${r.threshold_value} ${r.threshold_unit ?? ""}` : ""}`,
+                  )
+                  .join("")}
                 {c.included_duration_minutes ? ` · ${c.included_duration_minutes / 60} h` : ""}
               </span>
             </summary>
@@ -56,8 +63,7 @@ export default async function CategoriesPage() {
                     teardownBufferMinutes: c.teardown_buffer_minutes,
                     includedDurationMinutes: c.included_duration_minutes,
                     overnightAllowed: c.overnight_allowed,
-                    windSensitive: c.wind_sensitive,
-                    windThresholdMph: c.wind_threshold_mph,
+                    weatherRules: rules.get(c.id) ?? [],
                   }}
                 />
                 <form action={archiveCategoryAction}>

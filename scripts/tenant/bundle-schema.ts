@@ -12,6 +12,34 @@ const slug = z
 const color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const optional = <T extends z.ZodType>(t: T) => t.nullish();
 
+// Mirrors public.weather_hazard / threshold units (src/domain/weather/hazards.ts).
+const hazardRule = z
+  .object({
+    hazard: z.enum(["wind", "lightning", "rain", "severe_weather", "temperature", "custom"]),
+    sensitive: z.boolean(),
+    thresholdValue: optional(z.number().positive().max(9999)),
+    thresholdUnit: optional(z.enum(["mph", "kph", "fahrenheit", "celsius", "inches_per_hour"])),
+  })
+  .refine((r) => (r.thresholdValue == null) === (r.thresholdUnit == null), {
+    message: "threshold needs value and unit",
+  });
+
+export const POLICY_TYPES = [
+  "weather",
+  "wind_safety",
+  "cancellation",
+  "overnight",
+  "delivery",
+  "setup_requirements",
+  "power_requirements",
+  "water_requirements",
+  "supervision",
+  "operator_requirements",
+  "deposit",
+  "safety",
+  "other",
+] as const;
+
 export const tenantBundleSchema = z.object({
   organization: z.object({
     slug: slug.max(63),
@@ -41,6 +69,7 @@ export const tenantBundleSchema = z.object({
     .object({
       primaryColor: optional(color),
       secondaryColor: optional(color),
+      accentColor: optional(color),
       contactPhone: optional(z.string().max(40)),
       smsPhone: optional(z.string().max(40)),
       contactEmail: optional(z.email()),
@@ -50,7 +79,6 @@ export const tenantBundleSchema = z.object({
       defaultRentalDurationMinutes: optional(z.int().positive()),
       minBookingLeadTimeMinutes: optional(z.int().min(0)),
       overnightAllowed: optional(z.boolean()),
-      windThresholdMph: optional(z.int().positive().max(200)),
       quoteValidDays: optional(z.int().min(1).max(365)),
       bookingHoldMinutes: optional(z.int().min(1).max(1440)),
       primaryDepot: optional(
@@ -84,19 +112,26 @@ export const tenantBundleSchema = z.object({
         setupBufferMinutes: optional(z.int().min(0).max(1440)),
         teardownBufferMinutes: optional(z.int().min(0).max(1440)),
         overnightAllowed: optional(z.boolean()),
-        windSensitive: optional(z.boolean()),
-        windThresholdMph: optional(z.int().positive().max(200)),
+        weather: z.array(hazardRule).default([]),
       }),
     )
     .default([]),
+  /** Organization-level hazard defaults (least specific level). */
+  weatherRules: z.array(hazardRule).default([]),
   policies: z
     .array(
-      z.object({
-        type: z.enum(["cancellation", "weather", "deposit", "delivery", "safety", "other"]),
-        title: z.string().min(1).max(200),
-        body: z.string().min(1).max(20000),
-        published: z.boolean().default(false),
-      }),
+      z
+        .object({
+          type: z.enum(POLICY_TYPES),
+          title: z.string().min(1).max(200),
+          body: z.string().min(1).max(20000),
+          published: z.boolean().default(false),
+          /** Placeholder wording: inserted only if the tenant has no policy of this type; never published. */
+          placeholder: z.boolean().default(false),
+        })
+        .refine((p) => !(p.placeholder && p.published), {
+          message: "placeholder policies cannot be published",
+        }),
     )
     .default([]),
 });

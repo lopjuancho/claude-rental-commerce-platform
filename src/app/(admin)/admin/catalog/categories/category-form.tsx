@@ -6,6 +6,7 @@ import { FormMessage, idleState } from "@/components/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
+import { type WeatherRuleValue, WeatherRulesEditor } from "@/components/weather-rules-editor";
 import { saveCategoryAction } from "./actions";
 
 export interface CategoryFormValues {
@@ -19,8 +20,7 @@ export interface CategoryFormValues {
   teardownBufferMinutes?: number | null;
   includedDurationMinutes?: number | null;
   overnightAllowed?: boolean | null;
-  windSensitive?: boolean | null;
-  windThresholdMph?: number | null;
+  weatherRules?: WeatherRuleValue[];
 }
 
 export function CategoryForm({
@@ -106,23 +106,10 @@ export function CategoryForm({
             label="Overnight allowed"
             value={values.overnightAllowed}
           />
-          <TriStateField
-            id={`${p}-wind`}
-            name="windSensitive"
-            label="Wind sensitive"
-            value={values.windSensitive}
-            inheritLabel="Not set (no)"
-          />
-          <FormField id={`${p}-windmph`} label="Wind threshold (mph)">
-            <Input
-              id={`${p}-windmph`}
-              name="windThresholdMph"
-              type="number"
-              min="1"
-              max="200"
-              defaultValue={values.windThresholdMph ?? ""}
-            />
-          </FormField>
+        </div>
+        <div className="mt-4 grid gap-2">
+          <span className="text-sm font-semibold">Weather sensitivity</span>
+          <WeatherRulesEditor rules={values.weatherRules ?? []} inheritLabel="Business default" />
         </div>
       </details>
       <CheckboxField

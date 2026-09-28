@@ -8,13 +8,24 @@
     "countryCode": "US",
     "status": "onboarding"
   },
-  "domains": [],
+  "domains": [
+    {
+      "hostname": "tikyjumps.com",
+      "primary": true
+    },
+    {
+      "hostname": "www.tikyjumps.com",
+      "primary": false
+    }
+  ],
   "settings": {
+    "contactPhone": "+19013000417",
+    "smsPhone": "+19012508127",
+    "websiteUrl": "https://www.tikyjumps.com",
     "defaultSetupBufferMinutes": 60,
     "defaultTeardownBufferMinutes": 60,
     "minBookingLeadTimeMinutes": 720,
     "bookingHoldMinutes": 15,
-    "windThresholdMph": 15,
     "mileage": {
       "freeMiles": 5,
       "perMileRateCents": 400,
@@ -22,21 +33,161 @@
       "basis": "one_way"
     }
   },
+  "weatherRules": [],
   "categories": [
-    { "name": "Bounce Houses", "slug": "bounce-houses", "sortOrder": 10, "windSensitive": true },
+    {
+      "name": "Bounce Houses",
+      "slug": "bounce-houses",
+      "sortOrder": 10,
+      "weather": [
+        {
+          "hazard": "wind",
+          "sensitive": true,
+          "thresholdValue": 15,
+          "thresholdUnit": "mph"
+        }
+      ]
+    },
     {
       "name": "Water Slides",
       "slug": "water-slides",
       "sortOrder": 20,
       "includedDurationMinutes": 240,
-      "windSensitive": true
+      "weather": [
+        {
+          "hazard": "wind",
+          "sensitive": true,
+          "thresholdValue": 15,
+          "thresholdUnit": "mph"
+        }
+      ]
     },
-    { "name": "Combos", "slug": "combos", "sortOrder": 30, "windSensitive": true },
-    { "name": "Interactives", "slug": "interactives", "sortOrder": 40, "windSensitive": true },
-    { "name": "Trackless Trains", "slug": "trackless-trains", "sortOrder": 50 },
-    { "name": "Foam Parties", "slug": "foam-parties", "sortOrder": 60 },
-    { "name": "Tents", "slug": "tents", "sortOrder": 70 },
-    { "name": "Tables & Chairs", "slug": "tables-and-chairs", "sortOrder": 80 }
+    {
+      "name": "Combos",
+      "slug": "combos",
+      "sortOrder": 30,
+      "weather": [
+        {
+          "hazard": "wind",
+          "sensitive": true,
+          "thresholdValue": 15,
+          "thresholdUnit": "mph"
+        }
+      ]
+    },
+    {
+      "name": "Interactives",
+      "slug": "interactives",
+      "sortOrder": 40,
+      "weather": [
+        {
+          "hazard": "wind",
+          "sensitive": true,
+          "thresholdValue": 15,
+          "thresholdUnit": "mph"
+        }
+      ]
+    },
+    {
+      "name": "Trackless Trains",
+      "slug": "trackless-trains",
+      "sortOrder": 50,
+      "weather": [
+        {
+          "hazard": "wind",
+          "sensitive": false
+        }
+      ]
+    },
+    {
+      "name": "Foam Parties",
+      "slug": "foam-parties",
+      "sortOrder": 60,
+      "weather": []
+    },
+    {
+      "name": "Tents",
+      "slug": "tents",
+      "sortOrder": 70,
+      "weather": []
+    },
+    {
+      "name": "Tables & Chairs",
+      "slug": "tables-and-chairs",
+      "sortOrder": 80,
+      "weather": []
+    }
   ],
-  "policies": []
+  "policies": [
+    {
+      "type": "weather",
+      "title": "Weather policy",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "wind_safety",
+      "title": "Wind safety",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "cancellation",
+      "title": "Cancellation policy",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "overnight",
+      "title": "Overnight rentals",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "delivery",
+      "title": "Delivery",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "setup_requirements",
+      "title": "Setup requirements",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "power_requirements",
+      "title": "Power requirements",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "water_requirements",
+      "title": "Water requirements",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "supervision",
+      "title": "Adult supervision",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    },
+    {
+      "type": "operator_requirements",
+      "title": "Operators and attendants",
+      "body": "[Placeholder] Tiky Jumps wording has not been entered yet. Replace this text in Settings \u2192 Policies before publishing.",
+      "published": false,
+      "placeholder": true
+    }
+  ]
 }
