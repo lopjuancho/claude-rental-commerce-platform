@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { admin, as, type TestOrg, createOrg } from "./support/db";
-import { GLOBAL_TABLES, TENANT_TABLES, USER_TABLES } from "./support/tenant-tables";
+import { GLOBAL_TABLES, PUBLIC_VIEWS, TENANT_TABLES, USER_TABLES } from "./support/tenant-tables";
 
 /**
  * Tenant isolation matrix (ARCHITECTURE.md §10, DATABASE.md §12.3).
@@ -52,11 +52,18 @@ describe("schema coverage", () => {
     expect(bad).toEqual([]);
   });
 
-  it("grants anon no privileges on any public table", async () => {
-    const { rows } = await admin(`
+  it("grants anon nothing on tables, and only SELECT on the allow-listed public views", async () => {
+    const { rows } = await admin<{ table_name: string; privilege_type: string }>(`
       select table_name, privilege_type from information_schema.role_table_grants
-      where table_schema = 'public' and grantee = 'anon'`);
-    expect(rows).toEqual([]);
+      where table_schema = 'public' and grantee = 'anon' order by 1, 2`);
+    expect(rows).toEqual(PUBLIC_VIEWS.map((v) => ({ table_name: v, privilege_type: "SELECT" })));
+  });
+
+  it("allow-lists every view in the public schema", async () => {
+    const { rows } = await admin<{ table_name: string }>(
+      "select table_name from information_schema.views where table_schema = 'public' order by 1",
+    );
+    expect(rows.map((r) => r.table_name)).toEqual([...PUBLIC_VIEWS]);
   });
 
   it("exposes only allow-listed public functions to anon", async () => {

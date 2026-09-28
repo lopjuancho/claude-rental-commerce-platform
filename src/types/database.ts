@@ -60,6 +60,285 @@ export type Database = {
           },
         ];
       };
+      categories: {
+        Row: {
+          archived_at: string | null;
+          created_at: string;
+          description: string | null;
+          id: string;
+          included_duration_minutes: number | null;
+          is_published: boolean;
+          name: string;
+          organization_id: string;
+          overnight_allowed: boolean | null;
+          parent_id: string | null;
+          setup_buffer_minutes: number | null;
+          slug: string;
+          sort_order: number;
+          teardown_buffer_minutes: number | null;
+          updated_at: string;
+          wind_sensitive: boolean | null;
+          wind_threshold_mph: number | null;
+        };
+        Insert: {
+          archived_at?: string | null;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          included_duration_minutes?: number | null;
+          is_published?: boolean;
+          name: string;
+          organization_id: string;
+          overnight_allowed?: boolean | null;
+          parent_id?: string | null;
+          setup_buffer_minutes?: number | null;
+          slug: string;
+          sort_order?: number;
+          teardown_buffer_minutes?: number | null;
+          updated_at?: string;
+          wind_sensitive?: boolean | null;
+          wind_threshold_mph?: number | null;
+        };
+        Update: {
+          archived_at?: string | null;
+          created_at?: string;
+          description?: string | null;
+          id?: string;
+          included_duration_minutes?: number | null;
+          is_published?: boolean;
+          name?: string;
+          organization_id?: string;
+          overnight_allowed?: boolean | null;
+          parent_id?: string | null;
+          setup_buffer_minutes?: number | null;
+          slug?: string;
+          sort_order?: number;
+          teardown_buffer_minutes?: number | null;
+          updated_at?: string;
+          wind_sensitive?: boolean | null;
+          wind_threshold_mph?: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "categories_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "categories_organization_id_parent_id_fkey";
+            columns: ["organization_id", "parent_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "categories_organization_id_parent_id_fkey";
+            columns: ["organization_id", "parent_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      import_batches: {
+        Row: {
+          adapter_id: string;
+          committed_at: string | null;
+          created_at: string;
+          created_by: string | null;
+          external_source: string;
+          headers: string[];
+          id: string;
+          kind: string;
+          mapping: Json | null;
+          organization_id: string;
+          original_filename: string | null;
+          row_count: number;
+          status: Database["public"]["Enums"]["import_status"];
+          summary: Json | null;
+          updated_at: string;
+        };
+        Insert: {
+          adapter_id: string;
+          committed_at?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          external_source: string;
+          headers: string[];
+          id?: string;
+          kind?: string;
+          mapping?: Json | null;
+          organization_id: string;
+          original_filename?: string | null;
+          row_count: number;
+          status?: Database["public"]["Enums"]["import_status"];
+          summary?: Json | null;
+          updated_at?: string;
+        };
+        Update: {
+          adapter_id?: string;
+          committed_at?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          external_source?: string;
+          headers?: string[];
+          id?: string;
+          kind?: string;
+          mapping?: Json | null;
+          organization_id?: string;
+          original_filename?: string | null;
+          row_count?: number;
+          status?: Database["public"]["Enums"]["import_status"];
+          summary?: Json | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "import_batches_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      import_mapping_presets: {
+        Row: {
+          adapter_id: string;
+          created_at: string;
+          created_by: string | null;
+          id: string;
+          mapping: NonNullable<Json>;
+          name: string;
+          organization_id: string;
+          updated_at: string;
+        };
+        Insert: {
+          adapter_id: string;
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          mapping: NonNullable<Json>;
+          name: string;
+          organization_id: string;
+          updated_at?: string;
+        };
+        Update: {
+          adapter_id?: string;
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          mapping?: NonNullable<Json>;
+          name?: string;
+          organization_id?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "import_mapping_presets_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      import_rows: {
+        Row: {
+          action: Database["public"]["Enums"]["import_row_action"] | null;
+          batch_id: string;
+          errors: NonNullable<Json>;
+          id: string;
+          mapped: Json | null;
+          organization_id: string;
+          raw: NonNullable<Json>;
+          row_number: number;
+          target_id: string | null;
+          warnings: NonNullable<Json>;
+        };
+        Insert: {
+          action?: Database["public"]["Enums"]["import_row_action"] | null;
+          batch_id: string;
+          errors?: NonNullable<Json>;
+          id?: string;
+          mapped?: Json | null;
+          organization_id: string;
+          raw: NonNullable<Json>;
+          row_number: number;
+          target_id?: string | null;
+          warnings?: NonNullable<Json>;
+        };
+        Update: {
+          action?: Database["public"]["Enums"]["import_row_action"] | null;
+          batch_id?: string;
+          errors?: NonNullable<Json>;
+          id?: string;
+          mapped?: Json | null;
+          organization_id?: string;
+          raw?: NonNullable<Json>;
+          row_number?: number;
+          target_id?: string | null;
+          warnings?: NonNullable<Json>;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "import_rows_organization_id_batch_id_fkey";
+            columns: ["organization_id", "batch_id"];
+            isOneToOne: false;
+            referencedRelation: "import_batches";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      inventory_units: {
+        Row: {
+          acquired_on: string | null;
+          condition_notes: string | null;
+          created_at: string;
+          id: string;
+          label: string;
+          organization_id: string;
+          serial_number: string | null;
+          status: string;
+          updated_at: string;
+          variant_id: string;
+        };
+        Insert: {
+          acquired_on?: string | null;
+          condition_notes?: string | null;
+          created_at?: string;
+          id?: string;
+          label: string;
+          organization_id: string;
+          serial_number?: string | null;
+          status?: string;
+          updated_at?: string;
+          variant_id: string;
+        };
+        Update: {
+          acquired_on?: string | null;
+          condition_notes?: string | null;
+          created_at?: string;
+          id?: string;
+          label?: string;
+          organization_id?: string;
+          serial_number?: string | null;
+          status?: string;
+          updated_at?: string;
+          variant_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "inventory_units_organization_id_variant_id_fkey";
+            columns: ["organization_id", "variant_id"];
+            isOneToOne: false;
+            referencedRelation: "product_variants";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
       organization_domains: {
         Row: {
           created_at: string;
@@ -239,25 +518,30 @@ export type Database = {
           default_rental_duration_minutes: number;
           default_setup_buffer_minutes: number;
           default_teardown_buffer_minutes: number;
-          depot_address_line1: string | null;
-          depot_city: string | null;
-          depot_latitude: number | null;
-          depot_longitude: number | null;
-          depot_postal_code: string | null;
-          depot_state: string | null;
+          free_delivery_miles: number | null;
           logo_media_path: string | null;
-          max_wind_mph: number | null;
+          maximum_delivery_miles: number | null;
+          mileage_basis: Database["public"]["Enums"]["mileage_basis"];
+          mileage_rounding_method: Database["public"]["Enums"]["mileage_rounding"];
           min_booking_lead_time_minutes: number;
           organization_id: string;
           overnight_allowed: boolean;
+          per_mile_rate_cents: number | null;
           postal_code: string | null;
           primary_color: string | null;
+          primary_depot_address_line1: string | null;
+          primary_depot_city: string | null;
+          primary_depot_latitude: number | null;
+          primary_depot_longitude: number | null;
+          primary_depot_postal_code: string | null;
+          primary_depot_state: string | null;
           quote_valid_days: number;
           secondary_color: string | null;
           sms_phone: string | null;
           state: string | null;
           updated_at: string;
           website_url: string | null;
+          wind_threshold_mph: number | null;
         };
         Insert: {
           address_line1?: string | null;
@@ -273,25 +557,30 @@ export type Database = {
           default_rental_duration_minutes?: number;
           default_setup_buffer_minutes?: number;
           default_teardown_buffer_minutes?: number;
-          depot_address_line1?: string | null;
-          depot_city?: string | null;
-          depot_latitude?: number | null;
-          depot_longitude?: number | null;
-          depot_postal_code?: string | null;
-          depot_state?: string | null;
+          free_delivery_miles?: number | null;
           logo_media_path?: string | null;
-          max_wind_mph?: number | null;
+          maximum_delivery_miles?: number | null;
+          mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
+          mileage_rounding_method?: Database["public"]["Enums"]["mileage_rounding"];
           min_booking_lead_time_minutes?: number;
           organization_id: string;
           overnight_allowed?: boolean;
+          per_mile_rate_cents?: number | null;
           postal_code?: string | null;
           primary_color?: string | null;
+          primary_depot_address_line1?: string | null;
+          primary_depot_city?: string | null;
+          primary_depot_latitude?: number | null;
+          primary_depot_longitude?: number | null;
+          primary_depot_postal_code?: string | null;
+          primary_depot_state?: string | null;
           quote_valid_days?: number;
           secondary_color?: string | null;
           sms_phone?: string | null;
           state?: string | null;
           updated_at?: string;
           website_url?: string | null;
+          wind_threshold_mph?: number | null;
         };
         Update: {
           address_line1?: string | null;
@@ -307,25 +596,30 @@ export type Database = {
           default_rental_duration_minutes?: number;
           default_setup_buffer_minutes?: number;
           default_teardown_buffer_minutes?: number;
-          depot_address_line1?: string | null;
-          depot_city?: string | null;
-          depot_latitude?: number | null;
-          depot_longitude?: number | null;
-          depot_postal_code?: string | null;
-          depot_state?: string | null;
+          free_delivery_miles?: number | null;
           logo_media_path?: string | null;
-          max_wind_mph?: number | null;
+          maximum_delivery_miles?: number | null;
+          mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
+          mileage_rounding_method?: Database["public"]["Enums"]["mileage_rounding"];
           min_booking_lead_time_minutes?: number;
           organization_id?: string;
           overnight_allowed?: boolean;
+          per_mile_rate_cents?: number | null;
           postal_code?: string | null;
           primary_color?: string | null;
+          primary_depot_address_line1?: string | null;
+          primary_depot_city?: string | null;
+          primary_depot_latitude?: number | null;
+          primary_depot_longitude?: number | null;
+          primary_depot_postal_code?: string | null;
+          primary_depot_state?: string | null;
           quote_valid_days?: number;
           secondary_color?: string | null;
           sms_phone?: string | null;
           state?: string | null;
           updated_at?: string;
           website_url?: string | null;
+          wind_threshold_mph?: number | null;
         };
         Relationships: [
           {
@@ -379,6 +673,437 @@ export type Database = {
         };
         Relationships: [];
       };
+      product_categories: {
+        Row: {
+          category_id: string;
+          organization_id: string;
+          product_id: string;
+        };
+        Insert: {
+          category_id: string;
+          organization_id: string;
+          product_id: string;
+        };
+        Update: {
+          category_id?: string;
+          organization_id?: string;
+          product_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "product_categories_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_categories_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_categories_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_categories_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      product_media: {
+        Row: {
+          alt_text: string | null;
+          created_at: string;
+          height: number | null;
+          id: string;
+          is_primary: boolean;
+          kind: Database["public"]["Enums"]["media_kind"];
+          organization_id: string;
+          original_filename: string | null;
+          product_id: string;
+          rights_notes: string | null;
+          rights_status: Database["public"]["Enums"]["media_rights_status"];
+          sort_order: number;
+          source: Database["public"]["Enums"]["media_source"];
+          storage_path: string;
+          storage_provider: string;
+          updated_at: string;
+          uploaded_by: string | null;
+          width: number | null;
+        };
+        Insert: {
+          alt_text?: string | null;
+          created_at?: string;
+          height?: number | null;
+          id?: string;
+          is_primary?: boolean;
+          kind?: Database["public"]["Enums"]["media_kind"];
+          organization_id: string;
+          original_filename?: string | null;
+          product_id: string;
+          rights_notes?: string | null;
+          rights_status?: Database["public"]["Enums"]["media_rights_status"];
+          sort_order?: number;
+          source: Database["public"]["Enums"]["media_source"];
+          storage_path: string;
+          storage_provider?: string;
+          updated_at?: string;
+          uploaded_by?: string | null;
+          width?: number | null;
+        };
+        Update: {
+          alt_text?: string | null;
+          created_at?: string;
+          height?: number | null;
+          id?: string;
+          is_primary?: boolean;
+          kind?: Database["public"]["Enums"]["media_kind"];
+          organization_id?: string;
+          original_filename?: string | null;
+          product_id?: string;
+          rights_notes?: string | null;
+          rights_status?: Database["public"]["Enums"]["media_rights_status"];
+          sort_order?: number;
+          source?: Database["public"]["Enums"]["media_source"];
+          storage_path?: string;
+          storage_provider?: string;
+          updated_at?: string;
+          uploaded_by?: string | null;
+          width?: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "product_media_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_media_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      product_relations: {
+        Row: {
+          organization_id: string;
+          product_id: string;
+          related_product_id: string;
+          relation_type: Database["public"]["Enums"]["product_relation_type"];
+          sort_order: number;
+        };
+        Insert: {
+          organization_id: string;
+          product_id: string;
+          related_product_id: string;
+          relation_type: Database["public"]["Enums"]["product_relation_type"];
+          sort_order?: number;
+        };
+        Update: {
+          organization_id?: string;
+          product_id?: string;
+          related_product_id?: string;
+          relation_type?: Database["public"]["Enums"]["product_relation_type"];
+          sort_order?: number;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "product_relations_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_relations_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_relations_organization_id_related_product_id_fkey";
+            columns: ["organization_id", "related_product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_relations_organization_id_related_product_id_fkey";
+            columns: ["organization_id", "related_product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      product_variants: {
+        Row: {
+          archived_at: string | null;
+          created_at: string;
+          id: string;
+          is_active: boolean;
+          is_default: boolean;
+          name: string;
+          organization_id: string;
+          pooled_quantity: number | null;
+          price_override_cents: number | null;
+          product_id: string;
+          setup_buffer_minutes: number | null;
+          sku: string | null;
+          teardown_buffer_minutes: number | null;
+          tracking_mode: Database["public"]["Enums"]["tracking_mode"];
+          updated_at: string;
+        };
+        Insert: {
+          archived_at?: string | null;
+          created_at?: string;
+          id?: string;
+          is_active?: boolean;
+          is_default?: boolean;
+          name?: string;
+          organization_id: string;
+          pooled_quantity?: number | null;
+          price_override_cents?: number | null;
+          product_id: string;
+          setup_buffer_minutes?: number | null;
+          sku?: string | null;
+          teardown_buffer_minutes?: number | null;
+          tracking_mode?: Database["public"]["Enums"]["tracking_mode"];
+          updated_at?: string;
+        };
+        Update: {
+          archived_at?: string | null;
+          created_at?: string;
+          id?: string;
+          is_active?: boolean;
+          is_default?: boolean;
+          name?: string;
+          organization_id?: string;
+          pooled_quantity?: number | null;
+          price_override_cents?: number | null;
+          product_id?: string;
+          setup_buffer_minutes?: number | null;
+          sku?: string | null;
+          teardown_buffer_minutes?: number | null;
+          tracking_mode?: Database["public"]["Enums"]["tracking_mode"];
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "product_variants_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_variants_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      products: {
+        Row: {
+          allowed_surfaces: string[];
+          anchoring_methods: string[];
+          archived_at: string | null;
+          attendants_required: number;
+          base_price_cents: number;
+          created_at: string;
+          description: string | null;
+          dry_allowed: boolean;
+          external_ref: string | null;
+          external_source: string | null;
+          extra_specs: NonNullable<Json>;
+          id: string;
+          ideal_event_types: Database["public"]["Enums"]["event_type"][];
+          included_duration_minutes: number | null;
+          indoor_allowed: boolean;
+          internal_notes: string | null;
+          is_featured: boolean;
+          is_published: boolean;
+          max_rider_weight_lbs: number | null;
+          maximum_age: number | null;
+          min_booking_lead_time_minutes: number | null;
+          minimum_age: number | null;
+          minimum_rental_minutes: number | null;
+          name: string;
+          operator_required: boolean;
+          organization_id: string;
+          outdoor_allowed: boolean;
+          overnight_allowed: boolean | null;
+          power_notes: string | null;
+          power_outlets_required: number | null;
+          pricing_type: Database["public"]["Enums"]["pricing_type"];
+          primary_category_id: string | null;
+          recommended_capacity: number | null;
+          search_vector: unknown;
+          setup_buffer_minutes: number | null;
+          setup_minutes: number | null;
+          setup_requirements: string | null;
+          short_description: string | null;
+          slug: string;
+          sort_order: number;
+          space_height_ft: number | null;
+          space_length_ft: number | null;
+          space_width_ft: number | null;
+          tags: string[];
+          teardown_buffer_minutes: number | null;
+          teardown_minutes: number | null;
+          updated_at: string;
+          water_required: boolean;
+          wet_allowed: boolean;
+          wind_sensitive: boolean | null;
+          wind_threshold_mph: number | null;
+        };
+        Insert: {
+          allowed_surfaces?: string[];
+          anchoring_methods?: string[];
+          archived_at?: string | null;
+          attendants_required?: number;
+          base_price_cents: number;
+          created_at?: string;
+          description?: string | null;
+          dry_allowed?: boolean;
+          external_ref?: string | null;
+          external_source?: string | null;
+          extra_specs?: NonNullable<Json>;
+          id?: string;
+          ideal_event_types?: Database["public"]["Enums"]["event_type"][];
+          included_duration_minutes?: number | null;
+          indoor_allowed?: boolean;
+          internal_notes?: string | null;
+          is_featured?: boolean;
+          is_published?: boolean;
+          max_rider_weight_lbs?: number | null;
+          maximum_age?: number | null;
+          min_booking_lead_time_minutes?: number | null;
+          minimum_age?: number | null;
+          minimum_rental_minutes?: number | null;
+          name: string;
+          operator_required?: boolean;
+          organization_id: string;
+          outdoor_allowed?: boolean;
+          overnight_allowed?: boolean | null;
+          power_notes?: string | null;
+          power_outlets_required?: number | null;
+          pricing_type?: Database["public"]["Enums"]["pricing_type"];
+          primary_category_id?: string | null;
+          recommended_capacity?: number | null;
+          search_vector?: never;
+          setup_buffer_minutes?: number | null;
+          setup_minutes?: number | null;
+          setup_requirements?: string | null;
+          short_description?: string | null;
+          slug: string;
+          sort_order?: number;
+          space_height_ft?: number | null;
+          space_length_ft?: number | null;
+          space_width_ft?: number | null;
+          tags?: string[];
+          teardown_buffer_minutes?: number | null;
+          teardown_minutes?: number | null;
+          updated_at?: string;
+          water_required?: boolean;
+          wet_allowed?: boolean;
+          wind_sensitive?: boolean | null;
+          wind_threshold_mph?: number | null;
+        };
+        Update: {
+          allowed_surfaces?: string[];
+          anchoring_methods?: string[];
+          archived_at?: string | null;
+          attendants_required?: number;
+          base_price_cents?: number;
+          created_at?: string;
+          description?: string | null;
+          dry_allowed?: boolean;
+          external_ref?: string | null;
+          external_source?: string | null;
+          extra_specs?: NonNullable<Json>;
+          id?: string;
+          ideal_event_types?: Database["public"]["Enums"]["event_type"][];
+          included_duration_minutes?: number | null;
+          indoor_allowed?: boolean;
+          internal_notes?: string | null;
+          is_featured?: boolean;
+          is_published?: boolean;
+          max_rider_weight_lbs?: number | null;
+          maximum_age?: number | null;
+          min_booking_lead_time_minutes?: number | null;
+          minimum_age?: number | null;
+          minimum_rental_minutes?: number | null;
+          name?: string;
+          operator_required?: boolean;
+          organization_id?: string;
+          outdoor_allowed?: boolean;
+          overnight_allowed?: boolean | null;
+          power_notes?: string | null;
+          power_outlets_required?: number | null;
+          pricing_type?: Database["public"]["Enums"]["pricing_type"];
+          primary_category_id?: string | null;
+          recommended_capacity?: number | null;
+          search_vector?: never;
+          setup_buffer_minutes?: number | null;
+          setup_minutes?: number | null;
+          setup_requirements?: string | null;
+          short_description?: string | null;
+          slug?: string;
+          sort_order?: number;
+          space_height_ft?: number | null;
+          space_length_ft?: number | null;
+          space_width_ft?: number | null;
+          tags?: string[];
+          teardown_buffer_minutes?: number | null;
+          teardown_minutes?: number | null;
+          updated_at?: string;
+          water_required?: boolean;
+          wet_allowed?: boolean;
+          wind_sensitive?: boolean | null;
+          wind_threshold_mph?: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "products_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "products_organization_id_primary_category_id_fkey";
+            columns: ["organization_id", "primary_category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "products_organization_id_primary_category_id_fkey";
+            columns: ["organization_id", "primary_category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
       role_permissions: {
         Row: {
           permission: string;
@@ -423,10 +1148,139 @@ export type Database = {
       };
     };
     Views: {
-      [_ in never]: never;
+      public_catalog_categories: {
+        Row: {
+          description: string | null;
+          id: string | null;
+          name: string | null;
+          organization_id: string | null;
+          parent_id: string | null;
+          slug: string | null;
+          sort_order: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "categories_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "categories_organization_id_parent_id_fkey";
+            columns: ["organization_id", "parent_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "categories_organization_id_parent_id_fkey";
+            columns: ["organization_id", "parent_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      public_catalog_product_media: {
+        Row: {
+          alt_text: string | null;
+          height: number | null;
+          id: string | null;
+          is_primary: boolean | null;
+          kind: Database["public"]["Enums"]["media_kind"] | null;
+          organization_id: string | null;
+          product_id: string | null;
+          sort_order: number | null;
+          storage_path: string | null;
+          width: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "product_media_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_media_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      public_catalog_products: {
+        Row: {
+          allowed_surfaces: string[] | null;
+          anchoring_methods: string[] | null;
+          attendants_required: number | null;
+          base_price_cents: number | null;
+          category_ids: string[] | null;
+          description: string | null;
+          dry_allowed: boolean | null;
+          extra_specs: Json | null;
+          id: string | null;
+          ideal_event_types: Database["public"]["Enums"]["event_type"][] | null;
+          included_duration_minutes: number | null;
+          indoor_allowed: boolean | null;
+          is_featured: boolean | null;
+          max_rider_weight_lbs: number | null;
+          maximum_age: number | null;
+          minimum_age: number | null;
+          minimum_rental_minutes: number | null;
+          name: string | null;
+          operator_required: boolean | null;
+          organization_id: string | null;
+          outdoor_allowed: boolean | null;
+          power_notes: string | null;
+          power_outlets_required: number | null;
+          pricing_type: Database["public"]["Enums"]["pricing_type"] | null;
+          primary_category_id: string | null;
+          recommended_capacity: number | null;
+          setup_requirements: string | null;
+          short_description: string | null;
+          slug: string | null;
+          sort_order: number | null;
+          space_height_ft: number | null;
+          space_length_ft: number | null;
+          space_width_ft: number | null;
+          tags: string[] | null;
+          water_required: boolean | null;
+          wet_allowed: boolean | null;
+          wind_sensitive: boolean | null;
+          wind_threshold_mph: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "products_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "products_organization_id_primary_category_id_fkey";
+            columns: ["organization_id", "primary_category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "products_organization_id_primary_category_id_fkey";
+            columns: ["organization_id", "primary_category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
     };
     Functions: {
       accept_invitation: { Args: { p_token: string }; Returns: string };
+      commit_product_import: { Args: { p_batch_id: string }; Returns: Json };
       create_organization: {
         Args: {
           p_legal_name?: string;
@@ -481,9 +1335,31 @@ export type Database = {
     };
     Enums: {
       audit_actor_type: "user" | "ai" | "system" | "public";
+      event_type:
+        | "birthday"
+        | "school"
+        | "church"
+        | "corporate"
+        | "community"
+        | "graduation"
+        | "festival"
+        | "wedding"
+        | "sports"
+        | "holiday"
+        | "other";
+      import_row_action: "create" | "update" | "skip";
+      import_status: "parsed" | "validated" | "committed" | "failed" | "cancelled";
+      media_kind: "image" | "video";
+      media_rights_status: "owned" | "licensed" | "supplier_permitted" | "unverified";
+      media_source: "upload" | "import" | "supplier";
       member_status: "active" | "suspended";
+      mileage_basis: "one_way" | "round_trip";
+      mileage_rounding: "ceil_whole_mile" | "round_whole_mile" | "none";
       org_role: "owner" | "admin" | "office" | "staff";
       org_status: "onboarding" | "active" | "suspended" | "closed";
+      pricing_type: "per_event" | "hourly" | "daily" | "per_unit";
+      product_relation_type: "addon" | "recommended" | "requires";
+      tracking_mode: "serialized" | "pooled";
     };
     CompositeTypes: {
       [_ in never]: never;
@@ -596,9 +1472,32 @@ export const Constants = {
   public: {
     Enums: {
       audit_actor_type: ["user", "ai", "system", "public"],
+      event_type: [
+        "birthday",
+        "school",
+        "church",
+        "corporate",
+        "community",
+        "graduation",
+        "festival",
+        "wedding",
+        "sports",
+        "holiday",
+        "other",
+      ],
+      import_row_action: ["create", "update", "skip"],
+      import_status: ["parsed", "validated", "committed", "failed", "cancelled"],
+      media_kind: ["image", "video"],
+      media_rights_status: ["owned", "licensed", "supplier_permitted", "unverified"],
+      media_source: ["upload", "import", "supplier"],
       member_status: ["active", "suspended"],
+      mileage_basis: ["one_way", "round_trip"],
+      mileage_rounding: ["ceil_whole_mile", "round_whole_mile", "none"],
       org_role: ["owner", "admin", "office", "staff"],
       org_status: ["onboarding", "active", "suspended", "closed"],
+      pricing_type: ["per_event", "hourly", "daily", "per_unit"],
+      product_relation_type: ["addon", "recommended", "requires"],
+      tracking_mode: ["serialized", "pooled"],
     },
   },
 } as const;
