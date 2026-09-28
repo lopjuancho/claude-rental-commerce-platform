@@ -1,6 +1,6 @@
 # Database Design
 
-> Status: **Proposed — Phase 1 schema, pre-implementation.** SQL below is a design sketch; the authoritative version will be the files in `supabase/migrations/` created in Milestones 1–5.
+> Status: **Accepted for Phase 1** (updated 2026-09-28 with ADRs 0001–0006). SQL below is a design sketch; the authoritative version will be the files in `supabase/migrations/` created in Milestones 1–5.
 > See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the surrounding system.
 
 ## 1. Conventions
@@ -35,10 +35,14 @@ organizations ─┬─ organization_domains
                ├─ availability_rules
                ├─ availability_blocks            (org / product / variant / unit scope)
                ├─ reservations ── reservation_allocations   (the ONLY consumer of inventory)
-               ├─ service_areas ── service_area_rules
-               ├─ pricing_rules, tax_rates
+               ├─ service_areas ── service_area_rules      (postal_code / city / mileage)
+               ├─ pricing_rules
+               ├─ tax_jurisdictions ─┬─ tax_rates
+               │                     └─ tax_component_rules
+               ├─ import_batches ── import_rows
                ├─ customers ── events ── quotes ─┬─ quote_items
-               │                                 └─ quote_charges
+               │                                 ├─ quote_charges
+               │                                 └─ booking_requests ── reservations (held → confirmed)
                ├─ conversations ── conversation_messages
                │                └─ ai_actions
                ├─ organization_counters         (quote numbers)
@@ -55,7 +59,9 @@ organizations ─┬─ organization_domains
 - **`product_relations`** added as the seam for add-ons/accessories ("generator", "extra slide lane").
 - `reservations` split into **`reservations`** (header: why inventory is taken — a quote, a manual block for a staff booking, later an order) and **`reservation_allocations`** (what is taken: unit or pooled quantity, and when). Allocations are what the availability engine counts and what the exclusion constraint protects.
 - **`quote_charges`** added next to `quote_items`: delivery, discounts, fees, taxes and manual adjustments are not products and should not be fake quote items.
-- **`tax_rates`** separated from `pricing_rules` — tax is legally distinct and configured differently.
+- **`tax_jurisdictions` / `tax_rates` / `tax_component_rules`** separated from `pricing_rules` — tax is legally distinct, location-based, and taxability differs per component (ADR 0004).
+- **`booking_requests`** added — the "checkout started" state that owns a temporary 15-minute hold (ADR 0002).
+- **`import_batches` / `import_rows`** added — staged CSV import with preview/mapping/validation (ADR 0006).
 - **`service_area_rules`** separated from `service_areas` so one zone can match many ZIPs/cities, and future radius/mileage rules are new rule types.
 - **`role_permissions`** (global) added so authorization checks permissions, not role names.
 - **`organization_counters`** added for gap-tolerant, per-tenant sequential quote numbers.
@@ -102,13 +108,19 @@ create table organization_settings (             -- 1:1 with organizations
   website_url           text,
   address_line1 text, city text, state text, postal_code text,
   -- operational defaults
+  -- operational defaults: the "org" level of the override chain (ADR 0003)
   default_setup_buffer_minutes     integer not null default 60  check (default_setup_buffer_minutes >= 0),
   default_teardown_buffer_minutes  integer not null default 60  check (default_teardown_buffer_minutes >= 0),
   default_event_start_time         time    not null default '10:00',
-  default_rental_duration_minutes  integer not null default 360,
-  min_booking_lead_time_minutes    integer not null default 1440,
-  quote_valid_days                 integer not null default 7,
-  booking_hold_minutes             integer not null default 60,
+  default_rental_duration_minutes  integer not null default 360 check (default_rental_duration_minutes > 0),
+  min_booking_lead_time_minutes    integer not null default 720 check (min_booking_lead_time_minutes >= 0),  -- 12 h
+  overnight_allowed                boolean not null default false,
+  max_wind_mph                     smallint check (max_wind_mph > 0),        -- safety threshold; null = none
+  quote_valid_days                 integer not null default 7   check (quote_valid_days > 0),
+  booking_hold_minutes             integer not null default 15  check (booking_hold_minutes between 1 and 1440),  -- ADR 0002
+  -- delivery origin (for mileage-based delivery, D15)
+  depot_address_line1 text, depot_city text, depot_state text, depot_postal_code text,
+  depot_latitude numeric(9,6), depot_longitude numeric(9,6),
   -- assistant
   assistant_enabled      boolean not null default false,
   assistant_display_name text,
@@ -200,6 +212,12 @@ create table categories (
   description      text,
   sort_order       integer not null default 0,
   is_published     boolean not null default true,
+  -- "category" level of the override chain (ADR 0003); null = inherit from org
+  setup_buffer_minutes        integer check (setup_buffer_minutes >= 0),
+  teardown_buffer_minutes     integer check (teardown_buffer_minutes >= 0),
+  included_duration_minutes   integer check (included_duration_minutes > 0),   -- Water Slides: 240
+  overnight_allowed           boolean,
+  max_wind_mph                smallint check (max_wind_mph > 0),
   archived_at      timestamptz,
   unique (organization_id, id),
   unique (organization_id, slug),
@@ -221,8 +239,14 @@ create table products (
   -- pricing headline (detailed rules in pricing_rules)
   pricing_type              pricing_type not null default 'per_event',
   base_price_cents          bigint not null check (base_price_cents >= 0),
-  included_duration_minutes integer check (included_duration_minutes > 0),   -- e.g. 360 for "6 hours"
+  included_duration_minutes integer check (included_duration_minutes > 0),   -- null = inherit (category → org)
   minimum_rental_minutes    integer check (minimum_rental_minutes > 0),
+  -- "product" level of the override chain (ADR 0003); null = inherit
+  setup_buffer_minutes      integer check (setup_buffer_minutes >= 0),
+  teardown_buffer_minutes   integer check (teardown_buffer_minutes >= 0),
+  min_booking_lead_time_minutes integer check (min_booking_lead_time_minutes >= 0),
+  overnight_allowed         boolean,
+  max_wind_mph              smallint check (max_wind_mph > 0),
   -- suitability (AI-searchable, typed)
   wet_allowed               boolean not null default false,
   dry_allowed               boolean not null default true,
@@ -242,6 +266,9 @@ create table products (
   power_notes               text,                                             -- e.g. "1 dedicated 20A circuit within 50 ft"
   water_required            boolean not null default false,
   operator_required         boolean not null default false,
+  attendants_required       smallint not null default 0 check (attendants_required >= 0),
+  setup_requirements        text,                                             -- customer-facing, e.g. "flat grass, no slope"
+  anchoring_methods         text[] not null default '{}',                      -- 'stakes','sandbags','water_barrels'
   setup_minutes             integer check (setup_minutes >= 0),
   teardown_minutes          integer check (teardown_minutes >= 0),
   -- discovery
@@ -250,11 +277,14 @@ create table products (
   search_vector             tsvector generated always as (…) stored,          -- name/short_description/tags
   -- internal
   internal_notes            text,                                             -- NEVER exposed publicly or to AI
+  external_source           text,                                             -- 'ers','csv' (ADR 0006)
+  external_ref              text,                                             -- source system id for idempotent re-import
   archived_at               timestamptz,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
   unique (organization_id, id),
   unique (organization_id, slug),
   check (wet_allowed or dry_allowed),
+  unique (organization_id, external_source, external_ref),
   foreign key (organization_id, primary_category_id) references categories(organization_id, id)
 );
 create index on products using gin (tags);
@@ -314,6 +344,14 @@ create table product_media (
   width integer, height integer,
   sort_order       integer not null default 0,
   is_primary       boolean not null default false,
+  -- ownership & rights (ADR 0006)
+  uploaded_by      uuid references auth.users(id),
+  source           text not null check (source in ('upload','import','supplier')),
+  original_filename text,
+  rights_status    text not null default 'unverified'
+                     check (rights_status in ('owned','licensed','supplier_permitted','unverified')),
+  rights_notes     text,
+  created_at       timestamptz not null default now(),
   foreign key (organization_id, product_id) references products(organization_id, id) on delete cascade
 );
 
@@ -329,6 +367,10 @@ create table product_relations (                             -- add-ons / access
 ```
 
 **Relational vs JSONB reasoning.** Anything the assistant filters on or makes a claim about (capacity, ages, wet/dry, dimensions, power, water, operator, event types, surfaces) is a typed column with `CHECK` constraints — this is what lets `search_products` be precise and lets the grounding validator verify that a cited attribute exists. `extra_specs` JSONB exists only for display-only oddities (e.g. "number of basketball hoops") and the assistant is instructed/validated not to rely on it for suitability claims. `tags` and `ideal_event_types` are arrays (not join tables) because they are small, filter-only, and GIN-indexable; tags will move to a table if tenants need managed tag vocabularies.
+
+**Media rights:** public catalog views only expose media with `rights_status <> 'unverified'`. Storage paths are always prefixed with the owning `organization_id`; media is never copied between organizations.
+
+**Override chain (ADR 0003):** `null` in a variant/product/category override column means "inherit". Resolution is implemented once in `src/domain/config/resolve.ts` and, for buffers, in the SQL function `app.resolve_buffers(variant_id)` used by `reserve_inventory`.
 
 **Quantity** is not a column on `products`: it is derived — count of active `inventory_units` for serialized variants, or `pooled_quantity` for pooled ones. A generated `product_inventory_summary` view exposes it for admin and search.
 
@@ -373,12 +415,13 @@ create table availability_rules (                  -- declarative constraints, Z
 
 ```sql
 create type reservation_status as enum ('held','confirmed','released','cancelled','completed');
-create type reservation_source as enum ('quote','manual','import');
+create type reservation_source as enum ('booking_request','manual','import');
 
 create table reservations (
   id               uuid primary key default gen_random_uuid(),
   organization_id  uuid not null references organizations(id) on delete cascade,
   source           reservation_source not null,
+  booking_request_id uuid,
   quote_id         uuid,
   event_id         uuid,
   status           reservation_status not null default 'held',
@@ -415,6 +458,26 @@ create table reservation_allocations (
 create index on reservation_allocations using gist (variant_id, occupied_period)
   where status in ('held','confirmed');
 ```
+
+```sql
+create type booking_request_status as enum ('pending','confirmed','expired','cancelled');
+
+create table booking_requests (                  -- ADR 0002: "checkout started"
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  quote_id         uuid not null,
+  status           booking_request_status not null default 'pending',
+  hold_expires_at  timestamptz not null,       -- now() + organization_settings.booking_hold_minutes (default 15)
+  customer_message text,
+  confirmed_by     uuid references auth.users(id),
+  confirmed_at     timestamptz,
+  created_at       timestamptz not null default now(),
+  unique (organization_id, id),
+  foreign key (organization_id, quote_id) references quotes(organization_id, id)
+);
+```
+
+Flow: draft quote (no inventory) → `request_booking(quote)` creates `booking_requests` + `reservations(status='held', hold_expires_at)` via `reserve_inventory` → staff `confirm_booking` flips reservation to `confirmed` (re-checking the hold is still live) → or the hold expires and inventory is released automatically.
 
 ### 6.1 Why this design
 
@@ -498,18 +561,23 @@ create table service_area_rules (
   id               uuid primary key default gen_random_uuid(),
   organization_id  uuid not null,
   service_area_id  uuid not null,
-  rule_type        text not null check (rule_type in ('postal_code','city')),  -- later: 'radius','mileage','polygon'
+  rule_type        text not null check (rule_type in ('postal_code','city','mileage')),  -- later: 'polygon'
   postal_code      text,
   city             citext,
   state            text,
+  -- mileage (ADR 0003 / D15): fee = max(0, ceil(miles) - free_miles) * per_mile_cents, if miles <= max_miles
+  free_miles       numeric(6,2) check (free_miles >= 0),
+  per_mile_cents   bigint check (per_mile_cents >= 0),
+  max_miles        numeric(6,2) check (max_miles > 0),
   foreign key (organization_id, service_area_id) references service_areas(organization_id, id) on delete cascade,
   check ((rule_type = 'postal_code' and postal_code is not null)
-      or (rule_type = 'city' and city is not null and state is not null))
+      or (rule_type = 'city' and city is not null and state is not null)
+      or (rule_type = 'mileage' and free_miles is not null and per_mile_cents is not null))
 );
 create unique index on service_area_rules (organization_id, postal_code) where rule_type = 'postal_code';
 ```
 
-Resolution order: exact postal code → city+state → not served. Ties broken by `priority`. Result includes `requires_manual_review`, surfaced to the AI as "a team member will confirm delivery". Mileage support later adds `rule_type = 'mileage'` + params (base fee, per-mile rate, max miles) evaluated through a `DistanceProvider`.
+Resolution order: exact postal code → city+state → mileage rule (needs a distance from the `DistanceProvider`, D15) → not served. Ties broken by `priority`. Result includes `requires_manual_review`, surfaced to the AI as "a team member will confirm delivery". Tiky Jumps' "first 5 miles free, then $4/mile" is one `mileage` rule (`free_miles = 5`, `per_mile_cents = 400`). Rounding of miles, one-way vs round trip and the maximum distance are open (D15); without a provider, mileage-only coverage returns `requires_manual_review` and no fee.
 
 ## 8. Pricing
 
@@ -519,8 +587,9 @@ create table pricing_rules (
   organization_id  uuid not null references organizations(id) on delete cascade,
   name             text not null,
   rule_type        text not null check (rule_type in (
-                     'extra_hour','overnight','additional_day','quantity_tier',
+                     'extra_hour','overnight','additional_day','quantity_tier','attendant_fee',
                      'date_surcharge','discount_percent','discount_fixed','minimum_charge')),
+                                             -- additional_day params: {"percent_of_base_bps": 2500}
   scope            text not null check (scope in ('organization','category','product','variant')),
   category_id uuid, product_id uuid, variant_id uuid,
   params           jsonb not null,           -- validated per rule_type by Zod (e.g. {"amount_cents":5000})
@@ -535,17 +604,41 @@ create table pricing_rules (
   foreign key (organization_id, variant_id)  references product_variants(organization_id, id)
 );
 
-create table tax_rates (
+create type tax_component as enum ('rental','delivery','labor','fee','discount','adjustment');  -- ADR 0004
+
+create table tax_jurisdictions (
   id               uuid primary key default gen_random_uuid(),
   organization_id  uuid not null references organizations(id) on delete cascade,
-  name             text not null,             -- "TN state + local"
+  name             text not null,             -- "Germantown, TN"
+  state            text not null,             -- 'TN'
+  postal_codes     text[] not null default '{}',   -- Phase 1 matching; address-level provider later
+  requires_review_postal_codes text[] not null default '{}',  -- ZIPs straddling boundaries
+  priority         integer not null default 0,
+  is_active        boolean not null default true,
+  unique (organization_id, id)
+);
+
+create table tax_rates (                      -- components summed, e.g. state + local
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  jurisdiction_id  uuid not null,
+  name             text not null,             -- "State", "Local"
   rate_bps         integer not null check (rate_bps between 0 and 5000),
-  applies_to_rentals  boolean not null default true,
-  applies_to_delivery boolean not null default false,
-  is_default       boolean not null default false,
-  is_active        boolean not null default true
+  valid_from date, valid_to date,
+  foreign key (organization_id, jurisdiction_id) references tax_jurisdictions(organization_id, id) on delete cascade
+);
+
+create table tax_component_rules (            -- taxability per jurisdiction × component
+  organization_id  uuid not null,
+  jurisdiction_id  uuid not null,
+  component        tax_component not null,
+  taxable          boolean not null,
+  primary key (jurisdiction_id, component),
+  foreign key (organization_id, jurisdiction_id) references tax_jurisdictions(organization_id, id) on delete cascade
 );
 ```
+
+No tax values are seeded by the platform. Missing a `tax_component_rules` row for a component is treated as **unresolved** (warning, staff review), never as a silent default.
 
 Base price is on the product/variant (`base_price_cents`, `included_duration_minutes`, `price_override_cents`) because every product has exactly one; rules modify it. `params` is JSONB **by design** here: each rule type has a different shape, the set is small and code-owned, and the Zod schema per `rule_type` is the contract (a DB `CHECK` validates required keys). Pricing results are not stored in `pricing_rules`; quotes store snapshots.
 
@@ -656,7 +749,8 @@ create table quote_charges (
   id               uuid primary key default gen_random_uuid(),
   organization_id  uuid not null,
   quote_id         uuid not null,
-  kind             text not null check (kind in ('extra_time','delivery','fee','discount','tax','adjustment')),
+  kind             text not null check (kind in ('extra_time','overnight','additional_day','delivery','labor','fee','discount','tax','adjustment')),
+  tax_component    tax_component,                -- null only for kind = 'tax'
   label            text not null,
   amount_cents     bigint not null,              -- negative for discounts
   source_rule_id   uuid,                         -- pricing_rules / tax_rates / service_areas id
@@ -822,6 +916,39 @@ Automated: for every table in `public`, generate cases {anon, user-A-owner, user
   ```
 - `scripts/import-tenant.ts <slug> --env=<env>` — validates the bundle, upserts by `(organization_id, slug)` (idempotent), uploads media, writes an audit entry. Tiky Jumps is onboarded with this same tool that any future tenant would use.
 
+### 13.1 CSV import staging (ADR 0006)
+
+```sql
+create table import_batches (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  kind             text not null check (kind in ('products','categories','customers')),
+  source           text not null,             -- 'ers_csv','spreadsheet'
+  original_filename text,
+  storage_path     text,                      -- private bucket, org-prefixed
+  mapping          jsonb,                     -- column → field; saved presets in import_mapping_presets
+  status           text not null check (status in ('uploaded','parsed','mapped','validated','committed','failed','cancelled')),
+  summary          jsonb,                     -- counts: create/update/skip/error
+  created_by       uuid references auth.users(id),
+  created_at timestamptz not null default now(), committed_at timestamptz,
+  unique (organization_id, id)
+);
+
+create table import_rows (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null,
+  batch_id         uuid not null,
+  row_number       integer not null,
+  raw              jsonb not null,            -- original CSV cells
+  mapped           jsonb,                     -- after mapping, before validation
+  action           text check (action in ('create','update','skip')),
+  errors           jsonb not null default '[]',
+  warnings         jsonb not null default '[]',
+  target_id        uuid,                      -- created/updated product id
+  foreign key (organization_id, batch_id) references import_batches(organization_id, id) on delete cascade
+);
+```
+
 ## 14. Migration plan
 
 | Migration | Milestone |
@@ -831,6 +958,7 @@ Automated: for every table in `public`, generate cases {anon, user-A-owner, user
 | `0003_audit` | M1 |
 | `0004_catalog` (categories, products, variants, units, media, relations, public views, storage policies) | M2 |
 | `0005_availability` (blocks, rules, reservations, allocations, functions) | M3 |
-| `0006_service_areas_pricing` (service areas, rules, pricing rules, tax rates) | M4 |
-| `0007_customers_events_quotes` (+ counters, status trigger) | M5 |
+| `0004b_imports` (import batches/rows, mapping presets) | M2 |
+| `0006_service_areas_pricing` (service areas incl. mileage rules, pricing rules, tax jurisdictions/rates/component rules) | M4 |
+| `0007_customers_events_quotes` (+ counters, status trigger, booking requests) | M5 |
 | `0008_conversations_ai` | M7 |

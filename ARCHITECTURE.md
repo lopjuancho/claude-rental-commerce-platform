@@ -1,6 +1,6 @@
 # Architecture
 
-> Status: **Proposed — Phase 1 architecture, pre-implementation.**
+> Status: **Accepted for Phase 1** (decisions D1–D4, D11, D13 accepted 2026-09-28; see §12).
 > Companion documents: [`DATABASE.md`](./DATABASE.md) (schema, RLS, availability SQL) and [`MVP.md`](./MVP.md) (scope, milestones, acceptance criteria).
 
 ## 1. What we are building
@@ -26,7 +26,7 @@ Versions are the current stable releases at the time of writing (2026-09); they 
 | Concern | Choice | Notes |
 |---|---|---|
 | Framework | Next.js 16 (App Router), React 19 | Server Components for catalog/admin reads; Server Actions + Route Handlers for mutations and the assistant stream. |
-| Language | TypeScript, `strict: true` (+ `noUncheckedIndexedAccess`) | TypeScript 7 (native compiler) is current; see Decision D11 on tooling compatibility. |
+| Language | TypeScript 6.0.3 (pinned), `strict: true` (+ `noUncheckedIndexedAccess`) | TS 7 not yet supported by typescript-eslint; see ADR 0005. |
 | Styling/UI | Tailwind CSS 4, shadcn/ui (copied components, not a runtime dep) | Tenant theming via CSS variables. |
 | Database | PostgreSQL (Supabase-managed) | `btree_gist` for exclusion constraints; `pg_trgm` for fuzzy product search. |
 | Auth | Supabase Auth (email + password, magic link; OAuth later) | Cookie sessions via `@supabase/ssr`. |
@@ -166,7 +166,7 @@ All Supabase clients are created by factories in `src/server/db/`:
 
 1. **User context** (`createUserClient()`): anon key + the signed-in user's JWT from cookies. **RLS enforced.** Used for all admin/staff reads and writes. This is the default.
 2. **Public context** (`createPublicClient()`): anon key, no user. RLS allows reading only published catalog data of active organizations, exposed through narrow views/functions that omit internal fields (cost, internal notes, unit serials).
-3. **System context** (`createSystemClient()`): service-role key, **bypasses RLS**. Used only for (a) public-assistant writes on behalf of anonymous visitors (create customer / event / quote draft, conversation logging, `ai_actions`), (b) tenant import, (c) future background jobs. Every system-context repository function takes an explicit `organizationId` that **must come from server-side tenant resolution**, and every query is filtered by it. Integration tests assert cross-tenant writes fail in this layer too.
+3. **System context** (`createSystemClient()`): service-role key, **bypasses RLS**. Used only for (a) anonymous/public-assistant writes per ADR 0001 (customer lead, event draft, conversation, quote draft, temporary booking request, `ai_actions`), (b) tenant import, (c) future background jobs. Every system-context repository function takes an explicit `organizationId` that **must come from server-side tenant resolution**, and every query is filtered by it. Integration tests assert cross-tenant writes fail in this layer too.
 
 Where an operation must be atomic or is security-sensitive (reserving inventory, allocating quote numbers, accepting a quote), it is a `SECURITY DEFINER` Postgres function that performs its own authorization check (`app.has_permission(...)` or an explicit tenant argument check) and sets `search_path = ''`. supabase-js cannot run multi-statement transactions over PostgREST, so this is also the correctness mechanism for race conditions.
 
@@ -198,7 +198,7 @@ Where an operation must be atomic or is security-sensitive (reserving inventory,
 
 The hardest correctness problem in the product. Approach:
 
-1. **Everything is a time range.** A reservation occupies `[event_start − setup_buffer, event_end + teardown_buffer)` as a `tstzrange` (half-open, so back-to-back bookings are allowed). Multi-day and overnight rentals are simply longer ranges; no date-bucketing.
+1. **Everything is a time range.** A reservation occupies `[event_start − setup_buffer, event_end + teardown_buffer)` — buffers resolved through the variant → product → category → org chain (ADR 0003) as a `tstzrange` (half-open, so back-to-back bookings are allowed). Multi-day and overnight rentals are simply longer ranges; no date-bucketing.
 2. **Two tracking modes per variant:**
    - **Serialized** (inflatables, trains, foam machines): each physical unit is an `inventory_units` row. A reservation allocates specific units. A PostgreSQL **exclusion constraint** — `EXCLUDE USING gist (inventory_unit_id WITH =, occupied_period WITH &&) WHERE (status IN ('held','confirmed'))` — makes double-booking a unit physically impossible, regardless of concurrency.
    - **Pooled** (chairs, tables): a quantity on the variant. Reservation calls take a transaction-scoped advisory lock on the variant, sum overlapping active allocations, and reject if `booked + requested > pooled_quantity`.
@@ -206,7 +206,7 @@ The hardest correctness problem in the product. Approach:
 4. **Two operations, one source of truth:**
    - `check_availability(...)` — read-only, returns `{available, available_quantity, requested_quantity, reasons[]}`. Used by search and the AI. It is advisory: the world can change a second later.
    - `reserve_inventory(...)` — the only way to take inventory. Runs in one transaction; for serialized items picks free units (`FOR UPDATE SKIP LOCKED`), inserts allocations, and relies on the exclusion constraint as the final guarantee. Fails with a typed error (`INSUFFICIENT_AVAILABILITY`) rather than overbooking.
-5. **Holds:** allocations may be `held` with an `expires_at` (e.g. while a customer confirms a quote). Expired holds are ignored by availability queries immediately (predicate on `expires_at > now()`), and swept to `released` by a periodic job — correctness never depends on the sweeper running.
+5. **Holds (ADR 0002):** draft quotes hold nothing. A booking request creates allocations with `status = 'held'` and `hold_expires_at = now() + organization_settings.booking_hold_minutes` (default 15). Staff confirmation turns them `confirmed`. Expired holds are ignored by availability queries immediately (predicate on `hold_expires_at > now()`), and swept to `released` by a periodic job — correctness never depends on the sweeper running.
 6. **Pure core + SQL enforcement.** Interval math, buffer expansion, and capacity-over-time calculation live in `src/domain/availability` and are unit-tested exhaustively; the SQL functions implement the same semantics and are tested by integration tests including a concurrency test (N parallel reservations for the last unit → exactly one succeeds).
 
 Rationale and SQL: DATABASE.md §6.
@@ -231,17 +231,20 @@ Rationale and SQL: DATABASE.md §6.
     "engine_version":"1", "warnings":[] }
   ```
 - All arithmetic in integer cents; percentages as basis points; one documented rounding rule (half-up at line level for tax; Decision D4 confirms tax rules).
+- **Additional days** are a percentage of the base rental (`additional_day` rule with `percent_of_base_bps`; Tiky Jumps: 2500 = +25 %/day). **Included duration** follows the override chain (e.g. Water Slides category = 4 h).
+- **Tax (ADR 0004):** each line carries a tax component class (`rental`, `delivery`, `labor`, `fee`, `discount`, `adjustment`). Tax is computed from the jurisdiction resolved from the event address and the jurisdiction's per-component taxability rules. Unresolved jurisdiction → warning + quote cannot leave `draft` without staff review.
 - Quotes store the full breakdown as an immutable **pricing snapshot** plus normalized totals. Re-pricing is an explicit action; historical quotes never silently change when rules change.
 
 ### 7.4 Delivery / service areas
 
-`service_areas` (zones) with match rules (`postal_code`, `city` + state) and a flat fee / minimum order / "requires confirmation" flag. `check_service_area(address)` returns `{served, area_id, fee_cents, requires_manual_review, reason}`. A `DistanceProvider` interface (geocode + drive distance) is defined but unimplemented; a future `rule_type = 'radius'|'mileage'` plugs in without schema redesign (DATABASE.md §7).
+`service_areas` (zones) with match rules (`postal_code`, `city` + state) and a flat fee / minimum order / "requires confirmation" flag. `check_service_area(address)` returns `{served, area_id, fee_cents, requires_manual_review, reason}`. Delivery pricing supports **flat zone fees** and **mileage rules** (`free_miles`, `per_mile_cents`, `max_miles`; Tiky Jumps: first 5 miles free, then $4/mile). Mileage needs a `DistanceProvider` (geocode + driving distance from the organization's depot); the provider is Decision D15. Until it exists, an address not covered by a configured zone returns `requires_manual_review` and no fee (DATABASE.md §7).
 
 ### 7.5 Customers, events, quotes
 
 - `customers` — per-organization, deduplicated by normalized email/phone.
 - `events` — the structured description of the customer's party (type, date/time range, address, guest/children counts, ages, budget, indoor/outdoor, surface, power, water). Fields are nullable so the assistant can fill them progressively; completeness is computed by `domain/events`.
 - `quotes` → `quote_items` (products) + `quote_charges` (delivery, discounts, fees, tax, manual adjustments) + `pricing_snapshot`. Status state machine in `domain/quotes`: `draft → sent → viewed → accepted | expired | cancelled` (plus `declined`). Transitions validated in code and in a DB trigger. Acceptance is the future hook for payments/contracts and converts holds into confirmed reservations.
+- `booking_requests` — created when a customer starts checkout/requests booking from a quote; owns the temporary hold (ADR 0002) and moves `pending → confirmed | expired | cancelled`.
 - Quote numbers are per-organization sequential (`TJ-1042`) via a locked counter row.
 
 ## 8. AI Event Assistant
@@ -388,23 +391,25 @@ Failure cases are first-class: every "should succeed" test has at least one sibl
 | Admin AI copilot | Tool `access: "staff"` path. |
 | Billing the tenants (SaaS plans) | `organizations.plan`, `status`; per-org AI usage metering from `ai_actions`. |
 
-## 12. Architectural decisions to confirm before implementation
+## 12. Architectural decisions
 
-Items marked ★ block the milestone noted.
+Accepted decisions have ADRs in [`docs/decisions/`](./docs/decisions/README.md).
 
-| # | Decision | Recommendation | Blocks |
-|---|---|---|---|
-| D1 ★ | **Public-assistant writes:** service-role "system context" with mandatory server-resolved tenant (recommended) vs. Supabase anonymous sign-ins so visitors get an `auth.uid()` and RLS applies to them too. | Start with system context + `SECURITY DEFINER` functions; revisit anonymous sign-ins when customer accounts/portal arrive. | M5/M7 |
-| D2 ★ | **Do quotes hold inventory?** Options: none until staff confirms; short hold (e.g. 30–60 min) on customer "request booking"; hold for the quote's lifetime. | Draft quotes do **not** hold. "Request booking" creates a time-limited hold; staff confirmation (Phase 1) converts it to `confirmed`. Payments later replace staff confirmation. | M3/M5 |
-| D3 ★ | **Default buffers & time windows:** setup/teardown buffer per product vs. per org; do Tiky Jumps book by time window or by "full day"? Overnight rules? | Buffers per variant with org defaults; store real time ranges always; "full day" is a pricing concept, not an availability concept. Need Tiky Jumps' actual rules. | M3 |
-| D4 ★ | **Tax:** which jurisdiction(s) (Germantown TN vs MD matters), is delivery taxable, per-org single rate vs. per-location rates, tax-inclusive display? | Per-org configurable `tax_rates` with `applies_to` flags; single rate for Phase 1; external tax service later. Need confirmation from Tiky Jumps' accountant. | M4 |
-| D5 | **Bundles/combos:** is a "combo" a single physical unit (usual for inflatables) or a package of separate items (e.g. "party package = bounce + 2 tables")? | Combos = single product. Packages = future `product_components` table; not Phase 1 unless Tiky Jumps sells packages today. | M2 |
-| D6 | **Media storage:** Supabase Storage vs. Cloudflare R2 + Images. | Supabase Storage in Phase 1 (RLS on `storage.objects` by org path prefix, one fewer vendor); `product_media` stores provider + key so migrating is a data job. | M2 |
-| D7 | **Platform domain & tenant URL scheme** (`<slug>.platform.com` vs path `/t/<slug>` in dev). Product name. | Host-based resolution with a path fallback in development only. | M1 |
-| D8 | **Conversation retention & privacy notice** (how long transcripts/PII are kept; consent text). | 12-month default, per-org configurable; privacy notice link in assistant UI. | M7 |
-| D9 | **MFA for owner/admin** mandatory from day one? | Yes for owner/admin; optional for office/staff. | M1 |
-| D10 | **Turnstile** on the assistant and quote submission. | Yes (invisible mode). | M7 |
-| D11 | **TypeScript 7** (native compiler) vs 6.x: confirm Next.js/typescript-eslint/Vitest support at init. | Use TS 7 if the toolchain supports it at M1; otherwise pin the newest supported 6.x and upgrade later. | M1 |
-| D12 | **OpenAI model choice & cost ceiling** per tenant per month. | Config-driven model ID; start with a mid-tier current model for chat, evaluate; hard daily spend cap per org. | M7 |
-| D13 | **Tiky Jumps source data:** what format is the current inventory in (existing rental software export, spreadsheet, website scrape)? Photos ownership/rights. | Define the import bundle format in M2; build a mapper for their actual export. | M2 |
-| D14 | **Customer-visible "availability" granularity:** show exact remaining quantity or just available/unavailable? | Public: boolean + "limited" flag; staff: exact counts. | M3/M6 |
+| # | Decision | Status / outcome |
+|---|---|---|
+| D1 | Public-assistant / anonymous writes | **Accepted** ([ADR 0001](./docs/decisions/0001-anonymous-write-path.md)): server-side write path only, org resolved from host, validated, rate-limited, audited. No anon DB writes. |
+| D2 | Do quotes hold inventory? | **Accepted** ([ADR 0002](./docs/decisions/0002-inventory-holds.md)): draft = no hold; booking request = 15-min hold (org-configurable); confirmed = firm reservation. Expired holds release automatically. |
+| D3 | Rental rules, buffers, lead time | **Accepted** ([ADR 0003](./docs/decisions/0003-rental-rules-as-configuration.md)): configuration with variant → product → category → org → platform override chain. Defaults 60/60 min buffers, 12 h lead time. |
+| D4 | Tax | **Accepted** ([ADR 0004](./docs/decisions/0004-tax-engine.md)): jurisdiction from event location; configurable rates; per-component taxability. Tennessee treatment validated before production. |
+| D5 | Bundles/combos | Proposed: combos = single product; packages = future `product_components`. Confirm whether Tiky Jumps sells packages. |
+| D6 | Media storage | Proposed: Supabase Storage in Phase 1, provider-agnostic `product_media`. |
+| D7 | Platform domain & tenant URL scheme; product name | **Open.** Host-based resolution implemented; dev fallback `?tenant=` / `DEV_TENANT_SLUG` only when `NODE_ENV !== 'production'`. |
+| D8 | Conversation retention & privacy notice | Open (M7). |
+| D9 | MFA for owner/admin | Proposed yes; TOTP enabled in Supabase config; enforcement UI in M8. |
+| D10 | Turnstile on assistant & quote submission | Proposed yes (M7). |
+| D11 | TypeScript version | **Accepted** ([ADR 0005](./docs/decisions/0005-typescript-version.md)): TS 6.0.3 pinned; TS 7 blocked by typescript-eslint peer range. |
+| D12 | OpenAI model & per-tenant cost ceiling | Open (M7). |
+| D13 | Tiky Jumps import & media rights | **Accepted** ([ADR 0006](./docs/decisions/0006-inventory-import-and-media-rights.md)): CSV-first staged import (ERS export → preview → mapping → validation → commit); media rights metadata; no cross-tenant media. |
+| D14 | Public availability granularity | Proposed: public boolean + "limited"; staff exact counts. |
+| D15 | **New:** mileage delivery distance source (provider, depot, one-way/round trip, rounding, max distance) | **Open — needed by M4.** Until decided, addresses outside configured ZIP/city zones return `requires_manual_review`; the AI never quotes a mileage fee without a computed distance. |
+| D16 | **New:** wind threshold (15 mph) — informational policy only, or a staff "weather hold" that blocks wind-sensitive products? | Open (M3/M7). Stored as configuration now. |

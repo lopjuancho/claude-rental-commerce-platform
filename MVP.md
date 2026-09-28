@@ -1,6 +1,6 @@
 # MVP — Phase 1 Plan
 
-> Status: **Proposed.** Architecture in [`ARCHITECTURE.md`](./ARCHITECTURE.md), schema in [`DATABASE.md`](./DATABASE.md).
+> Status: **Accepted** (decisions recorded in [`docs/decisions/`](./docs/decisions/README.md)). Architecture in [`ARCHITECTURE.md`](./ARCHITECTURE.md), schema in [`DATABASE.md`](./DATABASE.md).
 
 ## 1. Phase 1 goal
 
@@ -57,8 +57,10 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 ### M2 — Catalog, categories, media, inventory
 - Migration `0004`; category & product CRUD (admin) with Zod-validated forms; variants (default auto-created); inventory units / pooled quantity; media upload to Storage with org-prefixed paths.
 - Public catalog views excluding internal fields.
-- Tenant import bundle format + `import-tenant.ts`; Tiky Jumps bundle drafted from their real data (D13).
-- **Tests:** RLS matrix for catalog tables + storage; anon cannot see unpublished products or `internal_notes`; slug uniqueness per org (same slug allowed in two orgs); invalid specs rejected (max_age < min_age, neither wet nor dry).
+- CSV import pipeline (ADR 0006): upload → staging → field mapping (ERS preset as data) → validation → preview → idempotent commit; manual product creation uses the same validation.
+- Media rights metadata; unverified media cannot be published.
+- Tenant configuration bundle + `import-tenant.ts` for settings/categories/service areas/pricing (Tiky Jumps' initial rules from ADR 0003 are data here).
+- **Tests:** RLS matrix for catalog tables + storage; anon cannot see unpublished products, `internal_notes` or unverified media; import re-run updates instead of duplicating; invalid CSV rows reported, not imported; cross-org media path rejected; slug uniqueness per org (same slug allowed in two orgs); invalid specs rejected (max_age < min_age, neither wet nor dry).
 
 ### M3 — Availability engine
 - `domain/availability` (intervals, buffers, peak capacity) — pure and exhaustively tested.
@@ -67,15 +69,15 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 - **Tests:** all scenarios in DATABASE.md §6.3 including the concurrency race and DST.
 
 ### M4 — Pricing engine (+ service areas, tax)
-- `domain/pricing` rule engine with itemized output; migration `0006`; service-area resolution; tax.
-- Admin: pricing rules, tax rate, service areas (ZIP/city lists).
-- **Tests:** base, extra hours, overnight, multi-day, quantity, discount percent/fixed/code, min charge, delivery, tax on/off delivery, rounding, negative totals prevented, unknown rule type rejected, deterministic output snapshot tests.
+- `domain/pricing` rule engine with itemized output; migration `0006`; service-area resolution incl. mileage rule (needs D15 provider, otherwise manual review); location-based tax with per-component taxability (ADR 0004).
+- Admin: pricing rules, tax jurisdictions/rates/taxability, service areas (ZIP/city lists, mileage rule).
+- **Tests:** base, extra hours, overnight, multi-day (+25 % of base per extra day), mileage (≤5 mi free, 5.1 mi, beyond max), quantity, discount percent/fixed/code, min charge, delivery, taxability per component (rental/delivery/labor/fee/discount), unresolved jurisdiction warning, rounding, negative totals prevented, unknown rule type rejected, deterministic output snapshot tests.
 
 ### M5 — Customers, events, quotes
 - Migration `0007`; services for customer match/create, event create/update, quote create/add item/re-price/transition; per-org quote numbering.
-- Booking confirmation: quote → reservation (held/confirmed) via `reserve_inventory`.
+- Booking flow (ADR 0002): draft quote (no hold) → booking request (15-min hold, org-configurable) → staff confirmation (firm reservation); expired holds release automatically.
 - Admin: customers, events, quotes list/detail, status actions, print-friendly quote view.
-- **Tests:** quote totals equal engine output; stored totals CHECK; illegal status transitions rejected; accepting a quote with unavailable items fails cleanly; duplicate customers deduplicated; staff role cannot edit quotes.
+- **Tests:** quote totals equal engine output; stored totals CHECK; illegal status transitions rejected; booking request for unavailable items fails cleanly; expired hold no longer blocks and cannot be confirmed; duplicate customers deduplicated; staff role cannot edit quotes.
 
 ### M6 — Public catalog (storefront)
 - Tenant-themed, mobile-first storefront: hero "What are you planning?" input, category rails, category pages, product detail (gallery, specs, requirements), "Check availability" (date/time → `check_availability`), "Get quote" form, "Ask AI about this item".
@@ -101,14 +103,16 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 
 ## 6. Open questions for Tiky Jumps / product owner
 
-(Decision IDs refer to ARCHITECTURE.md §12.)
+Answered 2026-09-28: D1, D2, D3, D4 (validation of Tennessee treatment pending), D11, D13 — see `docs/decisions/`.
 
-1. Current inventory source & format; photo rights (D13).
-2. Real booking rules: rental window lengths, setup/teardown times, overnight policy, lead time, closed days (D3).
-3. Tax jurisdiction and whether delivery is taxable (D4).
-4. Do they sell packages/bundles today (D5)?
-5. When should inventory be held — at quote request or only after staff confirmation (D2)?
-6. Delivery zones: list of ZIPs/cities and fees; areas needing manual review.
+Still open:
+
+1. **D15 — mileage delivery:** distance provider, depot address, one-way vs round trip, mile rounding, maximum distance.
+2. **D16 — wind threshold:** informational only, or staff "weather hold" blocking wind-sensitive products?
+3. Exact Tennessee tax configuration (rates, taxability of delivery/labor/fees) — before production.
+4. A sample ERS CSV export (a few rows is enough) to build the mapping preset.
+5. Do they sell packages/bundles today (D5)?
+6. ZIP/city delivery zones, if any, in addition to mileage.
 7. Discounts in use today (weekday, multi-item, promo codes)?
 8. Who on the team gets which role?
 9. How should "send quote" reach the customer in Phase 1 (copy link, their own email, platform email)?
