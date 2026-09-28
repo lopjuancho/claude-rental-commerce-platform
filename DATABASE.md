@@ -115,12 +115,17 @@ create table organization_settings (             -- 1:1 with organizations
   default_rental_duration_minutes  integer not null default 360 check (default_rental_duration_minutes > 0),
   min_booking_lead_time_minutes    integer not null default 720 check (min_booking_lead_time_minutes >= 0),  -- 12 h
   overnight_allowed                boolean not null default false,
-  max_wind_mph                     smallint check (max_wind_mph > 0),        -- safety threshold; null = none
+  wind_threshold_mph               smallint check (wind_threshold_mph > 0),  -- ADR 0010; Tiky Jumps: 15
   quote_valid_days                 integer not null default 7   check (quote_valid_days > 0),
   booking_hold_minutes             integer not null default 15  check (booking_hold_minutes between 1 and 1440),  -- ADR 0002
-  -- delivery origin (for mileage-based delivery, D15)
-  depot_address_line1 text, depot_city text, depot_state text, depot_postal_code text,
-  depot_latitude numeric(9,6), depot_longitude numeric(9,6),
+  -- road-distance delivery (ADR 0009); multiple depots later via organization_depots
+  primary_depot_address_line1 text, primary_depot_city text, primary_depot_state text, primary_depot_postal_code text,
+  primary_depot_latitude numeric(9,6), primary_depot_longitude numeric(9,6),
+  free_delivery_miles      numeric(6,2) check (free_delivery_miles >= 0),          -- 5
+  per_mile_rate_cents      bigint check (per_mile_rate_cents >= 0),                -- 400
+  maximum_delivery_miles   numeric(6,2) check (maximum_delivery_miles > 0),        -- null = no maximum
+  mileage_rounding_method  mileage_rounding not null default 'ceil_whole_mile',    -- ceil_whole_mile | round_whole_mile | none
+  mileage_basis            mileage_basis not null default 'one_way',               -- one_way | round_trip
   -- assistant
   assistant_enabled      boolean not null default false,
   assistant_display_name text,
@@ -217,7 +222,8 @@ create table categories (
   teardown_buffer_minutes     integer check (teardown_buffer_minutes >= 0),
   included_duration_minutes   integer check (included_duration_minutes > 0),   -- Water Slides: 240
   overnight_allowed           boolean,
-  max_wind_mph                smallint check (max_wind_mph > 0),
+  wind_sensitive              boolean,                                          -- ADR 0010; null = not sensitive
+  wind_threshold_mph          smallint check (wind_threshold_mph > 0),
   archived_at      timestamptz,
   unique (organization_id, id),
   unique (organization_id, slug),
@@ -246,7 +252,8 @@ create table products (
   teardown_buffer_minutes   integer check (teardown_buffer_minutes >= 0),
   min_booking_lead_time_minutes integer check (min_booking_lead_time_minutes >= 0),
   overnight_allowed         boolean,
-  max_wind_mph              smallint check (max_wind_mph > 0),
+  wind_sensitive            boolean,                                          -- null = inherit from category (ADR 0010)
+  wind_threshold_mph        smallint check (wind_threshold_mph > 0),          -- null = inherit
   -- suitability (AI-searchable, typed)
   wet_allowed               boolean not null default false,
   dry_allowed               boolean not null default true,
@@ -411,6 +418,30 @@ create table availability_rules (                  -- declarative constraints, Z
 );
 ```
 
+### 5.1 Weather blocks (ADR 0010, M3)
+
+```sql
+create type weather_block_status as enum ('proposed','confirmed','lifted');
+
+create table weather_blocks (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  period           tstzrange not null check (not isempty(period)),
+  status           weather_block_status not null default 'proposed',
+  source           text not null check (source in ('staff','weather_api')),
+  reason           text not null,
+  wind_mph         smallint,                       -- observed/forecast, informational
+  applies_to_all_wind_sensitive boolean not null default true,
+  created_by uuid, confirmed_by uuid, confirmed_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (organization_id, id)
+);
+create table weather_block_categories (organization_id uuid, weather_block_id uuid, category_id uuid, …);  -- composite FKs
+create table weather_block_products   (organization_id uuid, weather_block_id uuid, product_id uuid, …);
+```
+
+Only `confirmed` blocks make wind-sensitive products unavailable (`WEATHER_BLOCK`). `proposed` blocks (e.g. from a weather API) only warn. Overlapping reservations get a review flag; nothing is cancelled automatically.
+
 ## 6. Reservations & the availability engine
 
 ```sql
@@ -561,23 +592,28 @@ create table service_area_rules (
   id               uuid primary key default gen_random_uuid(),
   organization_id  uuid not null,
   service_area_id  uuid not null,
-  rule_type        text not null check (rule_type in ('postal_code','city','mileage')),  -- later: 'polygon'
+  rule_type        text not null check (rule_type in ('postal_code','city')),  -- later: 'polygon'
   postal_code      text,
   city             citext,
   state            text,
-  -- mileage (ADR 0003 / D15): fee = max(0, ceil(miles) - free_miles) * per_mile_cents, if miles <= max_miles
-  free_miles       numeric(6,2) check (free_miles >= 0),
-  per_mile_cents   bigint check (per_mile_cents >= 0),
-  max_miles        numeric(6,2) check (max_miles > 0),
   foreign key (organization_id, service_area_id) references service_areas(organization_id, id) on delete cascade,
   check ((rule_type = 'postal_code' and postal_code is not null)
-      or (rule_type = 'city' and city is not null and state is not null)
-      or (rule_type = 'mileage' and free_miles is not null and per_mile_cents is not null))
+      or (rule_type = 'city' and city is not null and state is not null))
+);
+
+create table delivery_distance_cache (           -- ADR 0009
+  organization_id  uuid not null references organizations(id) on delete cascade,
+  provider         text not null,
+  route_key        text not null,                -- sha256(normalized origin || normalized destination || basis)
+  meters           integer not null check (meters >= 0),
+  fetched_at       timestamptz not null default now(),
+  expires_at       timestamptz not null,         -- default fetched_at + 30 days (provider terms)
+  primary key (organization_id, provider, route_key)
 );
 create unique index on service_area_rules (organization_id, postal_code) where rule_type = 'postal_code';
 ```
 
-Resolution order: exact postal code → city+state → mileage rule (needs a distance from the `DistanceProvider`, D15) → not served. Ties broken by `priority`. Result includes `requires_manual_review`, surfaced to the AI as "a team member will confirm delivery". Tiky Jumps' "first 5 miles free, then $4/mile" is one `mileage` rule (`free_miles = 5`, `per_mile_cents = 400`). Rounding of miles, one-way vs round trip and the maximum distance are open (D15); without a provider, mileage-only coverage returns `requires_manual_review` and no fee.
+Resolution order (ADR 0009): zone match (postal code, then city + state) → organization mileage settings via `DistanceProvider` road distance (one-way from the primary depot, `ceil((miles − free) )` × rate; beyond `maximum_delivery_miles` → manual review) → otherwise `manual_review` with no fee. Any provider failure is also `manual_review`. Straight-line distance is never billed. Example: 8.2 mi → ceil(8.2 − 5) = 4 mi × $4 = $16.
 
 ## 8. Pricing
 
@@ -916,7 +952,9 @@ Automated: for every table in `public`, generate cases {anon, user-A-owner, user
   ```
 - `scripts/import-tenant.ts <slug> --env=<env>` — validates the bundle, upserts by `(organization_id, slug)` (idempotent), uploads media, writes an audit entry. Tiky Jumps is onboarded with this same tool that any future tenant would use.
 
-### 13.1 CSV import staging (ADR 0006)
+### 13.1 CSV import staging (ADR 0006, ADR 0011)
+
+Source formats are handled by adapters that map onto the canonical product model; no source column names appear in the schema.
 
 ```sql
 create table import_batches (
@@ -926,7 +964,8 @@ create table import_batches (
   source           text not null,             -- 'ers_csv','spreadsheet'
   original_filename text,
   storage_path     text,                      -- private bucket, org-prefixed
-  mapping          jsonb,                     -- column → field; saved presets in import_mapping_presets
+  adapter_id       text not null,             -- 'generic_csv','ers' (code-defined adapters)
+  mapping          jsonb,                     -- canonical field → source column + transform
   status           text not null check (status in ('uploaded','parsed','mapped','validated','committed','failed','cancelled')),
   summary          jsonb,                     -- counts: create/update/skip/error
   created_by       uuid references auth.users(id),
@@ -959,6 +998,8 @@ create table import_rows (
 | `0004_catalog` (categories, products, variants, units, media, relations, public views, storage policies) | M2 |
 | `0005_availability` (blocks, rules, reservations, allocations, functions) | M3 |
 | `0004b_imports` (import batches/rows, mapping presets) | M2 |
+| `0004c_settings_delivery_wind` (rename depot/wind columns; mileage settings) | M2 |
+| `0005b_weather_blocks` | M3 |
 | `0006_service_areas_pricing` (service areas incl. mileage rules, pricing rules, tax jurisdictions/rates/component rules) | M4 |
 | `0007_customers_events_quotes` (+ counters, status trigger, booking requests) | M5 |
 | `0008_conversations_ai` | M7 |

@@ -59,19 +59,21 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 ### M2 — Catalog, categories, media, inventory
 - Migration `0004`; category & product CRUD (admin) with Zod-validated forms; variants (default auto-created); inventory units / pooled quantity; media upload to Storage with org-prefixed paths.
 - Public catalog views excluding internal fields.
-- CSV import pipeline (ADR 0006): upload → staging → field mapping (ERS preset as data) → validation → preview → idempotent commit; manual product creation uses the same validation.
+- CSV import pipeline (ADR 0006, 0011): upload → staging → adapter-suggested field mapping onto the canonical model (ERS is one adapter) → validation → preview → idempotent transactional commit; manual product creation uses the same validation.
+- Wind configuration columns (ADR 0010) and delivery mileage settings (ADR 0009) on organization/category/product.
 - Media rights metadata; unverified media cannot be published.
 - Tenant configuration bundle + `import-tenant.ts` for settings/categories/service areas/pricing (Tiky Jumps' initial rules from ADR 0003 are data here).
 - **Tests:** RLS matrix for catalog tables + storage; anon cannot see unpublished products, `internal_notes` or unverified media; import re-run updates instead of duplicating; invalid CSV rows reported, not imported; cross-org media path rejected; slug uniqueness per org (same slug allowed in two orgs); invalid specs rejected (max_age < min_age, neither wet nor dry).
 
 ### M3 — Availability engine
 - `domain/availability` (intervals, buffers, peak capacity) — pure and exhaustively tested.
+- Weather blocks (ADR 0010): staff-confirmed, flag overlapping bookings, `WEATHER_BLOCK` for wind-sensitive products.
 - Migration `0005`; `check_availability` and `reserve_inventory` SQL functions; holds with expiry; blocks; rules (lead time, closed days).
 - Admin: blocks/maintenance management, simple per-product calendar list.
 - **Tests:** all scenarios in DATABASE.md §6.3 including the concurrency race and DST.
 
 ### M4 — Pricing engine (+ service areas, tax)
-- `domain/pricing` rule engine with itemized output; migration `0006`; service-area resolution incl. mileage rule (needs D15 provider, otherwise manual review); location-based tax with per-component taxability (ADR 0004).
+- `domain/pricing` rule engine with itemized output; migration `0006`; service-area resolution + road-distance mileage via `DistanceProvider` with caching (ADR 0009); location-based tax with per-component taxability (ADR 0004).
 - Admin: pricing rules, tax jurisdictions/rates/taxability, service areas (ZIP/city lists, mileage rule).
 - **Tests:** base, extra hours, overnight, multi-day (+25 % of base per extra day), mileage (≤5 mi free, 5.1 mi, beyond max), quantity, discount percent/fixed/code, min charge, delivery, taxability per component (rental/delivery/labor/fee/discount), unresolved jurisdiction warning, rounding, negative totals prevented, unknown rule type rejected, deterministic output snapshot tests.
 
@@ -107,18 +109,19 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 
 Answered 2026-09-28: D1, D2, D3, D4 (validation of Tennessee treatment pending), D11, D13 — see `docs/decisions/`.
 
+Answered 2026-09-28 (second round): D15 (ADR 0009), D16 (ADR 0010); import adapters (ADR 0011).
+
 Still open:
 
-1. **D15 — mileage delivery:** distance provider, depot address, one-way vs round trip, mile rounding, maximum distance.
-2. **D16 — wind threshold:** informational only, or staff "weather hold" blocking wind-sensitive products?
-3. Exact Tennessee tax configuration (rates, taxability of delivery/labor/fees) — before production.
-4. A sample ERS CSV export (a few rows is enough) to build the mapping preset.
-5. Do they sell packages/bundles today (D5)?
-6. ZIP/city delivery zones, if any, in addition to mileage.
-7. Discounts in use today (weekday, multi-item, promo codes)?
-8. Who on the team gets which role?
-9. How should "send quote" reach the customer in Phase 1 (copy link, their own email, platform email)?
-10. Platform/brand name and domain for the SaaS (D7).
+1. Exact Tennessee tax configuration (rates, taxability of delivery/labor/fees) — before production.
+2. A sample ERS CSV export (a few rows) to verify the ERS adapter's header mapping.
+3. Distance provider account: Google Maps or Mapbox (M4), and Tiky Jumps' depot address and maximum delivery distance.
+4. Do they sell packages/bundles today (D5)?
+5. ZIP/city delivery zones, if any, in addition to mileage.
+6. Discounts in use today (weekday, multi-item, promo codes)?
+7. Who on the team gets which role?
+8. How should "send quote" reach the customer in Phase 1 (copy link, their own email, platform email)?
+9. Platform/brand name and domain for the SaaS (D7).
 
 ## 7. M1 follow-ups (carried forward)
 

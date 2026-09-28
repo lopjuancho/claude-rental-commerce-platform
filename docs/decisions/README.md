@@ -13,3 +13,6 @@ Decision IDs (D1…) refer to the list in `ARCHITECTURE.md` §12.
 | [0006](./0006-inventory-import-and-media-rights.md) | D13: CSV import pipeline; media rights metadata; no cross-tenant media | Accepted 2026-09-28 |
 | [0007](./0007-local-db-testing.md) | DB integration tests run against Postgres with a Supabase auth shim when Docker images are unavailable | Accepted 2026-09-28 |
 | [0008](./0008-edge-middleware-on-cloudflare.md) | Edge `middleware.ts` instead of Node `proxy.ts` until OpenNext supports it officially | Accepted 2026-09-28 |
+| [0009](./0009-delivery-distance-pricing.md) | D15: road-distance delivery pricing behind a `DistanceProvider`; manual review instead of guessed fees | Accepted 2026-09-28 |
+| [0010](./0010-wind-safety.md) | D16: wind sensitivity + thresholds as configuration; staff-confirmed weather blocks; no automatic cancellations | Accepted 2026-09-28 |
+| [0011](./0011-import-adapters.md) | Import adapters map source formats (ERS is one) onto the canonical product model | Accepted 2026-09-28 |

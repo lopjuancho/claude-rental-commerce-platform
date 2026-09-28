@@ -202,7 +202,7 @@ The hardest correctness problem in the product. Approach:
 2. **Two tracking modes per variant:**
    - **Serialized** (inflatables, trains, foam machines): each physical unit is an `inventory_units` row. A reservation allocates specific units. A PostgreSQL **exclusion constraint** — `EXCLUDE USING gist (inventory_unit_id WITH =, occupied_period WITH &&) WHERE (status IN ('held','confirmed'))` — makes double-booking a unit physically impossible, regardless of concurrency.
    - **Pooled** (chairs, tables): a quantity on the variant. Reservation calls take a transaction-scoped advisory lock on the variant, sum overlapping active allocations, and reject if `booked + requested > pooled_quantity`.
-3. **Blocks** (`availability_blocks`): organization-wide blackout dates, product/variant-wide blocks, or unit-level maintenance windows, all as ranges.
+3. **Blocks** (`availability_blocks`): organization-wide blackout dates, product/variant-wide blocks, or unit-level maintenance windows, all as ranges. **Weather blocks** (ADR 0010) are separate, staff-confirmed records that make wind-sensitive products report `WEATHER_BLOCK`; overlapping bookings are flagged, never auto-cancelled.
 4. **Two operations, one source of truth:**
    - `check_availability(...)` — read-only, returns `{available, available_quantity, requested_quantity, reasons[]}`. Used by search and the AI. It is advisory: the world can change a second later.
    - `reserve_inventory(...)` — the only way to take inventory. Runs in one transaction; for serialized items picks free units (`FOR UPDATE SKIP LOCKED`), inserts allocations, and relies on the exclusion constraint as the final guarantee. Fails with a typed error (`INSUFFICIENT_AVAILABILITY`) rather than overbooking.
@@ -237,7 +237,7 @@ Rationale and SQL: DATABASE.md §6.
 
 ### 7.4 Delivery / service areas
 
-`service_areas` (zones) with match rules (`postal_code`, `city` + state) and a flat fee / minimum order / "requires confirmation" flag. `check_service_area(address)` returns `{served, area_id, fee_cents, requires_manual_review, reason}`. Delivery pricing supports **flat zone fees** and **mileage rules** (`free_miles`, `per_mile_cents`, `max_miles`; Tiky Jumps: first 5 miles free, then $4/mile). Mileage needs a `DistanceProvider` (geocode + driving distance from the organization's depot); the provider is Decision D15. Until it exists, an address not covered by a configured zone returns `requires_manual_review` and no fee (DATABASE.md §7).
+`service_areas` (zones) with match rules (`postal_code`, `city` + state) and a flat fee / minimum order / "requires confirmation" flag. `check_service_area(address)` returns `{served, area_id, fee_cents, requires_manual_review, reason}`. Delivery pricing supports **flat zone fees** and **road-distance mileage** configured on the organization (ADR 0009: one-way road distance from the primary depot via a vendor-neutral `DistanceProvider`; Tiky Jumps: first 5 miles free, then $4/mile, rounded up to the next whole mile). Anything outside configured zones/distance, or any provider failure, returns `manual_review` with no fee (DATABASE.md §7).
 
 ### 7.5 Customers, events, quotes
 
@@ -411,5 +411,5 @@ Accepted decisions have ADRs in [`docs/decisions/`](./docs/decisions/README.md).
 | D12 | OpenAI model & per-tenant cost ceiling | Open (M7). |
 | D13 | Tiky Jumps import & media rights | **Accepted** ([ADR 0006](./docs/decisions/0006-inventory-import-and-media-rights.md)): CSV-first staged import (ERS export → preview → mapping → validation → commit); media rights metadata; no cross-tenant media. |
 | D14 | Public availability granularity | Proposed: public boolean + "limited"; staff exact counts. |
-| D15 | **New:** mileage delivery distance source (provider, depot, one-way/round trip, rounding, max distance) | **Open — needed by M4.** Until decided, addresses outside configured ZIP/city zones return `requires_manual_review`; the AI never quotes a mileage fee without a computed distance. |
-| D16 | **New:** wind threshold (15 mph) — informational policy only, or a staff "weather hold" that blocks wind-sensitive products? | Open (M3/M7). Stored as configuration now. |
+| D15 | Delivery distance & pricing | **Accepted** ([ADR 0009](./docs/decisions/0009-delivery-distance-pricing.md)): `DistanceProvider` abstraction, one-way road distance from primary depot, 5 free miles, $4/mi, ceil to whole mile, configurable max → `manual_review`; cached lookups. |
+| D16 | Wind safety | **Accepted** ([ADR 0010](./docs/decisions/0010-wind-safety.md)): `wind_sensitive` + `wind_threshold_mph` config (15 mph default for Tiky Jumps); staff-confirmed `weather_blocks`; bookings flagged, never auto-cancelled. |
