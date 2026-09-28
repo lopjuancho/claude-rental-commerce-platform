@@ -100,15 +100,21 @@ export const TENANT_TABLES: Record<
   },
   categories: {
     orgColumn: "organization_id",
-    ensureRow: async (org) => void (await ensureCatalog(org)),
+    ensureRow: async (org) => {
+      await ensureCatalog(org);
+    },
   },
   products: {
     orgColumn: "organization_id",
-    ensureRow: async (org) => void (await ensureCatalog(org)),
+    ensureRow: async (org) => {
+      await ensureCatalog(org);
+    },
   },
   product_variants: {
     orgColumn: "organization_id",
-    ensureRow: async (org) => void (await ensureCatalog(org)),
+    ensureRow: async (org) => {
+      await ensureCatalog(org);
+    },
   },
   product_categories: {
     orgColumn: "organization_id",
@@ -161,7 +167,9 @@ export const TENANT_TABLES: Record<
   },
   import_batches: {
     orgColumn: "organization_id",
-    ensureRow: async (org) => void (await ensureImportBatch(org)),
+    ensureRow: async (org) => {
+      await ensureImportBatch(org);
+    },
   },
   import_rows: {
     orgColumn: "organization_id",
