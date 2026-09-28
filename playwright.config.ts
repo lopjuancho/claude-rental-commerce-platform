@@ -12,6 +12,17 @@ export default defineConfig({
     trace: "retain-on-failure",
     ...(executablePath ? { launchOptions: { executablePath } } : {}),
   },
+  // E2E_START_SERVER=1 builds nothing; it starts the already-built app (`pnpm build` first).
+  ...(process.env.E2E_START_SERVER === "1"
+    ? {
+        webServer: {
+          command: "pnpm start",
+          url: "http://localhost:3000/api/health",
+          reuseExistingServer: false,
+          timeout: 60_000,
+        },
+      }
+    : {}),
   projects: [
     { name: "mobile", use: { ...devices["Pixel 7"] } },
     { name: "desktop", use: { ...devices["Desktop Chrome"] } },

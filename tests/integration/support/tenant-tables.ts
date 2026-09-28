@@ -11,18 +11,21 @@ export const GLOBAL_TABLES = ["role_permissions"] as const;
 export const USER_TABLES = ["user_profiles"] as const;
 
 /** Tenant-owned tables → the column holding the organization id, and a fixture that guarantees a row exists. */
-export const TENANT_TABLES: Record<string, { orgColumn: string; ensureRow: (org: TestOrg) => Promise<void> }> = {
-  organizations: { orgColumn: "id", ensureRow: async () => undefined },
-  organization_settings: { orgColumn: "organization_id", ensureRow: async () => undefined },
-  organization_members: { orgColumn: "organization_id", ensureRow: async () => undefined },
-  audit_logs: { orgColumn: "organization_id", ensureRow: async () => undefined }, // written by member triggers
+export const TENANT_TABLES: Record<
+  string,
+  { orgColumn: string; ensureRow: (org: TestOrg) => Promise<void> }
+> = {
+  organizations: { orgColumn: "id", ensureRow: () => Promise.resolve() },
+  organization_settings: { orgColumn: "organization_id", ensureRow: () => Promise.resolve() },
+  organization_members: { orgColumn: "organization_id", ensureRow: () => Promise.resolve() },
+  audit_logs: { orgColumn: "organization_id", ensureRow: () => Promise.resolve() }, // written by member triggers
   organization_domains: {
     orgColumn: "organization_id",
     ensureRow: async (org) => {
-      await admin("insert into public.organization_domains (organization_id, hostname) values ($1, $2)", [
-        org.id,
-        `${org.slug}.example.test`,
-      ]);
+      await admin(
+        "insert into public.organization_domains (organization_id, hostname) values ($1, $2)",
+        [org.id, `${org.slug}.example.test`],
+      );
     },
   },
   organization_policies: {
@@ -40,7 +43,11 @@ export const TENANT_TABLES: Record<string, { orgColumn: string; ensureRow: (org:
       await admin(
         `insert into public.organization_invitations (organization_id, email, role, token_hash, expires_at)
          values ($1, $2, 'staff', $3, now() + interval '1 day')`,
-        [org.id, `invitee-${randomUUID().slice(0, 8)}@example.test`, randomBytes(32).toString("hex")],
+        [
+          org.id,
+          `invitee-${randomUUID().slice(0, 8)}@example.test`,
+          randomBytes(32).toString("hex"),
+        ],
       );
     },
   },

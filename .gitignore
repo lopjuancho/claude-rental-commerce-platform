@@ -13,3 +13,7 @@ supabase/.temp/
 supabase/.branches/
 .DS_Store
 *.log
+.dev.vars
+next-env.d.ts
+*.tsbuildinfo
+cloudflare-env.d.ts

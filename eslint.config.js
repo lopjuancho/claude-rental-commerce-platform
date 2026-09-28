@@ -43,7 +43,10 @@ export default tseslint.config(
     },
     rules: {
       "@typescript-eslint/consistent-type-imports": "error",
-      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
       "@typescript-eslint/restrict-template-expressions": ["error", { allowNumber: true }],
       "no-restricted-imports": ["error", { patterns: [systemClientRestriction] }],
     },
@@ -78,8 +81,14 @@ export default tseslint.config(
         "error",
         {
           patterns: [
-            { group: ["@/server/*", "@/app/*", "@/components/*"], message: "src/domain must stay pure." },
-            { group: ["@supabase/*", "next", "next/*", "react", "react-dom", "openai"], message: "src/domain must not depend on frameworks or I/O." },
+            {
+              group: ["@/server/*", "@/app/*", "@/components/*"],
+              message: "src/domain must stay pure.",
+            },
+            {
+              group: ["@supabase/*", "next", "next/*", "react", "react-dom", "openai"],
+              message: "src/domain must not depend on frameworks or I/O.",
+            },
           ],
         },
       ],
@@ -91,7 +100,15 @@ export default tseslint.config(
     rules: {
       "no-restricted-imports": [
         "error",
-        { patterns: [{ group: ["@/server/*"], message: "Client-reachable code must not import server modules." }, systemClientRestriction] },
+        {
+          patterns: [
+            {
+              group: ["@/server/*"],
+              message: "Client-reachable code must not import server modules.",
+            },
+            systemClientRestriction,
+          ],
+        },
       ],
     },
   },

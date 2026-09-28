@@ -7,19 +7,71 @@
   "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
   "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce" }],
   "observability": { "enabled": true },
-  // Non-secret vars only. Secrets (SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY)
-  // are set with `wrangler secret put` per environment, never committed.
+  // Non-secret vars only. Secrets (SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY) are set with
+  // `wrangler secret put --env <env>`, never committed. Bindings are NOT inherited by
+  // environments, so each environment repeats them. Namespace ids must be unique per env.
   "vars": { "APP_ENV": "development" },
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 10, "period": 60 },
+    },
+    {
+      "name": "PUBLIC_WRITE_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 20, "period": 60 },
+    },
+    {
+      "name": "ASSISTANT_RATE_LIMITER",
+      "namespace_id": "1003",
+      "simple": { "limit": 30, "period": 60 },
+    },
+  ],
   "env": {
     "staging": {
       "name": "rental-commerce-staging",
       "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce-staging" }],
-      "vars": { "APP_ENV": "staging" }
+      "vars": { "APP_ENV": "staging" },
+      "ratelimits": [
+        {
+          "name": "AUTH_RATE_LIMITER",
+          "namespace_id": "2001",
+          "simple": { "limit": 10, "period": 60 },
+        },
+        {
+          "name": "PUBLIC_WRITE_RATE_LIMITER",
+          "namespace_id": "2002",
+          "simple": { "limit": 20, "period": 60 },
+        },
+        {
+          "name": "ASSISTANT_RATE_LIMITER",
+          "namespace_id": "2003",
+          "simple": { "limit": 30, "period": 60 },
+        },
+      ],
     },
     "production": {
       "name": "rental-commerce-production",
       "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce-production" }],
-      "vars": { "APP_ENV": "production" }
-    }
-  }
+      "vars": { "APP_ENV": "production" },
+      "ratelimits": [
+        {
+          "name": "AUTH_RATE_LIMITER",
+          "namespace_id": "3001",
+          "simple": { "limit": 10, "period": 60 },
+        },
+        {
+          "name": "PUBLIC_WRITE_RATE_LIMITER",
+          "namespace_id": "3002",
+          "simple": { "limit": 20, "period": 60 },
+        },
+        {
+          "name": "ASSISTANT_RATE_LIMITER",
+          "namespace_id": "3003",
+          "simple": { "limit": 30, "period": 60 },
+        },
+      ],
+    },
+  },
 }

@@ -1,6 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
-import { admin, as, createOrg, createUser, expectDenied, type TestOrg, type TestUser } from "./support/db";
+import {
+  admin,
+  as,
+  createOrg,
+  createUser,
+  expectDenied,
+  type TestOrg,
+  type TestUser,
+} from "./support/db";
 
 let a: TestOrg;
 let b: TestOrg;
@@ -19,7 +27,11 @@ async function invite(org: TestOrg, email: string, role = "staff", expiresInterv
 }
 
 const accept = (user: TestUser, token: string) =>
-  as(user, async (sql) => (await sql("select public.accept_invitation($1) as org", [token])).rows[0] as { org: string });
+  as(
+    user,
+    async (sql) =>
+      (await sql("select public.accept_invitation($1) as org", [token])).rows[0] as { org: string },
+  );
 
 beforeAll(async () => {
   a = await createOrg("inv-a");
@@ -68,8 +80,14 @@ describe("creating invitations", () => {
 
   it("other organizations cannot see invitations", async () => {
     await invite(a, "private@example.test");
-    const rows = await as(b.users.owner, async (sql) =>
-      (await sql("select id from public.organization_invitations where organization_id = $1", [a.id])).rows,
+    const rows = await as(
+      b.users.owner,
+      async (sql) =>
+        (
+          await sql("select id from public.organization_invitations where organization_id = $1", [
+            a.id,
+          ])
+        ).rows,
     );
     expect(rows).toEqual([]);
   });
@@ -82,25 +100,27 @@ describe("accepting invitations", () => {
     await as(user, async (sql) => {
       const { rows } = await sql("select public.accept_invitation($1) as org", [token]);
       expect(rows).toEqual([{ org: a.id }]);
-      const member = await sql("select role from public.organization_members where organization_id = $1 and user_id = $2", [
-        a.id,
-        user.id,
-      ]);
+      const member = await sql(
+        "select role from public.organization_members where organization_id = $1 and user_id = $2",
+        [a.id, user.id],
+      );
       expect(member.rows).toEqual([{ role: "office" }]);
       // The new member can now read their organization through RLS.
       const orgs = await sql("select id from public.organizations");
       expect(orgs.rows).toEqual([{ id: a.id }]);
-      await expect(sql("select public.accept_invitation($1)", [token])).rejects.toMatchObject({ code: "22023" });
+      await expect(sql("select public.accept_invitation($1)", [token])).rejects.toMatchObject({
+        code: "22023",
+      });
     });
   });
 
   it("is single-use", async () => {
     const user = await createUser("reuse");
     const token = await invite(a, user.email);
-    await admin("update public.organization_invitations set accepted_at = now(), accepted_by = $2 where token_hash = $1", [
-      hash(token),
-      user.id,
-    ]);
+    await admin(
+      "update public.organization_invitations set accepted_at = now(), accepted_by = $2 where token_hash = $1",
+      [hash(token), user.id],
+    );
     await expectDenied(accept(user, token), ["22023"]);
   });
 
@@ -124,7 +144,10 @@ describe("accepting invitations", () => {
   it("rejects revoked invitations", async () => {
     const user = await createUser("revoked");
     const token = await invite(a, user.email);
-    await admin("update public.organization_invitations set revoked_at = now() where token_hash = $1", [hash(token)]);
+    await admin(
+      "update public.organization_invitations set revoked_at = now() where token_hash = $1",
+      [hash(token)],
+    );
     await expectDenied(accept(user, token), ["22023"]);
   });
 
@@ -142,7 +165,9 @@ describe("accepting invitations", () => {
 
   it("anonymous visitors cannot accept invitations", async () => {
     const token = await invite(a, "anon@example.test");
-    await expectDenied(as({ kind: "anon" }, (sql) => sql("select public.accept_invitation($1)", [token])));
+    await expectDenied(
+      as({ kind: "anon" }, (sql) => sql("select public.accept_invitation($1)", [token])),
+    );
   });
 
   it("an admin can revoke but not rewrite an invitation", async () => {
@@ -156,7 +181,10 @@ describe("accepting invitations", () => {
     });
     await as(a.users.admin, async (sql) => {
       await expectDenied(
-        sql("update public.organization_invitations set role = 'owner' where organization_id = $1", [a.id]),
+        sql(
+          "update public.organization_invitations set role = 'owner' where organization_id = $1",
+          [a.id],
+        ),
       );
     });
   });

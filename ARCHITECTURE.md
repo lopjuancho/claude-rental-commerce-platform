@@ -32,7 +32,7 @@ Versions are the current stable releases at the time of writing (2026-09); they 
 | Auth | Supabase Auth (email + password, magic link; OAuth later) | Cookie sessions via `@supabase/ssr`. |
 | Validation | Zod 4 | Single source for API input schemas **and** AI tool JSON schemas. |
 | AI | OpenAI API (Responses API, function tools with strict JSON schema) | Behind an `LlmProvider` interface so the model/provider is swappable. Model ID is an env/config value, not hard-coded. |
-| Hosting | Cloudflare Workers via `@opennextjs/cloudflare` | See §9. |
+| Hosting | Cloudflare Workers via `@opennextjs/cloudflare` | See §9. Edge `middleware.ts` (ADR 0008). |
 | Media | Supabase Storage (Phase 1) | See Decision D6. |
 | Tests | Vitest (unit + DB integration), Playwright (a few E2E flows) | Local Supabase via CLI (Docker) for integration tests. |
 | Package manager | pnpm | |
@@ -47,7 +47,7 @@ Versions are the current stable releases at the time of writing (2026-09); they 
  (tenant domain or      │   │                                                                 │
   slug.platform.app)    │   ▼                                                                 │
                         │  Next.js (OpenNext on Workers)                                      │
- Staff browser ────────▶│   ├─ middleware: tenant resolution (host → organization), session  │
+ Staff browser ────────▶│   ├─ middleware: session refresh, CSP nonce, request id (ADR 0008)  │
  (admin)                │   ├─ app/(storefront)   public catalog + AI assistant UI            │
                         │   ├─ app/(admin)        staff dashboard                             │
                         │   ├─ app/api/assistant  streaming assistant endpoint                │
@@ -68,7 +68,7 @@ Versions are the current stable releases at the time of writing (2026-09); they 
 
 The model sits **outside** the trust boundary. It can only ask the server to run a tool; the server decides whether and how.
 
-## 4. Repository structure (proposed)
+## 4. Repository structure
 
 Single Next.js application, not a monorepo. Domain modules are separated by folder and import rules; if a second deployable appears (e.g. a worker for SMS), we extract `src/domain` into a package then.
 

@@ -10,11 +10,14 @@ import { testDatabaseUrl } from "./config";
 export const pool = new pg.Pool({ connectionString: testDatabaseUrl(), max: 10 });
 
 export type Actor =
-  | { kind: "anon" }
-  | { kind: "service" }
-  | { kind: "user"; id: string; email: string };
+  { kind: "anon" } | { kind: "service" } | { kind: "user"; id: string; email: string };
 
-export type Sql = (text: string, params?: unknown[]) => Promise<pg.QueryResult>;
+type Row = Record<string, unknown>;
+
+export type Sql = <T extends pg.QueryResultRow = Row>(
+  text: string,
+  params?: unknown[],
+) => Promise<pg.QueryResult<T>>;
 
 export async function as<T>(
   actor: Actor,
@@ -24,14 +27,18 @@ export async function as<T>(
   const client = await pool.connect();
   try {
     await client.query("begin");
-    const role = actor.kind === "anon" ? "anon" : actor.kind === "service" ? "service_role" : "authenticated";
+    const role =
+      actor.kind === "anon" ? "anon" : actor.kind === "service" ? "service_role" : "authenticated";
     const claims =
       actor.kind === "user"
         ? { sub: actor.id, email: actor.email, role: "authenticated", aud: "authenticated" }
         : { role };
-    await client.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(claims)]);
+    await client.query("select set_config('request.jwt.claims', $1, true)", [
+      JSON.stringify(claims),
+    ]);
     await client.query(`set local role ${role}`);
-    const result = await fn((text, params) => client.query(text, params));
+    const sql: Sql = (text, params) => client.query(text, params);
+    const result = await fn(sql);
     if (options.commit) await client.query("commit");
     return result;
   } finally {
@@ -41,18 +48,26 @@ export async function as<T>(
 }
 
 /** Superuser access for fixtures. Committed. */
-export async function admin(text: string, params?: unknown[]): Promise<pg.QueryResult> {
-  return pool.query(text, params);
+export async function admin<T extends pg.QueryResultRow = Row>(
+  text: string,
+  params?: unknown[],
+): Promise<pg.QueryResult<T>> {
+  return pool.query<T>(text, params);
 }
 
 /** Expect the statement to be refused by the database; returns the SQLSTATE. */
-export async function expectDenied(p: Promise<unknown>, codes: string[] = ["42501"]): Promise<string> {
+export async function expectDenied(
+  p: Promise<unknown>,
+  codes: string[] = ["42501"],
+): Promise<string> {
   try {
     await p;
   } catch (error) {
     const code = (error as { code?: string }).code ?? "";
     if (codes.includes(code)) return code;
-    throw new Error(`Expected SQLSTATE ${codes.join("/")} but got ${code}: ${(error as Error).message}`);
+    throw new Error(
+      `Expected SQLSTATE ${codes.join("/")} but got ${code}: ${(error as Error).message}`,
+    );
   }
   throw new Error(`Expected SQLSTATE ${codes.join("/")} but the statement succeeded`);
 }
@@ -89,11 +104,10 @@ export async function createOrg(label: string, status = "active"): Promise<TestO
   const users = { owner } as TestOrg["users"];
   for (const role of ["admin", "office", "staff"] as const) {
     const user = await createUser(`${label}-${role}`);
-    await admin("insert into public.organization_members (organization_id, user_id, role) values ($1, $2, $3)", [
-      id,
-      user.id,
-      role,
-    ]);
+    await admin(
+      "insert into public.organization_members (organization_id, user_id, role) values ($1, $2, $3)",
+      [id, user.id, role],
+    );
     users[role] = user;
   }
   return { id, slug, users };

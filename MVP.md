@@ -45,6 +45,8 @@ Multi-tenant orgs · auth & roles (owner/admin/office/staff) · categories · pr
 Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test:integration && pnpm build`, a written report of what was implemented, what is incomplete, and any failures — nothing skipped silently.
 
 ### M1 — Foundation, auth, organizations, tenant isolation
+
+**Status: implemented 2026-09-28** — see the M1 report in the commit history / PR. Deferred items are listed under "M1 follow-ups" below.
 - Next.js + TS strict + Tailwind + shadcn/ui scaffold; ESLint import-boundary rules; Vitest; Playwright; GitHub Actions CI.
 - Supabase local setup; migrations `0001–0003`; generated types.
 - Env config schema (Zod), `.env.example`, secret-safe client factories (user/public/system).
@@ -117,3 +119,12 @@ Still open:
 8. Who on the team gets which role?
 9. How should "send quote" reach the customer in Phase 1 (copy link, their own email, platform email)?
 10. Platform/brand name and domain for the SaaS (D7).
+
+## 7. M1 follow-ups (carried forward)
+
+- **System-context runtime tests:** there are no public write paths yet; the `ResolvedTenant` branded type and the ESLint allow-list guard them now. Runtime tests that system-context repositories reject mismatched tenants land with the first public write path (M5/M7).
+- **Auth flows against a real Supabase Auth server** (sign-in, sign-up, invitation acceptance, org switching end-to-end) run only in CI; the build sandbox could not pull Supabase images.
+- **MFA enforcement UI** for owner/admin (D9) — M8.
+- **Accessibility linting** (jsx-a11y is not ESLint-10 compatible) — replace with axe checks in Playwright at M6.
+- **Organization self-service onboarding** is intentionally absent; organizations are created by platform tooling (`create_organization`, service role).
+
