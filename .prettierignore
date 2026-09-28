@@ -1,0 +1,8 @@
+pnpm-lock.yaml
+.next
+.open-next
+.wrangler
+node_modules
+src/types/database.ts
+supabase/.temp
+*.md

@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rental-commerce",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
+  "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce" }],
+  "observability": { "enabled": true },
+  // Non-secret vars only. Secrets (SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY)
+  // are set with `wrangler secret put` per environment, never committed.
+  "vars": { "APP_ENV": "development" },
+  "env": {
+    "staging": {
+      "name": "rental-commerce-staging",
+      "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce-staging" }],
+      "vars": { "APP_ENV": "staging" }
+    },
+    "production": {
+      "name": "rental-commerce-production",
+      "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce-production" }],
+      "vars": { "APP_ENV": "production" }
+    }
+  }
+}
