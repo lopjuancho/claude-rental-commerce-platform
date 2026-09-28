@@ -3,8 +3,8 @@ import { parseServerEnv } from "@/server/env";
 
 const base = {
   NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
-  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_xxxxxxxxxxxxxxxxxxxx",
-  SUPABASE_SERVICE_ROLE_KEY: "sb_secret_xxxxxxxxxxxxxxxxxxxxxxxxxx",
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "test-placeholder-publishable-key",
+  SUPABASE_SERVICE_ROLE_KEY: "test-placeholder-service-role-key",
 };
 
 describe("parseServerEnv", () => {

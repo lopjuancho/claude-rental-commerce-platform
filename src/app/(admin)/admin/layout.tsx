@@ -70,6 +70,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <Button asChild size="sm" variant="ghost">
             <Link href="/admin">Dashboard</Link>
           </Button>
+          <Button asChild size="sm" variant="ghost">
+            <Link href="/admin/catalog">Catalog</Link>
+          </Button>
           {ctx.permissions.has("members.manage") ? (
             <Button asChild size="sm" variant="ghost">
               <Link href="/admin/members">Team</Link>

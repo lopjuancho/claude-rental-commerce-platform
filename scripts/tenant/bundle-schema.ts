@@ -1,0 +1,104 @@
+import { z } from "zod";
+
+/**
+ * Tenant configuration bundle: everything needed to onboard a rental company as DATA
+ * (ADR 0003). Tiky Jumps is onboarded with the same format any future tenant uses.
+ * Catalog products arrive separately through the CSV import (ADR 0011).
+ */
+const slug = z
+  .string()
+  .regex(/^[a-z0-9](-?[a-z0-9])*$/)
+  .max(120);
+const color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+const optional = <T extends z.ZodType>(t: T) => t.nullish();
+
+export const tenantBundleSchema = z.object({
+  organization: z.object({
+    slug: slug.max(63),
+    name: z.string().min(1).max(200),
+    legalName: optional(z.string().max(200)),
+    timezone: z.string().min(1),
+    currency: z
+      .string()
+      .regex(/^[A-Z]{3}$/)
+      .default("USD"),
+    countryCode: z
+      .string()
+      .regex(/^[A-Z]{2}$/)
+      .default("US"),
+    status: z.enum(["onboarding", "active"]).default("onboarding"),
+  }),
+  ownerEmail: optional(z.email()),
+  domains: z
+    .array(
+      z.object({
+        hostname: z.string().regex(/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/),
+        primary: z.boolean().default(false),
+      }),
+    )
+    .default([]),
+  settings: z
+    .object({
+      primaryColor: optional(color),
+      secondaryColor: optional(color),
+      contactPhone: optional(z.string().max(40)),
+      smsPhone: optional(z.string().max(40)),
+      contactEmail: optional(z.email()),
+      websiteUrl: optional(z.url()),
+      defaultSetupBufferMinutes: optional(z.int().min(0).max(1440)),
+      defaultTeardownBufferMinutes: optional(z.int().min(0).max(1440)),
+      defaultRentalDurationMinutes: optional(z.int().positive()),
+      minBookingLeadTimeMinutes: optional(z.int().min(0)),
+      overnightAllowed: optional(z.boolean()),
+      windThresholdMph: optional(z.int().positive().max(200)),
+      quoteValidDays: optional(z.int().min(1).max(365)),
+      bookingHoldMinutes: optional(z.int().min(1).max(1440)),
+      primaryDepot: optional(
+        z.object({
+          addressLine1: z.string().max(200),
+          city: z.string().max(120),
+          state: z.string().max(40),
+          postalCode: z.string().max(20),
+        }),
+      ),
+      mileage: optional(
+        z.object({
+          freeMiles: z.number().min(0).max(1000),
+          perMileRateCents: z.int().min(0).max(100000),
+          maximumMiles: optional(z.number().positive().max(5000)),
+          rounding: z
+            .enum(["ceil_whole_mile", "round_whole_mile", "none"])
+            .default("ceil_whole_mile"),
+          basis: z.enum(["one_way", "round_trip"]).default("one_way"),
+        }),
+      ),
+    })
+    .default({}),
+  categories: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(120),
+        slug,
+        sortOrder: z.int().default(0),
+        includedDurationMinutes: optional(z.int().positive()),
+        setupBufferMinutes: optional(z.int().min(0).max(1440)),
+        teardownBufferMinutes: optional(z.int().min(0).max(1440)),
+        overnightAllowed: optional(z.boolean()),
+        windSensitive: optional(z.boolean()),
+        windThresholdMph: optional(z.int().positive().max(200)),
+      }),
+    )
+    .default([]),
+  policies: z
+    .array(
+      z.object({
+        type: z.enum(["cancellation", "weather", "deposit", "delivery", "safety", "other"]),
+        title: z.string().min(1).max(200),
+        body: z.string().min(1).max(20000),
+        published: z.boolean().default(false),
+      }),
+    )
+    .default([]),
+});
+
+export type TenantBundle = z.infer<typeof tenantBundleSchema>;

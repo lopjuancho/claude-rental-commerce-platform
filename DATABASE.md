@@ -940,17 +940,9 @@ Automated: for every table in `public`, generate cases {anon, user-A-owner, user
 ## 13. Seed & import structure
 
 - `supabase/seed.sql` — deterministic dev fixtures: three fictional orgs ("Acme Party Rentals", "FunTime Rentals", "Test Tenant B"), users for each role, a small catalog, service areas, pricing rules. No real customer data.
-- `seeds/tenants/<slug>/` — a **tenant import bundle** (data only):
-  ```
-  organization.json    # name, slug, timezone, branding, contact
-  policies.json
-  categories.json
-  products.json        # typed fields matching §4; validated by the same Zod schemas as the admin UI
-  service_areas.json
-  pricing_rules.json
-  media/manifest.json  # file → product slug, alt text, sort order
-  ```
-- `scripts/import-tenant.ts <slug> --env=<env>` — validates the bundle, upserts by `(organization_id, slug)` (idempotent), uploads media, writes an audit entry. Tiky Jumps is onboarded with this same tool that any future tenant would use.
+- `seeds/tenants/<slug>/tenant.json` — a **tenant configuration bundle** (data only, validated by `scripts/tenant/bundle-schema.ts`): organization identity, domains, settings (branding, contact, buffers, lead time, hold minutes, wind threshold, depot + mileage), categories with their rule overrides, policies, and an optional owner email (which produces a one-time owner invitation).
+- `node scripts/import-tenant.ts <bundle-dir>` (with `DATABASE_URL`) applies it idempotently in one transaction. Tiky Jumps is onboarded with the same tool any future tenant uses.
+- Products are **not** part of the bundle: they come through the CSV import (§13.1), and photos are uploaded per product with rights metadata.
 
 ### 13.1 CSV import staging (ADR 0006, ADR 0011)
 

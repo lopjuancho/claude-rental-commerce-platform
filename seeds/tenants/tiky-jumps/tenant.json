@@ -1,0 +1,42 @@
+{
+  "organization": {
+    "slug": "tiky-jumps",
+    "name": "Tiky Jumps",
+    "legalName": "Tiky Jumps Inflatables LLC",
+    "timezone": "America/Chicago",
+    "currency": "USD",
+    "countryCode": "US",
+    "status": "onboarding"
+  },
+  "domains": [],
+  "settings": {
+    "defaultSetupBufferMinutes": 60,
+    "defaultTeardownBufferMinutes": 60,
+    "minBookingLeadTimeMinutes": 720,
+    "bookingHoldMinutes": 15,
+    "windThresholdMph": 15,
+    "mileage": {
+      "freeMiles": 5,
+      "perMileRateCents": 400,
+      "rounding": "ceil_whole_mile",
+      "basis": "one_way"
+    }
+  },
+  "categories": [
+    { "name": "Bounce Houses", "slug": "bounce-houses", "sortOrder": 10, "windSensitive": true },
+    {
+      "name": "Water Slides",
+      "slug": "water-slides",
+      "sortOrder": 20,
+      "includedDurationMinutes": 240,
+      "windSensitive": true
+    },
+    { "name": "Combos", "slug": "combos", "sortOrder": 30, "windSensitive": true },
+    { "name": "Interactives", "slug": "interactives", "sortOrder": 40, "windSensitive": true },
+    { "name": "Trackless Trains", "slug": "trackless-trains", "sortOrder": 50 },
+    { "name": "Foam Parties", "slug": "foam-parties", "sortOrder": 60 },
+    { "name": "Tents", "slug": "tents", "sortOrder": 70 },
+    { "name": "Tables & Chairs", "slug": "tables-and-chairs", "sortOrder": 80 }
+  ],
+  "policies": []
+}

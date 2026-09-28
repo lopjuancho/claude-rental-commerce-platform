@@ -36,3 +36,10 @@ test("invitation page never accepts on GET", async ({ page }) => {
   await page.goto(`/invite?token=${"a".repeat(43)}`);
   await expect(page.getByRole("heading", { name: "You've been invited" })).toBeVisible();
 });
+
+test("catalog admin pages require sign-in", async ({ page }) => {
+  for (const path of ["/admin/catalog", "/admin/catalog/import", "/admin/catalog/categories"]) {
+    await page.goto(path);
+    await expect(page).toHaveURL(new RegExp(`/sign-in\\?next=${encodeURIComponent(path)}$`));
+  }
+});

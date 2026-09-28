@@ -67,3 +67,37 @@ insert into public.organization_policies (organization_id, policy_type, title, b
    'Placeholder policy text for local development.', true),
   ('20000000-0000-4000-8000-000000000001', 'cancellation', 'Cancellation policy',
    'Placeholder policy text for local development.', true);
+
+-- Fictional catalog for local development (no real business data or photos).
+insert into public.categories (id, organization_id, name, slug, sort_order, wind_sensitive, included_duration_minutes) values
+  ('11000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'Bounce Houses', 'bounce-houses', 10, true, null),
+  ('11000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', 'Water Slides', 'water-slides', 20, true, 240),
+  ('11000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000001', 'Tables & Chairs', 'tables-and-chairs', 30, null, null)
+on conflict do nothing;
+
+insert into public.products (id, organization_id, primary_category_id, name, slug, short_description, is_published,
+                             base_price_cents, wet_allowed, dry_allowed, minimum_age, maximum_age, recommended_capacity,
+                             space_length_ft, space_width_ft, space_height_ft, power_outlets_required, ideal_event_types, tags) values
+  ('12000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001',
+   'Sample Castle', 'sample-castle', 'A fictional 13x13 castle for development.', true, 17500, false, true, 3, 10, 8,
+   15, 15, 14, 1, '{birthday,school}', '{castle}'),
+  ('12000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000002',
+   'Sample Wave Slide', 'sample-wave-slide', 'A fictional 18 ft dual-lane slide.', true, 42500, true, true, 5, 14, 4,
+   32, 15, 18, 2, '{birthday,community}', '{slide,wet}'),
+  ('12000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000003',
+   'Folding Chair', 'folding-chair', null, true, 250, false, true, null, null, null, null, null, null, null, '{}', '{}')
+on conflict do nothing;
+
+insert into public.product_categories (organization_id, product_id, category_id)
+select organization_id, id, primary_category_id from public.products
+where organization_id = '10000000-0000-4000-8000-000000000001'
+on conflict do nothing;
+
+insert into public.inventory_units (organization_id, variant_id, label)
+select v.organization_id, v.id, 'Unit ' || g
+from public.product_variants v, generate_series(1, 2) g
+where v.product_id in ('12000000-0000-4000-8000-000000000001', '12000000-0000-4000-8000-000000000002')
+on conflict do nothing;
+
+update public.product_variants set tracking_mode = 'pooled', pooled_quantity = 200
+where product_id = '12000000-0000-4000-8000-000000000003';

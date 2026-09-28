@@ -57,6 +57,8 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 - **Acceptance:** user of org A cannot read/write any org B row via PostgREST directly with their JWT.
 
 ### M2 — Catalog, categories, media, inventory
+
+**Status: implemented 2026-09-28.** See §8 for follow-ups.
 - Migration `0004`; category & product CRUD (admin) with Zod-validated forms; variants (default auto-created); inventory units / pooled quantity; media upload to Storage with org-prefixed paths.
 - Public catalog views excluding internal fields.
 - CSV import pipeline (ADR 0006, 0011): upload → staging → adapter-suggested field mapping onto the canonical model (ERS is one adapter) → validation → preview → idempotent transactional commit; manual product creation uses the same validation.
@@ -130,4 +132,13 @@ Still open:
 - **MFA enforcement UI** for owner/admin (D9) — M8.
 - **Accessibility linting** (jsx-a11y is not ESLint-10 compatible) — replace with axe checks in Playwright at M6.
 - **Organization self-service onboarding** is intentionally absent; organizations are created by platform tooling (`create_organization`, service role).
+
+## 8. M2 follow-ups (carried forward)
+
+- **ERS adapter unverified** until tested with a real ERS export (header synonyms are guesses; staff can remap every field).
+- **Media upload and signed URLs** run against Supabase Storage; they are exercised in CI only (the build sandbox cannot run the Storage API). Storage RLS policies are tested at the database level.
+- **Variants UI:** every product has its default variant; creating additional variants (sizes/colours) has schema support but no admin UI yet.
+- **Product relations (add-ons)** have schema + RLS but no admin UI yet (needed with pricing in M4).
+- **Import size:** 5,000 rows / 5 MB per file, processed in the request. Larger catalogs would need a background job.
+- **Tiky Jumps bundle:** owner email, domains, branding, depot address, maximum delivery distance, wind sensitivity for tents/trains/foam, and policies still to be filled in (`seeds/tenants/tiky-jumps/README.md`).
 

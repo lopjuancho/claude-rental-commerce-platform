@@ -8,7 +8,7 @@ First tenant: Tiky Jumps Inflatables LLC (onboarded as data, not code).
 - [MVP.md](./MVP.md): Phase 1 scope, milestones, acceptance criteria
 - [docs/decisions/](./docs/decisions/README.md): architecture decision records
 
-**Status:** Milestone 1 (foundation, auth, organizations, tenant isolation) implemented.
+**Status:** Milestones 1 (foundation, auth, tenancy) and 2 (catalog, media, inventory, CSV import) implemented.
 
 ## Stack
 
@@ -53,6 +53,15 @@ bash scripts/check-secrets.sh
 `pnpm test:integration` rebuilds a disposable database with `scripts/test-db.sh` (plain Postgres + a
 test-only Supabase auth shim, ADR 0007). Against the Supabase stack instead:
 `SKIP_DB_SETUP=1 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres pnpm test:integration`.
+
+## Onboarding a tenant
+
+```bash
+DATABASE_URL=postgresql://… node scripts/import-tenant.ts seeds/tenants/<slug> --app-origin=https://…
+```
+
+Applies the tenant configuration bundle (settings, categories, domains, policies) idempotently and prints a
+one-time owner invitation link. Products are then imported in the admin: Catalog → Import CSV.
 
 ## Database changes
 
