@@ -338,8 +338,12 @@ gates are taken, exclusive and in ascending uuid order.
   target: weather confirm/lift for the block's organization, `commit_product_import` for the
   batch's organization.
 - **Scripts** that write several organizations in one transaction declare all of them first.
-  `supabase/seed.sql` calls `app.acquire_org_gates(<both seeded organizations>)`; a test applies
-  the seed in one rolled-back transaction.
+  `supabase/seed.sql` calls `app.acquire_org_gates(<both seeded organizations>)` before its
+  first write. `tests/integration/bootstrap.test.ts` covers this in two ways.
+  - It bootstraps an empty database, applies every migration and then the seed as one
+    transaction, and checks that both tenants are seeded. In CI it checks the result of
+    `supabase start`.
+  - It proves that a reverse-order declaration still takes the gates in uuid order.
 - **Service role** calls `public.acquire_organization_gates(<targets>)` first in the same
   transaction.
 - **Never a gate after another gate.** The statement trigger does nothing when the transaction
