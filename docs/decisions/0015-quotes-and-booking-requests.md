@@ -266,6 +266,54 @@ Migration `20260930001500_m5_public_hold_cap.sql`. Tests are in
 - **Limits of this control.** A visitor who clears their cookies gets a new identity. The rate
   limit bounds how fast that can be exploited.
 
+## 15. Hardening round 4 (Codex final review of `610acf0`)
+
+Migration `20260930001600_m5_round4.sql`. Tests are in `tests/integration/round4.test.ts`,
+`tests/e2e/visitor-cookie.spec.ts` and `tests/unit/visitor-token.test.ts`.
+
+1. **H1: the organization gate precedes every gated row lock.** A BEFORE ROW trigger runs while
+   PostgreSQL already holds the target row. Waiting there for the organization lock could invert
+   against a transaction that holds the gate and wants that row.
+   - A BEFORE STATEMENT trigger (`app.org_gate_statement`) now takes the gate before the statement
+     locks any row. It takes it for every organization the acting user belongs to, in id order.
+   - Gated tables: `organizations`, `organization_settings`, `categories`,
+     `weather_hazard_rules`, `product_categories`, `products`, `product_variants`,
+     `inventory_units`, `availability_blocks`, `weather_blocks`, `weather_block_targets`.
+   - Row triggers only verify the gate (`app.require_org_gate`). In a context without a user
+     (scripts, the service role) they try to take it without waiting, and fail fast with `55P03`
+     (retryable) when it is busy.
+   - Scripts take the gate explicitly first: the tenant bundle script and the test fixtures
+     (`adminGated`). Controlled functions already did so: weather confirm/lift and
+     `commit_product_import`, which runs as the staff user.
+   - Deterministic tests assert the real waits (`pg_locks`): the second transaction waits on the
+     advisory gate while holding none of its rows, and the gate holder then updates those rows
+     without a deadlock. They cover products, variants, units, blocks, weather blocks and a bulk
+     statement.
+2. **M1: renewal joins the visitor serialization.** Renewing a visitor-tagged public hold, by
+   anyone including staff, takes the same per-(organization, visitor) lock as hold creation, in the
+   same position of the lock order (variants → visitor → reservation row). It then re-checks,
+   with the clock, that the hold is still live and that the visitor's other live holds are under
+   the cap. Only after that does it consume budget and extend.
+3. **M2: the event's customer is booking-critical.**
+   - `events.customer_id` cannot change or become NULL once the event has a confirmed booking
+     (`RA010`).
+   - Changing it releases pending holds of open quotes on the event.
+   - It is part of `app.event_signature`.
+   - A quote whose event belongs to another customer is stale (`RA013`) until reconciled.
+   - The staff draft editor keeps the event's customer in step with the quote.
+4. **L1: one visitor identity per browser.**
+   - The middleware issues the `rc_visitor` cookie on storefront page views (GET/HEAD of `/`,
+     `/quote`, `/q/*`), before any booking action can run.
+   - Booking actions only read it and never mint one. A request without it is refused and a
+     page reload establishes it.
+   - Simultaneous first-use actions therefore cannot each create an identity. Concurrent first
+     page views leave one cookie in the browser, and no hold exists before it.
+
+Complete lock order: workflow rows (event → quotes by id → booking requests by id) →
+organization gate (exclusive for catalog/availability edits, shared for bookings) → gated catalog
+rows → variant advisory locks (ascending) → visitor lock (public holds) → reservation and
+allocation rows (by id).
+
 ## Not in M5
 
 - Payments and contracts.

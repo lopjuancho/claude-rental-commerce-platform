@@ -219,12 +219,11 @@ applies to holds, confirmations, renewals, quantity and unit changes, blocks, we
 and settings. The database is the final authority: capacity-reducing edits that would strand a
 booking fail with `CAPACITY_IN_USE`.
 
-Booking workflow lock order (ADR 0015 §10–12): event row (only when an event is edited) → quote
-rows (by id) → booking-request rows (by id) → organization advisory lock, then variant advisory
-locks in ascending uuid order across the whole transaction → the public visitor lock (public holds
-only, ADR 0015 §14) → reservation rows (by id). The lock
-functions enforce the variant order (`LOCK_ORDER_VIOLATION`, `RA014`). Catalog and block edits take
-the organization lock exclusively.
+Lock order (ADR 0015 §10–15): workflow rows (event → quotes by id → booking requests by id) →
+organization gate (exclusive for catalog/availability edits, taken by a BEFORE STATEMENT trigger before
+any gated row is locked; shared for bookings) → gated catalog rows → variant advisory locks in ascending
+uuid order across the transaction (`LOCK_ORDER_VIOLATION`, `RA014`) → the public visitor lock (public
+holds) → reservation and allocation rows (by id).
 
 ### 7.3 Pricing engine
 

@@ -11,7 +11,7 @@ import {
 } from "@/server/public/quotes";
 import { readContactForm, readEventForm, readItemsForm } from "@/server/quotes/form";
 import { getClientIp, getRequestId } from "@/server/request";
-import { getOrIssueVisitorToken } from "@/server/visitor";
+import { readVisitorToken } from "@/server/visitor";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 import { headers } from "next/headers";
 
@@ -72,8 +72,9 @@ export async function requestBookingAction(_prev: FormState, fd: FormData): Prom
       tenant,
       tokenOf(fd),
       typeof message === "string" && message.trim() ? { message: message.trim() } : {},
-      // The anonymous visitor (HttpOnly cookie, issued here if absent) that live holds count against.
-      { ...meta, visitorToken: await getOrIssueVisitorToken() },
+      // The anonymous visitor (HttpOnly cookie set by the storefront page) that live holds count
+      // against. Never minted here: without it the request is refused and a reload establishes it.
+      { ...meta, visitorToken: (await readVisitorToken()) ?? undefined },
     );
   } catch (error) {
     return toFormError(error);

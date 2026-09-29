@@ -3,9 +3,10 @@ import {
   generateVisitorToken,
   hashVisitorToken,
   isWellFormedVisitorToken,
+  shouldIssueVisitorCookie,
   VISITOR_COOKIE,
   visitorCookieOptions,
-} from "@/server/visitor";
+} from "@/server/visitor-token";
 import { hashQuoteToken } from "@/server/quotes/token";
 
 describe("anonymous visitor token", () => {
@@ -41,5 +42,17 @@ describe("anonymous visitor token", () => {
     });
     expect(visitorCookieOptions(false).secure).toBe(false);
     expect(visitorCookieOptions(true).maxAge).toBeGreaterThan(0);
+  });
+
+  it("is issued only by storefront page views, never by actions (POST) or admin/auth pages", () => {
+    for (const path of ["/", "/quote", "/q/abc"]) {
+      expect(shouldIssueVisitorCookie("GET", path, undefined)).toBe(true);
+      expect(shouldIssueVisitorCookie("HEAD", path, "bad")).toBe(true);
+      expect(shouldIssueVisitorCookie("POST", path, undefined)).toBe(false); // server actions
+      expect(shouldIssueVisitorCookie("GET", path, generateVisitorToken())).toBe(false); // kept
+    }
+    for (const path of ["/admin", "/admin/quotes", "/sign-in", "/api/health", "/invite"]) {
+      expect(shouldIssueVisitorCookie("GET", path, undefined)).toBe(false);
+    }
   });
 });

@@ -76,11 +76,13 @@ export async function staffUpdateEvent(
   db: Db,
   organizationId: string,
   eventId: string,
+  customerId: string,
   event: EventInput,
 ) {
+  // The event belongs to the quote's customer (booking-critical, ADR 0015 §15): kept in step.
   const { data, error } = await db
     .from("events")
-    .update(eventRow(event))
+    .update({ ...eventRow(event), customer_id: customerId })
     .eq("organization_id", organizationId)
     .eq("id", eventId)
     .select("id, starts_at, ends_at")

@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { june, makeProduct, outcome, reserve, rpc, SYSTEM } from "./support/availability";
-import { admin, createOrg, type TestOrg } from "./support/db";
+import { admin, adminGated, createOrg, type TestOrg } from "./support/db";
 import { flagsFor, openTx, settle, waitUntilBlocked } from "./support/tx";
 
 /**
@@ -357,22 +357,26 @@ describe("randomized stress: invariants hold under many concurrent mixed operati
             },
           ]);
         } else if (r < 0.6) {
-          op = admin("update public.product_variants set pooled_quantity = $2 where id = $1", [
-            pooled.variantId,
-            2 + Math.floor(rand() * 6),
-          ]);
+          op = adminGated(
+            org.id,
+            "update public.product_variants set pooled_quantity = $2 where id = $1",
+            [pooled.variantId, 2 + Math.floor(rand() * 6)],
+          );
         } else if (r < 0.72) {
-          op = admin(
+          op = adminGated(
+            org.id,
             "insert into public.availability_blocks (organization_id, variant_id, quantity, period, reason) values ($1, $2, $3, tstzrange($4, $5), 'staff_hold')",
             [org.id, pooled.variantId, 1 + Math.floor(rand() * 2), w.start, w.end],
           );
         } else if (r < 0.82) {
-          op = admin(
+          op = adminGated(
+            org.id,
             "insert into public.availability_blocks (organization_id, product_id, period, reason) values ($1, $2, tstzrange($3, $4), 'maintenance')",
             [org.id, serial.productId, w.start, w.end],
           );
         } else if (r < 0.9) {
-          op = admin(
+          op = adminGated(
+            org.id,
             "update public.inventory_units set status = case when status = 'active' then 'retired' else 'active' end where id = (select id from public.inventory_units where variant_id = $1 order by label limit 1)",
             [serial.variantId],
           );

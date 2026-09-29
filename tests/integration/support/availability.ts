@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type Actor, admin, as, type TestOrg } from "./db";
+import { type Actor, admin, adminGated, as, type TestOrg } from "./db";
 
 export interface Item {
   variantId: string;
@@ -46,7 +46,8 @@ export async function makeProduct(
   );
   const variantId = variant.rows[0]!.id;
   if (opts.pooled !== undefined) {
-    await admin(
+    await adminGated(
+      org.id,
       "update public.product_variants set tracking_mode = 'pooled', pooled_quantity = $2 where id = $1",
       [variantId, opts.pooled],
     );
@@ -59,7 +60,8 @@ export async function makeProduct(
 export async function addUnits(org: TestOrg, variantId: string, n: number) {
   const ids: string[] = [];
   for (let i = 1; i <= n; i++) {
-    const { rows } = await admin<{ id: string }>(
+    const { rows } = await adminGated<{ id: string }>(
+      org.id,
       "insert into public.inventory_units (organization_id, variant_id, label) values ($1, $2, $3) returning id",
       [org.id, variantId, `Unit ${String(i).padStart(2, "0")}-${randomUUID().slice(0, 4)}`],
     );

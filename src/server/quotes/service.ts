@@ -157,7 +157,13 @@ export async function updateDraftQuote(id: string, raw: unknown) {
     throw new DomainError("INVALID_STATE", "Only draft quotes can be edited.");
   }
   const window = current.data.event_id
-    ? await staffUpdateEvent(db, ctx.organizationId, current.data.event_id, input.event)
+    ? await staffUpdateEvent(
+        db,
+        ctx.organizationId,
+        current.data.event_id,
+        input.customerId,
+        input.event,
+      )
     : await staffCreateEvent(db, ctx.organizationId, input.customerId, input.event);
   const request = buildPriceRequest({
     items: input.items,

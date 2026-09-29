@@ -737,6 +737,14 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
   visitor per organization. It is enforced atomically in `request_booking` (`RA015`
   `PUBLIC_HOLD_LIMIT`). Staff holds are exempt.
 
+**Round 4** (`20260930001600`, ADR 0015 §15):
+
+- Gated tables have a BEFORE STATEMENT trigger that takes the organization gate before any row
+  lock. Their row triggers only verify it (`55P03` fail-fast for contexts without a user).
+- Renewal of a visitor-tagged hold takes the visitor lock and re-checks the cap.
+- `events.customer_id` is frozen once the event has a confirmed booking, and is part of the
+  event signature.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

@@ -20,6 +20,14 @@ export async function applyTenantBundle(
   await db.query("begin");
   try {
     const o = bundle.organization;
+    // Lock order (ADR 0015 §15): the organization gate first, then its rows.
+    const found = await db.query<{ id: string }>(
+      "select id from public.organizations where slug = $1",
+      [o.slug],
+    );
+    if (found.rows[0]) {
+      await db.query("select app.lock_organization($1, true)", [found.rows[0].id]);
+    }
     const existing = await db.query<{ id: string }>(
       "select id from public.organizations where slug = $1 for update",
       [o.slug],

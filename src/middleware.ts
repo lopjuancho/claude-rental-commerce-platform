@@ -1,13 +1,20 @@
 import { createServerClient } from "@supabase/ssr";
 import { type NextRequest, NextResponse } from "next/server";
 import { buildContentSecurityPolicy, STATIC_SECURITY_HEADERS } from "@/server/security/headers";
+import {
+  generateVisitorToken,
+  shouldIssueVisitorCookie,
+  VISITOR_COOKIE,
+  visitorCookieOptions,
+} from "@/server/visitor-token";
 
 /**
  * Runs before every page/API request:
  *  1. strips client-supplied internal headers (tenant/user ids are never taken from the client),
  *  2. assigns a request id and CSP nonce,
  *  3. refreshes the Supabase session cookie,
- *  4. applies security headers.
+ *  4. establishes the anonymous visitor cookie on storefront page views (never in actions),
+ *  5. applies security headers.
  * Tenant resolution happens in server code from the Host header (see resolve-tenant.ts).
  */
 export async function middleware(request: NextRequest) {
@@ -45,6 +52,20 @@ export async function middleware(request: NextRequest) {
     });
     // Refreshes an expiring session. Authorization decisions are made later with getUser().
     await supabase.auth.getUser();
+  }
+
+  if (
+    shouldIssueVisitorCookie(
+      request.method,
+      request.nextUrl.pathname,
+      request.cookies.get(VISITOR_COOKIE)?.value,
+    )
+  ) {
+    response.cookies.set(
+      VISITOR_COOKIE,
+      generateVisitorToken(),
+      visitorCookieOptions(process.env.NODE_ENV === "production"),
+    );
   }
 
   response.headers.set("Content-Security-Policy", csp);

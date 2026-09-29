@@ -55,6 +55,30 @@ export async function admin<T extends pg.QueryResultRow = Row>(
   return pool.query<T>(text, params);
 }
 
+/**
+ * Superuser write to capacity/availability tables (products, variants, units, blocks, settings…):
+ * like a script, it takes the organization gate first (ADR 0015 §15), then runs the statement.
+ */
+export async function adminGated<T extends pg.QueryResultRow = Row>(
+  organizationId: string,
+  text: string,
+  params?: unknown[],
+): Promise<pg.QueryResult<T>> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select app.lock_organization($1, true)", [organizationId]);
+    const result = await client.query<T>(text, params);
+    await client.query("commit");
+    return result;
+  } catch (e) {
+    await client.query("rollback").catch(() => undefined);
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 /** Expect the statement to be refused by the database; returns the SQLSTATE. */
 export async function expectDenied(
   p: Promise<unknown>,
