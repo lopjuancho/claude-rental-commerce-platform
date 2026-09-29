@@ -9,7 +9,7 @@ import { divideRoundHalfUp } from "@/domain/money";
  *   billable             = max(0, distance − free miles), then rounded per rounding method
  *   fee                  = billable × per-mile rate
  *
- * Example (Tiky Jumps): 8.2 mi, 5 free, ceil, $4 → ceil(3.2) = 4 mi → $16.
+ * Example: 8.2 mi, 5 free, ceil, $4/mi → ceil(3.2) = 4 mi → $16.
  */
 export const METERS_PER_MILE = 1609.344;
 

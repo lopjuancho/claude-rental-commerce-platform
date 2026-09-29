@@ -54,6 +54,32 @@ function ensureWeatherBlock(org: TestOrg): Promise<string> {
   return entry;
 }
 
+const areaCache = new Map<string, Promise<string>>();
+function ensureServiceArea(org: TestOrg): Promise<string> {
+  let entry = areaCache.get(org.id);
+  if (!entry) {
+    entry = admin<{ id: string }>(
+      "insert into public.service_areas (organization_id, name) values ($1, 'Metro') returning id",
+      [org.id],
+    ).then((r) => r.rows[0]!.id);
+    areaCache.set(org.id, entry);
+  }
+  return entry;
+}
+
+const jurisdictionCache = new Map<string, Promise<string>>();
+function ensureJurisdiction(org: TestOrg): Promise<string> {
+  let entry = jurisdictionCache.get(org.id);
+  if (!entry) {
+    entry = admin<{ id: string }>(
+      "insert into public.tax_jurisdictions (organization_id, name, state) values ($1, 'Test TN', 'TN') returning id",
+      [org.id],
+    ).then((r) => r.rows[0]!.id);
+    jurisdictionCache.set(org.id, entry);
+  }
+  return entry;
+}
+
 export const GLOBAL_TABLES = ["role_permissions"] as const;
 
 /** Tables keyed to a user rather than an organization; covered by dedicated tests. */
@@ -277,6 +303,76 @@ export const TENANT_TABLES: Record<
       await admin(
         "insert into public.weather_block_targets (organization_id, weather_block_id, product_id) values ($1, $2, $3) on conflict do nothing",
         [org.id, w, c.productId],
+      );
+    },
+  },
+  pricing_rules: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await admin(
+        "insert into public.pricing_rules (organization_id, name, rule_type, params) values ($1, 'Additional day', 'additional_day', '{\"percent_of_base_bps\": 2500}') on conflict do nothing",
+        [org.id],
+      );
+    },
+  },
+  service_areas: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureServiceArea(org);
+    },
+  },
+  service_area_rules: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const area = await ensureServiceArea(org);
+      await admin(
+        "insert into public.service_area_rules (organization_id, service_area_id, rule_type, postal_code) values ($1, $2, 'postal_code', '38127')",
+        [org.id, area],
+      );
+    },
+  },
+  tax_jurisdictions: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureJurisdiction(org);
+    },
+  },
+  tax_rates: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const j = await ensureJurisdiction(org);
+      await admin(
+        "insert into public.tax_rates (organization_id, jurisdiction_id, name, rate_bps) values ($1, $2, 'Test rate', 900)",
+        [org.id, j],
+      );
+    },
+  },
+  tax_component_rules: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const j = await ensureJurisdiction(org);
+      await admin(
+        "insert into public.tax_component_rules (organization_id, jurisdiction_id, component, taxable) values ($1, $2, 'rental', true) on conflict do nothing",
+        [org.id, j],
+      );
+    },
+  },
+  delivery_distance_cache: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await admin(
+        "insert into public.delivery_distance_cache (organization_id, provider, provider_version, route_key, meters, expires_at) values ($1, 'fake', '1', repeat('a', 64), 1000, now() + interval '1 day') on conflict do nothing",
+        [org.id],
+      );
+    },
+  },
+  pricing_calculations: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await admin(
+        `insert into public.pricing_calculations (organization_id, engine_version, input, output, input_hash, currency, total_cents, manual_review_required, created_by_type)
+         values ($1, 'test', '{}', '{}', repeat('b', 64), 'USD', 0, false, 'system')`,
+        [org.id],
       );
     },
   },

@@ -255,7 +255,7 @@ begin
   end loop;
 end $$;
 
-revoke update (revision) on public.pricing_rules, public.service_areas, public.tax_jurisdictions from authenticated;
+-- `revision` is owned by app.bump_revision(): writing it directly has no effect.
 -- The cache and calculations are written only through the functions below.
 revoke insert, update, delete on public.delivery_distance_cache, public.pricing_calculations from authenticated;
 

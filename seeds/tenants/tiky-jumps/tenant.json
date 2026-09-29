@@ -31,9 +31,26 @@
       "perMileRateCents": 400,
       "rounding": "ceil_whole_mile",
       "basis": "one_way"
+    },
+    "primaryDepot": {
+      "addressLine1": "2560 Overton Crossing St",
+      "city": "Memphis",
+      "state": "TN",
+      "postalCode": "38127"
     }
   },
   "weatherRules": [],
+  "pricingRules": [
+    {
+      "name": "Additional day (+25% of base per day)",
+      "type": "additional_day",
+      "params": {
+        "percent_of_base_bps": 2500
+      },
+      "priority": 0,
+      "active": true
+    }
+  ],
   "categories": [
     {
       "name": "Bounce Houses",

@@ -116,6 +116,28 @@ export const tenantBundleSchema = z.object({
       }),
     )
     .default([]),
+  /** Pricing rules (ADR 0013), upserted by name. Scope by category slug; none = organization-wide. */
+  pricingRules: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(120),
+        type: z.enum([
+          "extra_hour",
+          "overnight",
+          "additional_day",
+          "attendant_fee",
+          "fee",
+          "discount_percent",
+          "discount_fixed",
+          "minimum_charge",
+        ]),
+        categorySlug: optional(slug),
+        params: z.record(z.string(), z.unknown()),
+        priority: z.int().default(0),
+        active: z.boolean().default(true),
+      }),
+    )
+    .default([]),
   /** Organization-level hazard defaults (least specific level). */
   weatherRules: z.array(hazardRule).default([]),
   policies: z

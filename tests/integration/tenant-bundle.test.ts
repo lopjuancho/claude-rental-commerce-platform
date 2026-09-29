@@ -52,7 +52,7 @@ describe("tenant bundle (Tiky Jumps as data)", () => {
         maximum_delivery_miles: null, // unset: out-of-area → manual review
         mileage_rounding_method: "ceil_whole_mile",
         mileage_basis: "one_way",
-        primary_depot_address_line1: null, // unset until the operational origin is provided
+        primary_depot_address_line1: "2560 Overton Crossing St",
         default_setup_buffer_minutes: 60,
         default_teardown_buffer_minutes: 60,
         min_booking_lead_time_minutes: 720,
@@ -62,6 +62,26 @@ describe("tenant bundle (Tiky Jumps as data)", () => {
         accent_color: null,
         logo_media_path: null,
       },
+    ]);
+
+    const depot = await admin(
+      "select primary_depot_city, primary_depot_state, primary_depot_postal_code from public.organization_settings where organization_id = $1",
+      [orgId],
+    );
+    expect(depot.rows).toEqual([
+      {
+        primary_depot_city: "Memphis",
+        primary_depot_state: "TN",
+        primary_depot_postal_code: "38127",
+      },
+    ]);
+    // Only the confirmed pricing rule: no invented overnight or extra-hour charges.
+    const rules = await admin(
+      "select rule_type, params, category_id from public.pricing_rules where organization_id = $1",
+      [orgId],
+    );
+    expect(rules.rows).toEqual([
+      { rule_type: "additional_day", params: { percent_of_base_bps: 2500 }, category_id: null },
     ]);
 
     const domains = await admin(

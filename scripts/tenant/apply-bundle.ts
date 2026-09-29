@@ -137,6 +137,35 @@ export async function applyTenantBundle(
       for (const rule of c.weather) await upsertRule(rule, category.rows[0]!.id);
     }
 
+    for (const r of bundle.pricingRules) {
+      const scope = r.categorySlug
+        ? (
+            await db.query<{ id: string }>(
+              "select id from public.categories where organization_id = $1 and slug = $2",
+              [organizationId, r.categorySlug],
+            )
+          ).rows[0]?.id
+        : null;
+      if (r.categorySlug && !scope)
+        throw new Error(`Pricing rule ${r.name}: unknown category ${r.categorySlug}`);
+      await db.query(
+        `insert into public.pricing_rules (organization_id, name, rule_type, category_id, params, priority, is_active)
+         values ($1, $2, $3, $4, $5, $6, $7)
+         on conflict (organization_id, name) do update set
+           rule_type = excluded.rule_type, category_id = excluded.category_id, params = excluded.params,
+           priority = excluded.priority, is_active = excluded.is_active`,
+        [
+          organizationId,
+          r.name,
+          r.type,
+          scope ?? null,
+          JSON.stringify(r.params),
+          r.priority,
+          r.active,
+        ],
+      );
+    }
+
     for (const p of bundle.policies) {
       if (p.placeholder) {
         // Never overwrite real wording with a placeholder.

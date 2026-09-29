@@ -14,6 +14,7 @@ Photos and brand assets are uploaded in the admin with their usage rights record
 | Item | Value | Where |
 |---|---|---|
 | Legal name | Tiky Jumps Inflatables LLC | `organization.legalName` |
+| Display name | Tiky Jumps | `organization.name` |
 | Domains | tikyjumps.com (primary), www.tikyjumps.com | `domains` |
 | Website | https://www.tikyjumps.com | `settings.websiteUrl` |
 | Phone / SMS | 901-300-0417 / 901-250-8127 (stored as E.164) | `settings.contactPhone`, `smsPhone` |
@@ -21,18 +22,20 @@ Photos and brand assets are uploaded in the admin with their usage rights record
 | Buffers | 60 min setup, 60 min teardown/pickup | `settings` |
 | Lead time / hold | 12 h / 15 min | `settings` |
 | Water slides | up to 4 h standard window | category `water-slides` |
-| Delivery | first 5 road miles free, $4/mi after, one-way, rounded up | `settings.mileage` |
+| Delivery | first 5 road miles free, $4/mi after, one-way road distance (Google Maps Routes), rounded up | `settings.mileage` |
+| Depot (delivery origin) | 2560 Overton Crossing St, Memphis TN 38127 | `settings.primaryDepot` |
+| Additional days | +25 % of base rental per additional day | `pricingRules` |
 | Inflatable wind limit | 15 mph on Bounce Houses, Water Slides, Combos, Interactives | category `weather` rules |
 | Trackless trains | not wind sensitive | category `trackless-trains` rule |
 
-Business rules that belong to pricing (overnight next-day pickup, +25 % per additional day) are configured with the pricing engine in M4.
+Overnight and extra-hour charges are supported by the pricing engine but deliberately **not configured**: until Tiky Jumps provides amounts, such rentals return `manual_review` instead of an invented price.
 
 ## Deliberately left unset (do not fill from assumptions)
 
-- **Display name**: set to "Tiky Jumps" (short form of the legal name). Please confirm.
 - **Owner email**: unset until provided.
-- **Depot / operational origin address**: unset until provided. Mileage delivery returns manual review until then.
-- **Maximum delivery distance**: unset (no maximum; out-of-area/uncertain → manual review).
+- **Maximum delivery distance**: unset (no maximum). With no service areas configured, mileage applies to any routable address; configure service areas or a maximum to restrict the delivery region.
+- **Overnight charge, extra-hour rates, attendant rates**: unset (→ manual review when needed).
+- **Tax**: no jurisdictions configured (→ manual review) until the production Tennessee treatment is confirmed.
 - **Branding**: logo, logo mark, favicon and primary/secondary/accent colors come from Tiky Jumps' own assets once uploaded.
 - **Tents, foam equipment**: no weather rule yet (the inflatable 15 mph rule does NOT apply). Add rules once manufacturer/operational requirements are confirmed.
 - **Mechanical/special attractions**: configure product-level weather and operator requirements per item.

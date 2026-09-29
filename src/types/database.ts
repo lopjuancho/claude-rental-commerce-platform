@@ -217,6 +217,44 @@ export type Database = {
           },
         ];
       };
+      delivery_distance_cache: {
+        Row: {
+          expires_at: string;
+          fetched_at: string;
+          meters: number;
+          organization_id: string;
+          provider: string;
+          provider_version: string;
+          route_key: string;
+        };
+        Insert: {
+          expires_at: string;
+          fetched_at?: string;
+          meters: number;
+          organization_id: string;
+          provider: string;
+          provider_version: string;
+          route_key: string;
+        };
+        Update: {
+          expires_at?: string;
+          fetched_at?: string;
+          meters?: number;
+          organization_id?: string;
+          provider?: string;
+          provider_version?: string;
+          route_key?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "delivery_distance_cache_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       import_batches: {
         Row: {
           adapter_id: string;
@@ -762,6 +800,159 @@ export type Database = {
           updated_at?: string;
         };
         Relationships: [];
+      };
+      pricing_calculations: {
+        Row: {
+          created_at: string;
+          created_by: string | null;
+          created_by_type: Database["public"]["Enums"]["audit_actor_type"];
+          currency: string;
+          engine_version: string;
+          id: string;
+          input: NonNullable<Json>;
+          input_hash: string;
+          manual_review_required: boolean;
+          organization_id: string;
+          output: NonNullable<Json>;
+          total_cents: number;
+        };
+        Insert: {
+          created_at?: string;
+          created_by?: string | null;
+          created_by_type: Database["public"]["Enums"]["audit_actor_type"];
+          currency: string;
+          engine_version: string;
+          id?: string;
+          input: NonNullable<Json>;
+          input_hash: string;
+          manual_review_required: boolean;
+          organization_id: string;
+          output: NonNullable<Json>;
+          total_cents: number;
+        };
+        Update: {
+          created_at?: string;
+          created_by?: string | null;
+          created_by_type?: Database["public"]["Enums"]["audit_actor_type"];
+          currency?: string;
+          engine_version?: string;
+          id?: string;
+          input?: NonNullable<Json>;
+          input_hash?: string;
+          manual_review_required?: boolean;
+          organization_id?: string;
+          output?: NonNullable<Json>;
+          total_cents?: number;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "pricing_calculations_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      pricing_rules: {
+        Row: {
+          category_id: string | null;
+          created_at: string;
+          discount_code: string | null;
+          id: string;
+          is_active: boolean;
+          name: string;
+          organization_id: string;
+          params: NonNullable<Json>;
+          priority: number;
+          product_id: string | null;
+          revision: number;
+          rule_type: Database["public"]["Enums"]["pricing_rule_type"];
+          updated_at: string;
+          valid_from: string | null;
+          valid_to: string | null;
+          variant_id: string | null;
+        };
+        Insert: {
+          category_id?: string | null;
+          created_at?: string;
+          discount_code?: string | null;
+          id?: string;
+          is_active?: boolean;
+          name: string;
+          organization_id: string;
+          params: NonNullable<Json>;
+          priority?: number;
+          product_id?: string | null;
+          revision?: number;
+          rule_type: Database["public"]["Enums"]["pricing_rule_type"];
+          updated_at?: string;
+          valid_from?: string | null;
+          valid_to?: string | null;
+          variant_id?: string | null;
+        };
+        Update: {
+          category_id?: string | null;
+          created_at?: string;
+          discount_code?: string | null;
+          id?: string;
+          is_active?: boolean;
+          name?: string;
+          organization_id?: string;
+          params?: NonNullable<Json>;
+          priority?: number;
+          product_id?: string | null;
+          revision?: number;
+          rule_type?: Database["public"]["Enums"]["pricing_rule_type"];
+          updated_at?: string;
+          valid_from?: string | null;
+          valid_to?: string | null;
+          variant_id?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "pricing_rules_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "pricing_rules_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_categories";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "pricing_rules_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "pricing_rules_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "pricing_rules_organization_id_product_id_fkey";
+            columns: ["organization_id", "product_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_products";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "pricing_rules_organization_id_variant_id_fkey";
+            columns: ["organization_id", "variant_id"];
+            isOneToOne: false;
+            referencedRelation: "product_variants";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
       };
       product_categories: {
         Row: {
@@ -1396,6 +1587,214 @@ export type Database = {
         };
         Relationships: [];
       };
+      service_area_rules: {
+        Row: {
+          city: string | null;
+          id: string;
+          organization_id: string;
+          postal_code: string | null;
+          rule_type: string;
+          service_area_id: string;
+          state: string | null;
+        };
+        Insert: {
+          city?: string | null;
+          id?: string;
+          organization_id: string;
+          postal_code?: string | null;
+          rule_type: string;
+          service_area_id: string;
+          state?: string | null;
+        };
+        Update: {
+          city?: string | null;
+          id?: string;
+          organization_id?: string;
+          postal_code?: string | null;
+          rule_type?: string;
+          service_area_id?: string;
+          state?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "service_area_rules_organization_id_service_area_id_fkey";
+            columns: ["organization_id", "service_area_id"];
+            isOneToOne: false;
+            referencedRelation: "service_areas";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      service_areas: {
+        Row: {
+          created_at: string;
+          flat_fee_cents: number | null;
+          id: string;
+          is_active: boolean;
+          name: string;
+          organization_id: string;
+          pricing: Database["public"]["Enums"]["service_area_pricing"];
+          priority: number;
+          revision: number;
+          updated_at: string;
+        };
+        Insert: {
+          created_at?: string;
+          flat_fee_cents?: number | null;
+          id?: string;
+          is_active?: boolean;
+          name: string;
+          organization_id: string;
+          pricing?: Database["public"]["Enums"]["service_area_pricing"];
+          priority?: number;
+          revision?: number;
+          updated_at?: string;
+        };
+        Update: {
+          created_at?: string;
+          flat_fee_cents?: number | null;
+          id?: string;
+          is_active?: boolean;
+          name?: string;
+          organization_id?: string;
+          pricing?: Database["public"]["Enums"]["service_area_pricing"];
+          priority?: number;
+          revision?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "service_areas_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      tax_component_rules: {
+        Row: {
+          component: Database["public"]["Enums"]["tax_component"];
+          jurisdiction_id: string;
+          organization_id: string;
+          taxable: boolean;
+        };
+        Insert: {
+          component: Database["public"]["Enums"]["tax_component"];
+          jurisdiction_id: string;
+          organization_id: string;
+          taxable: boolean;
+        };
+        Update: {
+          component?: Database["public"]["Enums"]["tax_component"];
+          jurisdiction_id?: string;
+          organization_id?: string;
+          taxable?: boolean;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "tax_component_rules_organization_id_jurisdiction_id_fkey";
+            columns: ["organization_id", "jurisdiction_id"];
+            isOneToOne: false;
+            referencedRelation: "tax_jurisdictions";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      tax_jurisdictions: {
+        Row: {
+          created_at: string;
+          id: string;
+          is_active: boolean;
+          name: string;
+          organization_id: string;
+          postal_codes: string[];
+          priority: number;
+          requires_review_postal_codes: string[];
+          revision: number;
+          state: string;
+          status: Database["public"]["Enums"]["tax_jurisdiction_status"];
+          updated_at: string;
+        };
+        Insert: {
+          created_at?: string;
+          id?: string;
+          is_active?: boolean;
+          name: string;
+          organization_id: string;
+          postal_codes?: string[];
+          priority?: number;
+          requires_review_postal_codes?: string[];
+          revision?: number;
+          state: string;
+          status?: Database["public"]["Enums"]["tax_jurisdiction_status"];
+          updated_at?: string;
+        };
+        Update: {
+          created_at?: string;
+          id?: string;
+          is_active?: boolean;
+          name?: string;
+          organization_id?: string;
+          postal_codes?: string[];
+          priority?: number;
+          requires_review_postal_codes?: string[];
+          revision?: number;
+          state?: string;
+          status?: Database["public"]["Enums"]["tax_jurisdiction_status"];
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "tax_jurisdictions_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      tax_rates: {
+        Row: {
+          created_at: string;
+          id: string;
+          jurisdiction_id: string;
+          name: string;
+          organization_id: string;
+          rate_bps: number;
+          valid_from: string | null;
+          valid_to: string | null;
+        };
+        Insert: {
+          created_at?: string;
+          id?: string;
+          jurisdiction_id: string;
+          name: string;
+          organization_id: string;
+          rate_bps: number;
+          valid_from?: string | null;
+          valid_to?: string | null;
+        };
+        Update: {
+          created_at?: string;
+          id?: string;
+          jurisdiction_id?: string;
+          name?: string;
+          organization_id?: string;
+          rate_bps?: number;
+          valid_from?: string | null;
+          valid_to?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "tax_rates_organization_id_jurisdiction_id_fkey";
+            columns: ["organization_id", "jurisdiction_id"];
+            isOneToOne: false;
+            referencedRelation: "tax_jurisdictions";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
       user_profiles: {
         Row: {
           avatar_path: string | null;
@@ -1808,7 +2207,35 @@ export type Database = {
         };
         Returns: string;
       };
+      delivery_area_context: {
+        Args: { p_city: string; p_organization_id: string; p_postal_code: string; p_state: string };
+        Returns: Json;
+      };
+      get_cached_distance: {
+        Args: {
+          p_organization_id: string;
+          p_provider: string;
+          p_provider_version: string;
+          p_route_key: string;
+        };
+        Returns: number;
+      };
       lift_weather_block: { Args: { p_weather_block_id: string }; Returns: undefined };
+      pricing_context: {
+        Args: { p_organization_id: string; p_variant_ids: string[] };
+        Returns: Json;
+      };
+      put_cached_distance: {
+        Args: {
+          p_meters: number;
+          p_organization_id: string;
+          p_provider: string;
+          p_provider_version: string;
+          p_route_key: string;
+          p_ttl_days?: number;
+        };
+        Returns: undefined;
+      };
       record_audit_event: {
         Args: {
           p_action: string;
@@ -1819,6 +2246,16 @@ export type Database = {
           p_request_id?: string;
         };
         Returns: number;
+      };
+      record_pricing_calculation: {
+        Args: {
+          p_engine_version: string;
+          p_input: Json;
+          p_input_hash: string;
+          p_organization_id: string;
+          p_output: Json;
+        };
+        Returns: string;
       };
       release_reservation: {
         Args: { p_reservation_id: string };
@@ -1878,6 +2315,10 @@ export type Database = {
         }[];
       };
       sweep_expired_holds: { Args: Record<PropertyKey, never>; Returns: number };
+      tax_context: {
+        Args: { p_on: string; p_organization_id: string; p_postal_code: string; p_state: string };
+        Returns: Json;
+      };
     };
     Enums: {
       audit_actor_type: "user" | "ai" | "system" | "public";
@@ -1904,11 +2345,23 @@ export type Database = {
       mileage_rounding: "ceil_whole_mile" | "round_whole_mile" | "none";
       org_role: "owner" | "admin" | "office" | "staff";
       org_status: "onboarding" | "active" | "suspended" | "closed";
+      pricing_rule_type:
+        | "extra_hour"
+        | "overnight"
+        | "additional_day"
+        | "attendant_fee"
+        | "fee"
+        | "discount_percent"
+        | "discount_fixed"
+        | "minimum_charge";
       pricing_type: "per_event" | "hourly" | "daily" | "per_unit";
       product_relation_type: "addon" | "recommended" | "requires";
       reservation_flag_kind: "availability_block" | "weather_block";
       reservation_source: "booking_request" | "manual" | "import";
       reservation_status: "held" | "confirmed" | "released" | "cancelled" | "completed";
+      service_area_pricing: "flat" | "mileage" | "manual_review";
+      tax_component: "rental" | "add_on" | "delivery" | "labor" | "fee" | "discount" | "adjustment";
+      tax_jurisdiction_status: "test" | "active";
       tracking_mode: "serialized" | "pooled";
       weather_block_scope: "all_sensitive" | "selected";
       weather_block_status: "proposed" | "confirmed" | "lifted";
@@ -2049,11 +2502,24 @@ export const Constants = {
       mileage_rounding: ["ceil_whole_mile", "round_whole_mile", "none"],
       org_role: ["owner", "admin", "office", "staff"],
       org_status: ["onboarding", "active", "suspended", "closed"],
+      pricing_rule_type: [
+        "extra_hour",
+        "overnight",
+        "additional_day",
+        "attendant_fee",
+        "fee",
+        "discount_percent",
+        "discount_fixed",
+        "minimum_charge",
+      ],
       pricing_type: ["per_event", "hourly", "daily", "per_unit"],
       product_relation_type: ["addon", "recommended", "requires"],
       reservation_flag_kind: ["availability_block", "weather_block"],
       reservation_source: ["booking_request", "manual", "import"],
       reservation_status: ["held", "confirmed", "released", "cancelled", "completed"],
+      service_area_pricing: ["flat", "mileage", "manual_review"],
+      tax_component: ["rental", "add_on", "delivery", "labor", "fee", "discount", "adjustment"],
+      tax_jurisdiction_status: ["test", "active"],
       tracking_mode: ["serialized", "pooled"],
       weather_block_scope: ["all_sensitive", "selected"],
       weather_block_status: ["proposed", "confirmed", "lifted"],

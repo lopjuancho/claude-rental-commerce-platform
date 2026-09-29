@@ -14,6 +14,8 @@ export const serverEnvSchema = z
     /** Development-only: tenant used when the host does not map to one. Forbidden in production. */
     DEV_TENANT_SLUG: z.string().optional(),
     APP_ORIGIN: z.url().optional(),
+    /** Google Maps Platform key (Routes API). Server-only secret; restrict it to the Routes API. */
+    GOOGLE_MAPS_API_KEY: z.string().min(20).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.APP_ENV === "production" && env.DEV_TENANT_SLUG) {
