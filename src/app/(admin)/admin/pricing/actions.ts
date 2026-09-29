@@ -222,7 +222,6 @@ export async function calculateAction(_prev: CalcState, fd: FormData): Promise<C
       .map((i) => ({
         variantId: f.text(`variant${i}`),
         quantity: f.int(`quantity${i}`) ?? 1,
-        kind: f.checkbox(`addon${i}`) ? "add_on" : "rental",
       }))
       .filter((i) => i.variantId)
       .map((i) => ({ ...i, start: period.start.toISOString(), end: period.end.toISOString() }));

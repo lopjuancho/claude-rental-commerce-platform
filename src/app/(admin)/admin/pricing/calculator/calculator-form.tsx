@@ -29,10 +29,7 @@ export function CalculatorForm({
         <div className="grid gap-2">
           <span className="text-sm font-semibold">Items</span>
           {[0, 1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="grid grid-cols-[1fr_5rem] items-center gap-2 sm:grid-cols-[1fr_5rem_6rem]"
-            >
+            <div key={i} className="grid grid-cols-[1fr_5rem] items-center gap-2">
               <label className="sr-only" htmlFor={`v${i}`}>
                 Item {i + 1}
               </label>
@@ -52,10 +49,6 @@ export function CalculatorForm({
                 Quantity
               </label>
               <Input id={`q${i}`} name={`quantity${i}`} type="number" min="1" defaultValue={1} />
-              <label className="flex items-center gap-1 text-xs">
-                <input type="checkbox" name={`addon${i}`} className="size-4" />
-                Add-on
-              </label>
             </div>
           ))}
         </div>

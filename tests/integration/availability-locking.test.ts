@@ -1,7 +1,7 @@
-import type pg from "pg";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { june, makeProduct, outcome, reserve, SYSTEM } from "./support/availability";
-import { admin, pool, createOrg, type Actor, type TestOrg } from "./support/db";
+import { beforeAll, describe, expect, it } from "vitest";
+import { june, makeProduct, outcome, reserve, rpc, SYSTEM } from "./support/availability";
+import { admin, createOrg, type TestOrg } from "./support/db";
+import { flagsFor, openTx, settle, waitUntilBlocked } from "./support/tx";
 
 /**
  * Hardening H1: every operation that can reduce availability takes part in the same lock
@@ -24,72 +24,6 @@ beforeAll(async () => {
   );
 });
 
-interface Tx {
-  pid: number;
-  q: <T extends pg.QueryResultRow = Record<string, unknown>>(
-    text: string,
-    params?: unknown[],
-  ) => Promise<pg.QueryResult<T>>;
-  commit: () => Promise<void>;
-  rollback: () => Promise<void>;
-}
-
-// Transactions still open when a test fails are rolled back so later tests never wait on them.
-const openTxs = new Set<Tx>();
-afterEach(async () => {
-  await Promise.all([...openTxs].map((t) => t.rollback()));
-});
-
-async function openTx(actor: Actor): Promise<Tx> {
-  const client = await pool.connect();
-  await client.query("begin");
-  const role =
-    actor.kind === "anon" ? "anon" : actor.kind === "service" ? "service_role" : "authenticated";
-  const claims =
-    actor.kind === "user"
-      ? { sub: actor.id, email: actor.email, role: "authenticated", aud: "authenticated" }
-      : { role };
-  await client.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(claims)]);
-  await client.query(`set local role ${role}`);
-  const pid = (await client.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
-  let done = false;
-  const end = async (sql: string) => {
-    if (done) return;
-    done = true;
-    await client.query(sql).catch(() => undefined);
-    client.release();
-  };
-  const tx: Tx = {
-    pid,
-    q: (text, params) => client.query(text, params),
-    commit: async () => {
-      openTxs.delete(tx);
-      await end("commit");
-    },
-    rollback: async () => {
-      openTxs.delete(tx);
-      await end("rollback");
-    },
-  };
-  openTxs.add(tx);
-  return tx;
-}
-
-/** Resolves once `pid` is blocked on a lock; fails if it never blocks. */
-async function waitUntilBlocked(pid: number) {
-  for (let i = 0; i < 100; i++) {
-    const r = await admin<{ w: string | null }>(
-      "select wait_event_type as w from pg_stat_activity where pid = $1",
-      [pid],
-    );
-    if (r.rows[0]?.w === "Lock") return;
-    await new Promise((res) => setTimeout(res, 20));
-  }
-  throw new Error(`backend ${pid} never waited on a lock`);
-}
-
-const settle = async (p: Promise<unknown>) => outcome(p);
-
 const holdSql = "select public.reserve_inventory($1, $2::jsonb) as id";
 const items = (variantId: string, quantity = 1, w = W) =>
   JSON.stringify([{ variant_id: variantId, quantity, start: w.start, end: w.end }]);
@@ -100,15 +34,6 @@ async function peakAndQuantity(variantId: string) {
     [variantId],
   );
   return r.rows[0]!;
-}
-
-async function flagsFor(reservationId: string) {
-  return (
-    await admin<{ kind: string }>(
-      "select kind::text as kind from public.reservation_flags where reservation_id = $1",
-      [reservationId],
-    )
-  ).rows.map((r) => r.kind);
 }
 
 describe("hold creation vs pooled quantity reduction", () => {
@@ -508,4 +433,125 @@ describe("randomized stress: invariants hold under many concurrent mixed operati
       expect(overCapacity.rows[0]!.peak).toBeLessThanOrEqual(p.qty);
     },
   );
+});
+
+describe("weather rules and weather blocks (Codex re-review blocker 2)", () => {
+  // A confirmed 20 mph wind block over the window; products only become blocked through rules.
+  const setup = async () => {
+    const cat = await admin<{ id: string }>(
+      "insert into public.categories (organization_id, name, slug) values ($1, 'Inflatables', $2) returning id",
+      [org.id, `inflatables-${Math.random().toString(36).slice(2, 8)}`],
+    );
+    const categoryId = cat.rows[0]!.id;
+    const p = await makeProduct(org, { units: 1, categoryId });
+    await admin(
+      "insert into public.product_categories (organization_id, product_id, category_id) values ($1, $2, $3)",
+      [org.id, p.productId, categoryId],
+    );
+    const day = { start: june(12, "12:00"), end: june(12, "16:00") };
+    const block = await admin<{ id: string }>(
+      `insert into public.weather_blocks (organization_id, hazard, period, status, scope, reason, observed_value, observed_unit)
+       values ($1, 'wind', tstzrange($2, $3), 'confirmed', 'all_sensitive', 'Gusts', 20, 'mph') returning id`,
+      [org.id, june(12, "00:00"), june(13, "00:00")],
+    );
+    return { ...p, categoryId, day, blockId: block.rows[0]!.id };
+  };
+  const ruleSql =
+    "insert into public.weather_hazard_rules (organization_id, category_id, hazard, sensitive, threshold_value, threshold_unit) values ($1, $2, 'wind', true, 15, 'mph')";
+  const cleanup = (blockId: string) =>
+    admin("update public.weather_blocks set status = 'lifted' where id = $1", [blockId]);
+
+  it("rule first (uncommitted INSERT): the hold waits, then is BLOCKED by the new rule", async () => {
+    const s = await setup();
+    const b = await openTx(org.users.admin);
+    await b.q(ruleSql, [org.id, s.categoryId]);
+    const a = await openTx(SYSTEM);
+    const hold = settle(a.q(holdSql, [org.id, items(s.variantId, 1, s.day)]));
+    await waitUntilBlocked(a.pid);
+    await b.commit();
+    expect(await hold).toBe("RA002");
+    await a.rollback();
+    await cleanup(s.blockId);
+  });
+
+  it("hold first: the rule INSERT waits, then flags the now-affected hold (never cancels it)", async () => {
+    const s = await setup();
+    const a = await openTx(SYSTEM);
+    const rid = (await a.q<{ id: string }>(holdSql, [org.id, items(s.variantId, 1, s.day)]))
+      .rows[0]!.id;
+    const b = await openTx(org.users.admin);
+    const rule = settle(b.q(ruleSql, [org.id, s.categoryId]));
+    await waitUntilBlocked(b.pid);
+    await a.commit();
+    expect(await rule).toBe("ok");
+    await b.commit();
+    expect(await flagsFor(rid)).toEqual(["weather_block"]);
+    // …and the hold can no longer be confirmed while the block stands.
+    expect(
+      await outcome(rpc(org.users.office, "select public.confirm_reservation($1)", [rid])),
+    ).toBe("RA002");
+    await cleanup(s.blockId);
+  });
+
+  it("deleting a product-level 'not sensitive' override exposes the product: bookings are flagged", async () => {
+    const s = await setup();
+    await admin(ruleSql, [org.id, s.categoryId]);
+    const override = await admin<{ id: string }>(
+      "insert into public.weather_hazard_rules (organization_id, product_id, hazard, sensitive) values ($1, $2, 'wind', false) returning id",
+      [org.id, s.productId],
+    );
+    const rid = await reserve(SYSTEM, org, [{ variantId: s.variantId, ...s.day }]);
+    expect(
+      await outcome(rpc(org.users.office, "select public.confirm_reservation($1)", [rid])),
+    ).toBe("ok");
+    await admin("delete from public.weather_hazard_rules where id = $1", [override.rows[0]!.id]);
+    expect(await flagsFor(rid)).toEqual(["weather_block"]);
+    expect(await outcome(reserve(SYSTEM, org, [{ variantId: s.variantId, ...s.day }]))).toBe(
+      "RA002",
+    );
+    await cleanup(s.blockId);
+  });
+
+  it("joining a category targeted by a 'selected' weather block is serialized with holds", async () => {
+    const s = await setup();
+    const other = await admin<{ id: string }>(
+      "insert into public.categories (organization_id, name, slug) values ($1, 'Tents', $2) returning id",
+      [org.id, `tents-${Math.random().toString(36).slice(2, 8)}`],
+    );
+    const sel = await admin<{ id: string }>(
+      `insert into public.weather_blocks (organization_id, hazard, period, status, scope, reason)
+       values ($1, 'lightning', tstzrange($2, $3), 'confirmed', 'selected', 'Storm') returning id`,
+      [org.id, june(12, "00:00"), june(13, "00:00")],
+    );
+    await admin(
+      "insert into public.weather_block_targets (organization_id, weather_block_id, category_id) values ($1, $2, $3)",
+      [org.id, sel.rows[0]!.id, other.rows[0]!.id],
+    );
+    const b = await openTx(org.users.office);
+    await b.q(
+      "insert into public.product_categories (organization_id, product_id, category_id) values ($1, $2, $3)",
+      [org.id, s.productId, other.rows[0]!.id],
+    );
+    const a = await openTx(SYSTEM);
+    const hold = settle(a.q(holdSql, [org.id, items(s.variantId, 1, s.day)]));
+    await waitUntilBlocked(a.pid);
+    await b.commit();
+    expect(await hold).toBe("RA002");
+    await a.rollback();
+    await cleanup(sel.rows[0]!.id);
+    await cleanup(s.blockId);
+  });
+
+  it("lifting a weather block is serialized with in-flight holds too", async () => {
+    const s = await setup();
+    const other = await makeProduct(org, { units: 1 });
+    const a = await openTx(SYSTEM);
+    await a.q(holdSql, [org.id, items(other.variantId, 1, s.day)]);
+    const b = await openTx(org.users.admin);
+    const lifting = settle(b.q("select public.lift_weather_block($1)", [s.blockId]));
+    await waitUntilBlocked(b.pid);
+    await a.commit();
+    expect(await lifting).toBe("ok");
+    await b.commit();
+  });
 });

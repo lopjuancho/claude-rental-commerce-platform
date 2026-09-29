@@ -18,8 +18,9 @@ import {
 const isoInstant = z.iso.datetime({ offset: true });
 
 /**
- * What a caller may submit: product/variant ids, quantities, times, an address, discount codes and
- * (staff only) manual adjustments with a reason. Strict: any other key — a price, a total, a tax or
+ * What a caller may submit: product/variant ids, quantities, times, an address (null = pickup),
+ * discount codes and (staff only) manual adjustments with a reason. Whether an item is an add-on
+ * is NOT a caller choice: it follows from the catalog's add-on relations (assemblePricingInput). Strict: any other key — a price, a total, a tax or
  * delivery amount, an organization id, an engine version — is rejected, never silently used.
  * Everything else is loaded from the database and computed by the engine on the server.
  */
@@ -29,7 +30,6 @@ export const priceRequestSchema = z.strictObject({
       z.strictObject({
         variantId: z.uuid(),
         quantity: z.int().min(1).max(1000),
-        kind: z.enum(["rental", "add_on"]).default("rental"),
         start: isoInstant,
         end: isoInstant,
       }),
@@ -79,6 +79,8 @@ export const pricingContextSchema = z.object({
       includedDurationMinutes: z.number().int(),
       overnightAllowed: z.boolean(),
       attendantsRequired: z.number().int(),
+      /** Products this product is a catalog add-on of. */
+      addonOf: z.array(z.uuid()).default([]),
       published: z.boolean(),
       active: z.boolean(),
     }),
@@ -152,10 +154,19 @@ export function assemblePricingInput(args: {
 }): PricingInput {
   const { context, request } = args;
   const byId = new Map(context.variants.map((v) => [v.variantId, v]));
+  const requestedProducts = new Set(
+    request.items.map((it) => byId.get(it.variantId)?.productId).filter(Boolean),
+  );
   const items = request.items.map((it, index) => {
     const v = byId.get(it.variantId);
     if (!v || (args.channel === "public" && !v.published))
       throw new DomainError("NOT_FOUND", "Product not found.");
+    // Server-authoritative: an add-on only when requested alongside a product it is an add-on of.
+    const kind: "rental" | "add_on" = v.addonOf.some(
+      (parent) => parent !== v.productId && requestedProducts.has(parent),
+    )
+      ? "add_on"
+      : "rental";
     return {
       lineId: `L${index + 1}`,
       variantId: v.variantId,
@@ -163,7 +174,7 @@ export function assemblePricingInput(args: {
       name: v.name,
       primaryCategoryId: v.primaryCategoryId,
       categoryIds: v.categoryIds,
-      kind: it.kind,
+      kind,
       quantity: it.quantity,
       basePriceCents: v.basePriceCents,
       includedDurationMinutes: v.includedDurationMinutes,

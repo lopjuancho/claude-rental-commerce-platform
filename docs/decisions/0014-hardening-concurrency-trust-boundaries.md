@@ -107,6 +107,74 @@ The workflow ran only on `main` and pull requests, so the development branch was
 It now also runs on `claude/**` pushes and on manual dispatch, against a real Supabase stack
 (Postgres + Auth + PostgREST).
 
+## 7. Round 2 (Codex re-review of `ee09fcb`): three blockers
+
+Each blocker was first reproduced by a failing test, then fixed in the database or server
+(migration `20260930000970_hardening_round2.sql`).
+
+**B1: confirmations did not re-validate.** Confirmation checked only the expiry and weather.
+
+- *Failure scenario:* a hold is created; afterwards a maintenance/repair/staff block, blackout, or
+  product archive lands on its stock. The block correctly flags the hold, but
+  `confirm_reservation` still turned it into a confirmed booking. The same happened when the
+  block was being committed concurrently.
+- *Fix:* `confirm_reservation`, under the reservation's variant locks, calls
+  `app.hold_invalid_reasons`. It checks, for each allocation:
+  - the held unit is still active, still belongs to the variant, and is unblocked;
+  - no blackout, product block or variant block;
+  - the product is active (and published, when the caller is the system context);
+  - for pooled stock, the held quantity still fits beside every other active booking/hold and
+    partial block; the hold never counts against itself.
+
+  If any check fails, confirmation raises `BLOCKED` (RA002) or `INSUFFICIENT_AVAILABILITY` (RA001)
+  and the hold stays `held`. Existing confirmed bookings are flagged as before, never cancelled.
+- A held unit is not swapped automatically. Staff can re-reserve it (atomic replace).
+
+**B2: adding a weather rule took no lock.** The shared organization-lock trigger derived the
+organization from `OLD`, which is NULL on INSERT, and `pg_advisory_xact_lock(NULL)` silently does
+nothing.
+
+- *Failure scenario:* adding a category rule that makes products wind-sensitive to an
+  already-confirmed wind block could interleave with hold creation. The hold was admitted without
+  the rule, then the rule committed, and nothing flagged the hold.
+- *Fix:*
+  - the trigger uses `NEW` (or `OLD` on delete);
+  - `lock_organization` refuses a NULL organization instead of silently not locking;
+  - `product_categories` changes lock the product's variants (membership decides "selected"
+    weather blocks);
+  - `lift_weather_block` takes the exclusive organization lock;
+  - every weather-rule change, category-membership change, or primary-category change flags the
+    existing bookings that a confirmed weather block now covers (`app.flag_weather_conflicts`),
+    never cancelling them.
+- New holds, and confirmations, see the updated rules after acquiring the lock.
+- Weather rules exist at organization, category and product level only. There is no variant
+  level to lock.
+
+**B3: add-on status was chosen by the caller.** The request's `kind` (`rental` or `add_on`)
+decided the tax component.
+
+- *Failure scenario:* a caller could relabel a taxable rental as an "add-on" wherever add-ons are
+  not taxable.
+- *Fix:* `kind` is no longer accepted (the strict schema rejects it). `pricing_context` reports
+  each product's catalog add-on relations (`addonOf`), and the server marks an item as an add-on
+  only when it is requested together with a product it is an add-on of.
+
+**Pricing input classification** (the strict request schema enforces it):
+
+- **Client-provided:** variant ids, quantities, event start/end, event address (null = pickup),
+  discount-code references. Staff with `quotes.write` may also add reasoned, audited adjustments.
+- **Server-authoritative (from the database after tenant resolution):**
+  - organization, currency, time zone, multi-day strategy;
+  - base price, included duration, overnight permission, attendants, product name and categories;
+  - add-on status;
+  - pricing rules and revisions;
+  - delivery depot, free miles, per-mile rate, rounding, basis and service areas;
+  - tax jurisdiction, rates and taxability;
+  - engine version and input hash.
+
+Twenty regression tests show each of these being rejected when a caller tries to supply it. The
+rejection happens before any trusted data is read, on both the staff and the public paths.
+
 ## Not changed (disagreement or scope)
 
 - Blocks over existing bookings stay allowed, with flags. This is deliberate (ADR 0010: never

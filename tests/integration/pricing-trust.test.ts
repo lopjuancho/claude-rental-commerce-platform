@@ -501,3 +501,159 @@ describe("H5: public pricing is pinned to the server-resolved tenant", () => {
     ).toBe("RA006");
   });
 });
+
+describe("Codex re-review blocker 3: pricing inputs are client-chosen or server-authoritative, never both", () => {
+  // CLIENT-PROVIDED: variant ids, quantities, times, event address (or pickup), discount codes.
+  // SERVER-AUTHORITATIVE: everything else — loaded from the database after tenant resolution.
+  let addonOrg: TestOrg;
+  let castle: { productId: string; variantId: string };
+  let generator: { productId: string; variantId: string };
+
+  beforeAll(async () => {
+    addonOrg = await createOrg("authority");
+    await admin(
+      `update public.organization_settings set primary_depot_address_line1 = '2560 Overton Crossing St', primary_depot_city = 'Memphis',
+         primary_depot_state = 'TN', primary_depot_postal_code = '38127', free_delivery_miles = 5, per_mile_rate_cents = 400
+       where organization_id = $1`,
+      [addonOrg.id],
+    );
+    castle = await makeProduct(addonOrg, { units: 1 });
+    generator = await makeProduct(addonOrg, { units: 1 });
+    await admin("update public.products set base_price_cents = 30000 where id = $1", [
+      castle.productId,
+    ]);
+    await admin("update public.products set base_price_cents = 5000 where id = $1", [
+      generator.productId,
+    ]);
+    // The catalog says: the generator is an add-on of the castle.
+    await admin(
+      "insert into public.product_relations (organization_id, product_id, related_product_id, relation_type) values ($1, $2, $3, 'addon')",
+      [addonOrg.id, castle.productId, generator.productId],
+    );
+    // A (test) jurisdiction where rentals are taxable but add-ons are not.
+    const j = await admin<{ id: string }>(
+      "insert into public.tax_jurisdictions (organization_id, name, state, postal_codes) values ($1, 'Test', 'TN', '{38127}') returning id",
+      [addonOrg.id],
+    );
+    await admin(
+      "insert into public.tax_rates (organization_id, jurisdiction_id, name, rate_bps) values ($1, $2, 'Test rate', 1000)",
+      [addonOrg.id, j.rows[0]!.id],
+    );
+    await admin(
+      "insert into public.tax_component_rules (organization_id, jurisdiction_id, component, taxable) select $1, $2, c, c <> 'add_on' from unnest(enum_range(null::public.tax_component)) c",
+      [addonOrg.id, j.rows[0]!.id],
+    );
+  });
+
+  const it1 = (variantId: string, extra: Record<string, unknown> = {}) => ({
+    ...item(variantId),
+    ...extra,
+  });
+
+  it("a caller cannot relabel a rental as an 'add-on' to change its tax treatment", async () => {
+    await expect(
+      price(addonOrg.users.office, addonOrg, {
+        items: [it1(castle.variantId, { kind: "add_on" })],
+        eventAddress: null,
+      }),
+    ).rejects.toBeInstanceOf(ZodError);
+    await expect(
+      priceForTenant(
+        tenantOf(addonOrg),
+        { items: [it1(castle.variantId, { kind: "add_on" })], eventAddress: null },
+        { ip: "203.0.113.9" },
+        {},
+        { gateway: pgGateway(), rateLimit: () => Promise.resolve(), provider: null },
+      ),
+    ).rejects.toBeInstanceOf(ZodError);
+  });
+
+  it("add-on status comes from the catalog: the generator is an add-on only alongside the castle", async () => {
+    const both = await price(addonOrg.users.office, addonOrg, {
+      items: [item(castle.variantId), item(generator.variantId)],
+      eventAddress: null,
+    });
+    expect(both.input.items.map((i) => i.kind)).toEqual(["rental", "add_on"]);
+    expect(both.output.summary).toMatchObject({
+      base: 30000,
+      add_ons: 5000,
+      taxable_subtotal: 30000,
+      tax: 3000,
+    });
+
+    const alone = await price(addonOrg.users.office, addonOrg, {
+      items: [item(generator.variantId)],
+      eventAddress: null,
+    });
+    expect(alone.input.items.map((i) => i.kind)).toEqual(["rental"]);
+    expect(alone.output.summary).toMatchObject({ taxable_subtotal: 5000, tax: 500 });
+  });
+
+  const REJECTED: [string, Record<string, unknown>, Record<string, unknown>?][] = [
+    ["change the base price", {}, { basePriceCents: 1 }],
+    ["change the base price (top level)", { basePriceCents: 1 }],
+    ["change the delivery rate", { delivery: { perMileRateCents: 0 } }],
+    ["change free miles", { freeDeliveryMiles: 1000 }],
+    ["pass a delivery result", { deliveryCents: 0 }],
+    ["change the tax rate", { tax: { status: "resolved", rates: [{ rateBps: 0 }] } }],
+    ["change taxability", { taxability: { rental: false } }],
+    ["substitute another organization", { organizationId: "00000000-0000-0000-0000-000000000000" }],
+    [
+      "substitute another organization (in an item)",
+      {},
+      { organizationId: "00000000-0000-0000-0000-000000000000" },
+    ],
+    [
+      "inject a pricing rule",
+      { rules: [{ type: "discount_percent", params: { percent_bps: 10000 } }] },
+    ],
+    ["set the engine version", { engineVersion: "0.0.0" }],
+    ["set rule revisions", { appliedRules: [] }],
+    ["alter the included duration", {}, { includedDurationMinutes: 100000 }],
+    ["allow overnight", {}, { overnightAllowed: true }],
+    ["remove attendants", {}, { attendantsRequired: 0 }],
+    ["rename the product", {}, { name: "Free castle" }],
+    ["set the currency", { currency: "JPY" }],
+    ["set the time zone", { timeZone: "Pacific/Kiritimati" }],
+    ["choose the multi-day strategy", { multiDayBilling: "rolling_24h" }],
+    ["send a geocoded distance with the address", {}, undefined],
+  ];
+
+  it.each(REJECTED)("a caller cannot %s", async (_what, top, inItem) => {
+    const request =
+      _what === "send a geocoded distance with the address"
+        ? { items: [item(castle.variantId)], eventAddress: { ...EVENT, distanceMiles: 0 } }
+        : { items: [it1(castle.variantId, inItem ?? {})], eventAddress: null, ...top };
+    await expect(price(addonOrg.users.office, addonOrg, request)).rejects.toBeInstanceOf(ZodError);
+    const gateway = pgGateway();
+    await expect(
+      priceForTenant(
+        tenantOf(addonOrg),
+        request,
+        { ip: "203.0.113.9" },
+        {},
+        {
+          gateway,
+          rateLimit: () => Promise.resolve(),
+          provider: null,
+        },
+      ),
+    ).rejects.toBeInstanceOf(ZodError);
+    expect(gateway.calls).toEqual([]); // rejected before any trusted data was read
+  });
+
+  it("every server-authoritative value in the stored input equals the database, not the request", async () => {
+    const { input } = await price(addonOrg.users.office, addonOrg, {
+      items: [item(castle.variantId)],
+      eventAddress: null,
+    });
+    const db = await admin<{ price: string; tz: string; cur: string }>(
+      `select p.base_price_cents as price, o.timezone as tz, o.currency as cur
+       from public.products p join public.organizations o on o.id = p.organization_id where p.id = $1`,
+      [castle.productId],
+    );
+    expect(input.items[0]).toMatchObject({ basePriceCents: Number(db.rows[0]!.price) });
+    expect(input.timeZone).toBe(db.rows[0]!.tz);
+    expect(input.currency).toBe(db.rows[0]!.cur);
+  });
+});
