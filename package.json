@@ -22,7 +22,10 @@
     "db:types": "bash scripts/gen-types.sh",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm test:integration && pnpm build",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "deploy": "echo '✗ choose an environment: pnpm run deploy:production | deploy:staging | deploy:development' >&2 && exit 1",
+    "deploy:production": "bash scripts/deploy.sh production",
+    "deploy:staging": "bash scripts/deploy.sh staging",
+    "deploy:development": "bash scripts/deploy.sh development",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "typegen": "next typegen"
   },

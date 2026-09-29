@@ -73,3 +73,19 @@ Schema changes only via new files in `supabase/migrations/`. Then regenerate typ
 `development` (local Supabase), `staging` and `production` (separate Supabase projects and Cloudflare
 Worker environments in `wrangler.jsonc`). Production data is never copied to other environments.
 Secrets are set with `wrangler secret put <NAME> --env <env>`, never committed.
+
+## Deploying
+
+Each environment is its own Worker, and every deploy names its target explicitly:
+
+| Command | Worker | Wrangler env | `APP_ENV` |
+|---|---|---|---|
+| `pnpm run deploy:production` | `claude-rental-commerce-platform` | `--env production` | `production` |
+| `pnpm run deploy:staging` | `rental-commerce-staging` | `--env staging` | `staging` |
+| `pnpm run deploy:development` | `rental-commerce-development` | top level | `development` |
+
+`pnpm run deploy` without a target refuses to run. `scripts/deploy.sh` also refuses a conflicting
+`CLOUDFLARE_ENV` and refuses the development config inside a Cloudflare connected build (those builds
+rename the Worker to the production project). The Cloudflare connected build for production must deploy
+with `--env production` (e.g. deploy command `pnpm run deploy:production`).
+`tests/unit/deploy-config.test.ts` pins Worker names, self-references, `APP_ENV` and rate limiter ids.

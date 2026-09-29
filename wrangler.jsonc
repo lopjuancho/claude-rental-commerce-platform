@@ -1,13 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "claude-rental-commerce-platform",
+  // Top level = the development Worker. Production and staging are only ever deployed with an
+  // explicit --env (scripts/deploy.sh; tests/unit/deploy-config.test.ts pins all of this).
+  "name": "rental-commerce-development",
   "main": ".open-next/worker.js",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
-  "services": [
-    { "binding": "WORKER_SELF_REFERENCE", "service": "claude-rental-commerce-platform" },
-  ],
+  "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "rental-commerce-development" }],
   "observability": { "enabled": true },
   // Non-secret vars only. Secrets (SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY) are set with
   // `wrangler secret put --env <env>`, never committed. Bindings are NOT inherited by
