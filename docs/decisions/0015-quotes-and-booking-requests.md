@@ -193,6 +193,46 @@ test first (`tests/integration/quote-workflow-round3.test.ts`).
    Before the fix, the reversed-order rounds deadlocked 11–12 times each. After it, they produce
    no `40P01`.
 
+## 13. MEDIUM findings (Codex `M5-HARDENING-REVIEW.md`, reviewed commit `0040188`)
+
+Migration `20260930001400_m5_medium_findings.sql`. Tests are in
+`tests/integration/quote-workflow-medium.test.ts`.
+
+1. **M1: generic replacement of a quote-managed hold.** Reproduced at `0040188`: the replacement
+   succeeded, released the managed hold and left an unlinked one. It had already been closed in
+   `20260930001300` by `reservations_guard_quote_managed`, which raises `RA010` and rolls back the
+   whole call. Tests now pin that the hold, the request, its allocations and the budget are
+   unchanged and that no replacement reservation survives. Manual-hold replacement still works.
+   Managed replacement is not supported; the customer or staff request the booking again.
+2. **M2: reciprocal links.** Every operation on a managed hold now checks that the reservation
+   belongs to this request, quote and organization before changing anything
+   (`app.assert_reservation_linked`, `RA013`).
+   - Renewal and cancellation or decline reject a request pointing at a foreign hold. Nothing
+     changes and no budget is consumed.
+   - The automatic paths act only on holds that link back to the request, never on
+     `booking_requests.reservation_id` blindly. These are: quote revision, cancellation and
+     expiry; event edits; expiry caps; the multi-quote pre-locking.
+   - `request_booking` treats a mislinked pending request as stale.
+   - The links are immutable once set, so checking them after the quote and request locks is
+     final.
+3. **M3: scope of the public hold budget. This is a decision, not a fix.**
+   `quote_hold_budgets` limits holds and extensions per quote revision (1 + `max_hold_renewals`).
+   Cancelling, expiry and sweeping cannot reset it (tests in §10.6 and round 2). It is **not** a
+   visitor- or customer-wide limit. A new public quote for the same contact, product and window
+   starts a new budget, and the test documents that this is allowed.
+
+   Today the only cross-quote brake is the per-tenant, per-client-IP write rate limit (20 per
+   minute across quote requests, holds, renewals and cancellations). An unverified email is
+   deliberately not treated as an identity. Options before public launch (owner decision):
+   - **a. Accept** the per-quote scope with the rate limit as the bound. No change.
+   - **b. Per-client cap on concurrent live public holds per tenant.** The server passes a hashed
+     client key (IP-derived, never an email). The database counts that key's live holds and
+     rejects over the cap atomically, before reserving.
+   - **c. Public share cap per variant and period.** Public holds may occupy at most N units or X%
+     of a variant's capacity at any moment; staff holds are unaffected.
+
+   M5 ships with (a) until the owner chooses.
+
 ## Not in M5
 
 - Payments and contracts.

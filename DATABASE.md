@@ -722,6 +722,13 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
 - Variant advisory locks are taken in ascending order per transaction (`RA014` otherwise).
   Catalog and block edits lock the organization exclusively.
 
+**MEDIUM findings** (`20260930001400`, ADR 0015 §13):
+
+- Every managed-hold operation verifies the reservation's reciprocal links
+  (`app.assert_reservation_linked`, `RA013`). The automatic close and cap paths act only on holds
+  linked back to the request.
+- `quote_hold_budgets` is scoped to a quote revision, not to a visitor or customer.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.
