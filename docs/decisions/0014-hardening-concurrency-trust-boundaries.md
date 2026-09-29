@@ -130,6 +130,23 @@ Each blocker was first reproduced by a failing test, then fixed in the database 
   and the hold stays `held`. Existing confirmed bookings are flagged as before, never cancelled.
 - A held unit is not swapped automatically. Staff can re-reserve it (atomic replace).
 
+**B1 follow-up (round 3, Codex re-review of `3791ef1`).** The pooled check excluded *every*
+allocation of the hold being confirmed, so the hold's other lines on the same variant were
+ignored.
+
+- *Failure scenario:* stock of 4, and a hold with two overlapping lines of 2 (4 needed at once,
+  which fits). A repair block of 1 is then added: 5 units are needed at once, but each line saw
+  only "block 1 + itself 2 = 3" and the hold confirmed.
+- *Fix* (`20260930000980_hardening_round3.sql`): only the line being checked is excluded. Each
+  line is validated with the same formula as hold creation (`app.variant_availability`), within
+  its fixed occupied period (buffers included). The line's own quantity is added to the peak of:
+  - every other active allocation (the hold's other lines, other holds and confirmed bookings;
+    expired holds are excluded);
+  - partial blocks.
+- *Tests:* 8 regression cases in `confirmation-revalidation.test.ts`: over capacity, exactly at
+  capacity, non-overlapping lines, three repeated lines, external reservations, expired holds, a
+  block outside the overlap, and a concurrent hold attempt.
+
 **B2: adding a weather rule took no lock.** The shared organization-lock trigger derived the
 organization from `OLD`, which is NULL on INSERT, and `pg_advisory_xact_lock(NULL)` silently does
 nothing.

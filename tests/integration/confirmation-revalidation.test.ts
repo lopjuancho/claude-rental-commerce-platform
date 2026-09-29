@@ -199,3 +199,134 @@ describe("concurrent confirmation vs block", () => {
     await a.rollback();
   });
 });
+
+describe("Codex B1 follow-up: several lines of the SAME pooled hold are counted together", () => {
+  // Default buffers (60 min setup / 60 min pickup) are fixed on each allocation at hold time:
+  // A 12:00–16:00 occupies 11:00–17:00, B 14:00–18:00 occupies 13:00–19:00 (overlap 13:00–17:00).
+  const A = { start: june(26, "12:00"), end: june(26, "16:00") };
+  const B = { start: june(26, "14:00"), end: june(26, "18:00") };
+  const NEXT_DAY = { start: june(27, "12:00"), end: june(27, "16:00") };
+  const partial = (variantId: string, quantity: number, from = "08:00", to = "20:00", day = 26) =>
+    admin(
+      "insert into public.availability_blocks (organization_id, variant_id, quantity, period, reason) values ($1, $2, $3, tstzrange($4, $5), 'repair')",
+      [org.id, variantId, quantity, june(day, from), june(day, to)],
+    );
+
+  it("two overlapping lines + a later partial block exceed capacity → confirmation refused", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 4 });
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 2, ...A },
+      { variantId, quantity: 2, ...B },
+    ]); // 2 + 2 = 4 simultaneous: fits exactly at hold time
+    await partial(variantId, 1); // now 2 + 2 + 1 = 5 > 4 during the overlap
+    expect(await confirm(rid)).toBe("RA001");
+    expect(await status(rid)).toBe("held");
+  });
+
+  it("two overlapping lines exactly at capacity still confirm", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 4 });
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 2, ...A },
+      { variantId, quantity: 2, ...B },
+    ]);
+    expect(await confirm(rid)).toBe("ok");
+  });
+
+  it("non-overlapping lines are not added together (each day fits beside its block)", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 3 });
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 2, ...A },
+      { variantId, quantity: 2, ...NEXT_DAY },
+    ]);
+    await partial(variantId, 1); // day 26 only: 2 + 1 = 3
+    expect(await confirm(rid)).toBe("ok");
+  });
+
+  it("the same variant repeated across three lines", async () => {
+    const ok = await makeProduct(org, { pooled: 3 });
+    const r1 = await reserve(SYSTEM, org, [
+      { variantId: ok.variantId, quantity: 1, ...A },
+      { variantId: ok.variantId, quantity: 1, ...A },
+      { variantId: ok.variantId, quantity: 1, ...B },
+    ]);
+    expect(await confirm(r1)).toBe("ok");
+
+    const over = await makeProduct(org, { pooled: 3 });
+    const r2 = await reserve(SYSTEM, org, [
+      { variantId: over.variantId, quantity: 1, ...A },
+      { variantId: over.variantId, quantity: 1, ...A },
+      { variantId: over.variantId, quantity: 1, ...B },
+    ]);
+    await partial(over.variantId, 1);
+    expect(await confirm(r2)).toBe("RA001");
+  });
+
+  it("the same pooled variant plus other (external) reservations", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 5 });
+    const external = await reserve(SYSTEM, org, [{ variantId, quantity: 1, ...A }]);
+    expect(await confirm(external)).toBe("ok");
+    const otherHold = await reserve(SYSTEM, org, [{ variantId, quantity: 1, ...B }]);
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 1, ...A },
+      { variantId, quantity: 2, ...B },
+    ]); // 1 + 1 + 1 + 2 = 5 during the overlap
+    expect(await confirm(rid)).toBe("ok");
+
+    const v2 = await makeProduct(org, { pooled: 5 });
+    await reserve(SYSTEM, org, [{ variantId: v2.variantId, quantity: 1, ...A }]);
+    const rid2 = await reserve(SYSTEM, org, [
+      { variantId: v2.variantId, quantity: 2, ...A },
+      { variantId: v2.variantId, quantity: 2, ...B },
+    ]); // 1 + 2 + 2 = 5
+    await partial(v2.variantId, 1); // 6 > 5
+    expect(await confirm(rid2)).toBe("RA001");
+    expect(otherHold).toBeTruthy();
+  });
+
+  it("expired holds of other customers are not counted", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 4 });
+    const stale = await reserve(SYSTEM, org, [{ variantId, quantity: 2, ...A }]);
+    await admin(
+      "update public.reservations set hold_expires_at = now() - interval '1 minute' where id = $1",
+      [stale],
+    );
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 2, ...A },
+      { variantId, quantity: 2, ...B },
+    ]);
+    expect(await confirm(rid)).toBe("ok");
+  });
+
+  it("a partial block that does not coincide with the overlap still lets the hold confirm", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 4 });
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 2, ...A },
+      { variantId, quantity: 2, ...B },
+    ]);
+    // 18:30–20:00: only B (occupied until 19:00) is active then → 2 + 1 = 3 ≤ 4.
+    await partial(variantId, 1, "18:30", "20:00");
+    expect(await confirm(rid)).toBe("ok");
+  });
+
+  it("concurrent: confirming a two-line hold while another hold for the same stock is attempted", async () => {
+    const { variantId } = await makeProduct(org, { pooled: 4 });
+    const rid = await reserve(SYSTEM, org, [
+      { variantId, quantity: 2, ...A },
+      { variantId, quantity: 2, ...B },
+    ]);
+    const a = await openTx(org.users.office);
+    await a.q("select public.confirm_reservation($1)", [rid]);
+    const b = await openTx(SYSTEM);
+    const second = settle(
+      b.q("select public.reserve_inventory($1, $2::jsonb)", [
+        org.id,
+        JSON.stringify([{ variant_id: variantId, quantity: 1, start: A.start, end: A.end }]),
+      ]),
+    );
+    await waitUntilBlocked(b.pid);
+    await a.commit();
+    expect(await second).toBe("RA001");
+    await b.rollback();
+    expect(await status(rid)).toBe("confirmed");
+  });
+});
