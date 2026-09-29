@@ -4,9 +4,10 @@ import { cache } from "react";
 import { isPermission, isRole, type Permission, type Role } from "@/domain/auth/permissions";
 import { DomainError } from "@/domain/errors";
 import { getSessionUser, type SessionUser } from "@/server/auth/session";
+import { ACTIVE_ORG_COOKIE, requestOrgTarget } from "@/server/db/org-target";
 import { createUserClient } from "@/server/db/user";
 
-export const ACTIVE_ORG_COOKIE = "active_org";
+export { ACTIVE_ORG_COOKIE } from "@/server/db/org-target";
 
 export interface Membership {
   organizationId: string;
@@ -62,6 +63,8 @@ export const getStaffContext = cache(async (): Promise<StaffContext | null> => {
   const requested = (await cookies()).get(ACTIVE_ORG_COOKIE)?.value;
   const active = memberships.find((m) => m.organizationId === requested) ?? memberships[0];
   if (!active) return null;
+  // Mutations in this request target the active organization (and only it).
+  requestOrgTarget().organizationId = active.organizationId;
 
   const supabase = await createUserClient();
   const { data, error } = await supabase

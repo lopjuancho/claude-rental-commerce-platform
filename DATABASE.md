@@ -745,6 +745,16 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
 - `events.customer_id` is frozen once the event has a confirmed booking, and is part of the
   event signature.
 
+**Round 5** (`20260930001700`, ADR 0015 §16):
+
+- The organization gate covers only the mutation's declared target organizations, never all of a
+  user's memberships:
+  - the `x-org-targets` header for API writes;
+  - `app.acquire_org_gates` / `app.acquire_writable_org_gates` in functions;
+  - `public.acquire_organization_gates` for the service role.
+- No gate is added after another is held (`RA014`). Undeclared script/service writes fail fast
+  with `55P03`.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

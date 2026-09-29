@@ -10,7 +10,27 @@ import { testDatabaseUrl } from "./config";
 export const pool = new pg.Pool({ connectionString: testDatabaseUrl(), max: 25 });
 
 export type Actor =
-  { kind: "anon" } | { kind: "service" } | { kind: "user"; id: string; email: string };
+  | { kind: "anon" }
+  | { kind: "service" }
+  | {
+      kind: "user";
+      id: string;
+      email: string;
+      /** The user's active organization (what the app sends as the mutation target). */
+      organizationId?: string;
+      /** Explicit mutation targets; overrides organizationId (ADR 0015 §16). */
+      orgTargets?: string[];
+    };
+
+/**
+ * The organization(s) a user's request declares as its mutation targets — what the app's user
+ * client sends as the `x-org-targets` header, visible to SQL as `request.headers` (PostgREST).
+ */
+export function requestHeadersFor(actor: Actor): string {
+  if (actor.kind !== "user") return "{}";
+  const targets = actor.orgTargets ?? (actor.organizationId ? [actor.organizationId] : []);
+  return JSON.stringify(targets.length ? { "x-org-targets": targets.join(",") } : {});
+}
 
 type Row = Record<string, unknown>;
 
@@ -35,6 +55,9 @@ export async function as<T>(
         : { role };
     await client.query("select set_config('request.jwt.claims', $1, true)", [
       JSON.stringify(claims),
+    ]);
+    await client.query("select set_config('request.headers', $1, true)", [
+      requestHeadersFor(actor),
     ]);
     await client.query(`set local role ${role}`);
     const sql: Sql = (text, params) => client.query(text, params);
@@ -100,6 +123,8 @@ export interface TestUser {
   kind: "user";
   id: string;
   email: string;
+  organizationId?: string;
+  orgTargets?: string[];
 }
 
 export async function createUser(label: string): Promise<TestUser> {
@@ -134,5 +159,6 @@ export async function createOrg(label: string, status = "active"): Promise<TestO
     );
     users[role] = user;
   }
+  for (const u of Object.values(users)) u.organizationId = id;
   return { id, slug, users };
 }

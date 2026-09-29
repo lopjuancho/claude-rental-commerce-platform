@@ -2808,6 +2808,7 @@ export type Database = {
     };
     Functions: {
       accept_invitation: { Args: { p_token: string }; Returns: string };
+      acquire_organization_gates: { Args: { p_organization_ids: string[] }; Returns: undefined };
       cancel_booking_by_token: {
         Args: { p_organization_id: string; p_token_hash: string };
         Returns: string;

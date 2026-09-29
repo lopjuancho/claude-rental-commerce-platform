@@ -34,20 +34,8 @@ test("concurrent first storefront requests leave exactly one visitor identity, w
   await context.close();
 });
 
-test("booking actions (POST) never mint a visitor identity", async ({ playwright, baseURL }) => {
-  const api = await playwright.request.newContext({ baseURL: baseURL! });
-  const posts = await Promise.all(
-    [1, 2, 3].map(() =>
-      api.post("/quote", {
-        headers: { "next-action": "0".repeat(40) },
-        form: { token: "a".repeat(43) },
-        failOnStatusCode: false,
-      }),
-    ),
-  );
-  for (const res of posts) expect(visitorSetCookies(res.headersArray())).toEqual([]);
-  await api.dispose();
-});
+// The real booking action (no cookie → refused, no hold, never minted; shared cookie → cap holds)
+// is exercised in tests/integration/booking-action.test.ts against the database.
 
 test("admin and sign-in pages do not receive a visitor cookie", async ({ playwright, baseURL }) => {
   const api = await playwright.request.newContext({ baseURL: baseURL! });

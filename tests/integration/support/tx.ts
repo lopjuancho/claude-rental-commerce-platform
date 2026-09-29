@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { afterEach } from "vitest";
 import { outcome } from "./availability";
-import { admin, pool, type Actor } from "./db";
+import { admin, pool, requestHeadersFor, type Actor } from "./db";
 
 /**
  * Step-by-step transactions for deterministic race tests: A runs its critical statement and stays
@@ -33,6 +33,7 @@ export async function openTx(actor: Actor): Promise<Tx> {
       ? { sub: actor.id, email: actor.email, role: "authenticated", aud: "authenticated" }
       : { role };
   await client.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(claims)]);
+  await client.query("select set_config('request.headers', $1, true)", [requestHeadersFor(actor)]);
   await client.query(`set local role ${role}`);
   const pid = (await client.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
   let done = false;

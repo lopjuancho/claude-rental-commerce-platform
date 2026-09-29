@@ -28,6 +28,11 @@ export function fromDbError(error: PostgrestError, what: string): DomainError {
       return new DomainError("INVALID_INPUT", error.message.replace(/^INVALID_LOCAL_TIME: /, ""), {
         cause: error,
       });
+    case "55P03":
+      // Another change to this organization's availability is in progress (ADR 0015 §15–16).
+      return new DomainError("CONFLICT", "Another change is in progress. Please try again.", {
+        cause: error,
+      });
     case "42501":
       return new DomainError("FORBIDDEN", undefined, { cause: error });
     case "PGRST116":

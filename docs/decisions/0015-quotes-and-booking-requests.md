@@ -314,6 +314,53 @@ organization gate (exclusive for catalog/availability edits, shared for bookings
 rows → variant advisory locks (ascending) → visitor lock (public holds) → reservation and
 allocation rows (by id).
 
+## 16. Round 5: the organization gate is scoped to the target tenants (Codex review of `5f8a9e3`)
+
+Migration `20260930001700_m5_round5_target_gate.sql`. Tests are in
+`tests/integration/round5.test.ts` and `tests/integration/booking-action.test.ts`.
+
+The round-4 statement trigger locked every organization the acting user belonged to. That had two
+consequences:
+
+- **H1-R4.** A weather RPC holding organization B's gate could request A's gate from a nested
+  statement, while a catalog write in A held A and waited for B. That is a deadlock.
+- **M3-R4.** A-only writes blocked unrelated tenants, including B where the user was read-only,
+  zero-row updates and RLS-filtered updates.
+
+**Protocol.** A mutation declares its target organization(s) before any row lock. Only those
+gates are taken, exclusive and in ascending uuid order.
+
+- **Staff API writes.** The user client sends the resolved active organization as the
+  `x-org-targets` header (`src/server/db/user.ts`, `src/server/db/org-target.ts`). The BEFORE
+  STATEMENT trigger takes the gates of the declared targets in which the user may write
+  (`catalog.write`, `availability.write` or `settings.write`), and ignores the rest.
+- **Functions** call `app.acquire_org_gates` or `app.acquire_writable_org_gates` for their known
+  target: weather confirm/lift for the block's organization, `commit_product_import` for the
+  batch's organization.
+- **Service role** calls `public.acquire_organization_gates(<targets>)` first in the same
+  transaction.
+- **Never a gate after another gate.** The statement trigger does nothing when the transaction
+  already holds a gate. `app.acquire_org_gates` refuses (`RA014`) to add a gate while another is
+  held.
+- **Row triggers only verify.** A row of an undeclared organization is refused (`RA014`) when
+  another gate is held. With no gate at all (an undeclared script or service write), the gate is
+  tried without waiting, and a busy gate fails fast with `55P03`.
+
+**Deterministic tests** read `pg_locks`:
+
+- Weather confirm/lift in one organization racing a catalog write in the other, both directions:
+  each transaction holds only its own target's gate and nobody waits on the other.
+- A multi-organization declaration takes exactly its targets in ascending order, never an
+  undeclared membership.
+- An A-only, zero-row or RLS-filtered update never locks B, and a booking in B proceeds while A is
+  locked.
+- The real service role fails fast when the gate is busy (UPDATE and DELETE, clean rollback) and
+  waits without holding rows when it declares its gate first.
+
+**The real booking server action** runs with only Next's request edges and the network replaced.
+Without the cookie it is refused, with no hold, no budget change and no cookie minted. A
+storefront GET establishes the cookie. Concurrent actions sharing it cannot exceed the cap.
+
 ## Not in M5
 
 - Payments and contracts.
