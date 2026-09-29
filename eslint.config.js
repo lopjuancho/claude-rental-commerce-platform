@@ -9,11 +9,9 @@ import tseslint from "typescript-eslint";
  * Only these modules may import the service-role (RLS-bypassing) client.
  * See ADR 0001 and ARCHITECTURE.md §6.2. Extend deliberately, with review.
  */
-const SYSTEM_CLIENT_ALLOWLIST = [
-  "src/server/db/system.ts",
-  "src/server/public/**",
-  "src/server/audit/**",
-];
+// The service-role client is reachable only through the trusted gateway's explicit methods
+// (hardening H5). Public services, audit, pricing, etc. use the gateway, never the client.
+const SYSTEM_CLIENT_ALLOWLIST = ["src/server/db/system.ts", "src/server/trusted/gateway.ts"];
 
 const systemClientRestriction = {
   group: ["@/server/db/system", "**/server/db/system"],

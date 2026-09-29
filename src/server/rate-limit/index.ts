@@ -13,6 +13,7 @@ interface CloudflareRateLimitBinding {
 const BINDINGS: Record<RateLimitPolicy, string> = {
   auth: "AUTH_RATE_LIMITER",
   publicWrite: "PUBLIC_WRITE_RATE_LIMITER",
+  publicQuery: "PUBLIC_QUERY_RATE_LIMITER",
   assistant: "ASSISTANT_RATE_LIMITER",
 };
 

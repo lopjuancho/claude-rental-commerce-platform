@@ -585,7 +585,7 @@ create table delivery_distance_cache (
 );
 ```
 
-Functions:
+Functions (`put_cached_distance` is service-role only, ADR 0014):
 - `delivery_area_context(org, city, state, postal)` returns `{areasConfigured, match}`, where a postal-code match beats a city match, and higher priority wins.
 - `get_cached_distance(...)` and `put_cached_distance(...)`.
 
@@ -633,7 +633,8 @@ create table pricing_calculations (      -- immutable (trigger); deleted only wi
 );
 ```
 
-- **RLS:** select needs `org.read`. Rule, area and tax writes need `pricing.write`. `pricing_calculations` rows can only be written by `record_pricing_calculation`, which needs `quotes.write`.
+- **RLS:** select needs `org.read`. Rule, area and tax writes need `pricing.write`.
+- **Server-only writes (ADR 0014):** `pricing_calculations` rows and `delivery_distance_cache` entries can only be written by `record_pricing_calculation` / `put_cached_distance`, which are executable by `service_role` only. The calculation writer also rejects inconsistent snapshots and non-member actors.
 - **Context functions:** `pricing_context(org, variant_ids[])` and `tax_context(org, state, postal, date)`. Both are tenant-checked with `app.assert_can_act`, which raises `RA005` for other tenants.
 - **No tax values are seeded by the platform.** A missing `tax_component_rules` row for a component is **unresolved** (review), never a silent default.
 

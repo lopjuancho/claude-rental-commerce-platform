@@ -56,6 +56,7 @@ export async function applyTenantBundle(
       overnight_allowed: s.overnightAllowed,
       quote_valid_days: s.quoteValidDays,
       booking_hold_minutes: s.bookingHoldMinutes,
+      multi_day_billing: s.multiDayBilling,
       primary_depot_address_line1: s.primaryDepot?.addressLine1,
       primary_depot_city: s.primaryDepot?.city,
       primary_depot_state: s.primaryDepot?.state,

@@ -13,6 +13,8 @@ const localPeriod = z.object({
   startTime: z.string().regex(/^\d{2}:\d{2}$/),
   endTime: z.string().regex(/^\d{2}:\d{2}$/),
   endDate: z.iso.date().optional(),
+  /** Only consulted for a time that happens twice (DST fall-back); absent → such times are rejected. */
+  fold: z.enum(["earlier", "later"]).optional(),
 });
 
 async function organizationTimezone(organizationId: string): Promise<string> {

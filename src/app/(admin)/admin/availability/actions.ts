@@ -26,6 +26,7 @@ function period(f: FormReader) {
     startTime: f.text("startTime"),
     endTime: f.text("endTime"),
     ...(f.text("endDate") ? { endDate: f.text("endDate") } : {}),
+    ...(f.text("fold") ? { fold: f.text("fold") } : {}),
   };
 }
 

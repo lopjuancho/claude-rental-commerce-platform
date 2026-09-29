@@ -81,6 +81,7 @@ export const tenantBundleSchema = z.object({
       overnightAllowed: optional(z.boolean()),
       quoteValidDays: optional(z.int().min(1).max(365)),
       bookingHoldMinutes: optional(z.int().min(1).max(1440)),
+      multiDayBilling: optional(z.enum(["rolling_24h", "calendar_days"])),
       primaryDepot: optional(
         z.object({
           addressLine1: z.string().max(200),

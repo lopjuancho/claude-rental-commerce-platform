@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { divideRoundHalfUp, percentOf } from "@/domain/money";
-import { calculatePrice, canonicalJson } from "@/domain/pricing/engine";
+import { billableDays, calculatePrice, canonicalJson } from "@/domain/pricing/engine";
 import type { PricingInput, PricingItem, PricingRule, TaxContext } from "@/domain/pricing/types";
 
 // ── builders ──────────────────────────────────────────────────────────────
@@ -243,6 +243,57 @@ describe("duration pricing", () => {
       }),
     );
     expect(r.summary).toMatchObject({ overnight: 1000, additional_days: 0 });
+  });
+});
+
+describe("multi-day billing strategy (organization setting)", () => {
+  const ms = (iso: string) => Date.parse(iso);
+  const days = (start: string, end: string, strategy?: "rolling_24h" | "calendar_days") =>
+    billableDays(ms(start), ms(end), TZ, strategy);
+
+  it("rolling_24h (default, Tiky Jumps): Fri 5 PM → Sun noon = 2 days", () => {
+    expect(days(at(18, "17:00"), at(20, "12:00"))).toBe(2);
+    expect(days(at(18, "17:00"), at(20, "12:00"), "rolling_24h")).toBe(2);
+    expect(days(at(19, "10:00"), at(20, "10:00"))).toBe(1); // exactly 24 h
+    expect(days(at(19, "10:00"), at(20, "10:01"))).toBe(2);
+  });
+
+  it("calendar_days: every local date touched counts", () => {
+    expect(days(at(18, "17:00"), at(20, "12:00"), "calendar_days")).toBe(3);
+    expect(days(at(19, "08:00"), at(19, "20:00"), "calendar_days")).toBe(1);
+    expect(days(at(19, "18:00"), at(20, "00:00"), "calendar_days")).toBe(1); // ends at midnight
+    expect(days(at(19, "18:00"), at(20, "10:00"), "calendar_days")).toBe(2);
+    // DST end (25-hour local day) is still two calendar dates.
+    expect(days("2026-10-31T18:00:00-05:00", "2026-11-01T10:00:00-06:00", "calendar_days")).toBe(2);
+  });
+
+  it("the approved Tiky Jumps example: $175 + 1 additional day at +25 % = $218.75", () => {
+    const item = slide({ basePriceCents: 17500, start: at(18, "17:00"), end: at(20, "12:00") });
+    const r = calculatePrice(input({ items: [item], rules: [tikyAdditionalDay] }));
+    expect(r.summary).toMatchObject({ base: 17500, additional_days: 4375, subtotal: 21875 });
+    // Same input, snapshot from before the setting existed (no multiDayBilling) → identical.
+    const legacy = input({ items: [item], rules: [tikyAdditionalDay] });
+    delete legacy.multiDayBilling;
+    expect(calculatePrice(legacy).summary).toEqual(r.summary);
+  });
+
+  it("another organization on calendar_days bills the same period as 3 days", () => {
+    const item = slide({ basePriceCents: 17500, start: at(18, "17:00"), end: at(20, "12:00") });
+    const r = calculatePrice(
+      input({ items: [item], rules: [tikyAdditionalDay], multiDayBilling: "calendar_days" }),
+    );
+    expect(r.summary).toMatchObject({ additional_days: 8750, subtotal: 26250 });
+  });
+
+  it("calendar_days turns an overnight into a second day (overnight rule not used)", () => {
+    const r = calculatePrice(
+      input({
+        items: [slide({ overnightAllowed: true, start: at(19, "18:00"), end: at(20, "10:00") })],
+        rules: [tikyAdditionalDay, rule("overnight", { amount_cents: 1000 })],
+        multiDayBilling: "calendar_days",
+      }),
+    );
+    expect(r.summary).toMatchObject({ overnight: 0, additional_days: 11250 });
   });
 });
 

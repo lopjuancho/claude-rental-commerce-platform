@@ -83,6 +83,18 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 - Admin: pricing rules, tax jurisdictions/rates/taxability, service areas (ZIP/city lists, mileage rule).
 - **Tests:** base, extra hours, overnight, multi-day (+25 % of base per extra day), mileage (≤5 mi free, 5.1 mi, beyond max), quantity, discount percent/fixed/code, min charge, delivery, taxability per component (rental/delivery/labor/fee/discount), unresolved jurisdiction warning, rounding, negative totals prevented, unknown rule type rejected, deterministic output snapshot tests.
 
+### Hardening (between M4 and M5)
+
+**Status: implemented 2026-09-30** (ADR 0014). Addresses the independent review:
+
+- one availability lock protocol for every capacity-reducing change, with race tests;
+- server-only pricing and distance-cache writes;
+- DST-safe local times;
+- a single, enumerated service-role gateway;
+- CI on `claude/**` branches.
+
+M5 work is paused on a local WIP branch until this is reviewed.
+
 ### M5 — Customers, events, quotes
 - Migration `0007`; services for customer match/create, event create/update, quote create/add item/re-price/transition; per-org quote numbering.
 - Booking flow (ADR 0002): draft quote (no hold) → booking request (15-min hold, org-configurable) → staff confirmation (firm reservation); expired holds release automatically.

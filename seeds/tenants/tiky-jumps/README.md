@@ -24,7 +24,8 @@ Photos and brand assets are uploaded in the admin with their usage rights record
 | Water slides | up to 4 h standard window | category `water-slides` |
 | Delivery | first 5 road miles free, $4/mi after, one-way road distance (Google Maps Routes), rounded up | `settings.mileage` |
 | Depot (delivery origin) | 2560 Overton Crossing St, Memphis TN 38127 | `settings.primaryDepot` |
-| Additional days | +25 % of base rental per additional day | `pricingRules` |
+| Additional days | +25 % of base rental per additional day (approved 2026-09-30) | `pricingRules` |
+| Multi-day billing | rolling 24 h: Fri 5 PM → Sun noon = 2 days (approved 2026-09-30) | `settings.multiDayBilling` |
 | Inflatable wind limit | 15 mph on Bounce Houses, Water Slides, Combos, Interactives | category `weather` rules |
 | Trackless trains | not wind sensitive | category `trackless-trains` rule |
 

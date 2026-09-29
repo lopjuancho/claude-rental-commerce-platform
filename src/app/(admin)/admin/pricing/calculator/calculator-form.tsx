@@ -1,5 +1,6 @@
 "use client";
 
+import { FoldField } from "../../availability/period-fields";
 import { useActionState } from "react";
 import { CheckboxField, FormField } from "@/components/form-field";
 import { FormMessage } from "@/components/form-message";
@@ -71,6 +72,7 @@ export function CalculatorForm({
           <FormField id="endDate" label="End date (multi-day)">
             <Input id="endDate" name="endDate" type="date" />
           </FormField>
+          <FoldField id="fold" />
         </div>
         <div className="grid gap-3 sm:grid-cols-[2fr_1fr_4rem_6rem]">
           <FormField id="line1" label="Event address" hint="Blank = customer pickup">
@@ -97,6 +99,12 @@ export function CalculatorForm({
               </FormField>
               <FormField id="adjustmentLabel" label="Adjustment label">
                 <Input id="adjustmentLabel" name="adjustmentLabel" />
+              </FormField>
+              <FormField
+                id="adjustmentReason"
+                label="Reason for the adjustment (required, audited)"
+              >
+                <Input id="adjustmentReason" name="adjustmentReason" maxLength={500} />
               </FormField>
             </>
           ) : null}

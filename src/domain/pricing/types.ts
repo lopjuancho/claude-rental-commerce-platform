@@ -1,5 +1,14 @@
 /** Engine contract. All money is integer cents; all instants are ISO strings; nothing is implicit. */
-export const ENGINE_VERSION = "pricing-2026.09.29-1";
+export const ENGINE_VERSION = "pricing-2026.09.30-1";
+
+/**
+ * How a rental period becomes billable days (organization setting, ADR 0013).
+ * - rolling_24h: ceil(duration / 24 h). Fri 17:00 → Sun 12:00 (43 h) = 2 days.
+ * - calendar_days: every local calendar date touched counts. Fri 17:00 → Sun 12:00 = 3 days.
+ *   A rental crossing midnight is then a second day, so the overnight rule never applies.
+ */
+export const MULTI_DAY_BILLING_STRATEGIES = ["rolling_24h", "calendar_days"] as const;
+export type MultiDayBillingStrategy = (typeof MULTI_DAY_BILLING_STRATEGIES)[number];
 
 export const TAX_COMPONENTS = [
   "rental",
@@ -91,11 +100,17 @@ export type TaxContext =
 export interface ManualAdjustment {
   label: string;
   amountCents: number; // signed
+  /** Why staff adjusted the price, and who (user id from the verified session). Snapshots made
+   *  before these fields existed omit them; the engine never reads them. */
+  reason?: string;
+  authorizedBy?: string | null;
 }
 
 export interface PricingInput {
   currency: string;
   timeZone: string;
+  /** Absent in snapshots made before the setting existed; those used rolling_24h. */
+  multiDayBilling?: MultiDayBillingStrategy;
   items: PricingItem[];
   rules: PricingRule[];
   discountCodes: string[];

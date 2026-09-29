@@ -15,6 +15,19 @@ export function fromDbError(error: PostgrestError, what: string): DomainError {
     case "23503":
     case "22P02":
       return new DomainError("INVALID_INPUT", `${what} data is invalid.`, { cause: error });
+    case "RA011":
+      // Hardening H1: capacity-reducing edits are refused while bookings/holds need the stock.
+      return new DomainError(
+        "CONFLICT",
+        "That change would take away stock that is booked, held or blocked. " +
+          (error.details ? `(${error.details}) ` : "") +
+          "Move or cancel those bookings first, or add a maintenance block for the future.",
+        { cause: error },
+      );
+    case "RA012":
+      return new DomainError("INVALID_INPUT", error.message.replace(/^INVALID_LOCAL_TIME: /, ""), {
+        cause: error,
+      });
     case "42501":
       return new DomainError("FORBIDDEN", undefined, { cause: error });
     case "PGRST116":

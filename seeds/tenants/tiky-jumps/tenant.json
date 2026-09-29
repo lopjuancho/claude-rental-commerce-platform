@@ -26,6 +26,7 @@
     "defaultTeardownBufferMinutes": 60,
     "minBookingLeadTimeMinutes": 720,
     "bookingHoldMinutes": 15,
+    "multiDayBilling": "rolling_24h",
     "mileage": {
       "freeMiles": 5,
       "perMileRateCents": 400,

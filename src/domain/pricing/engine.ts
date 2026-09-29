@@ -10,6 +10,7 @@ import {
   type PricingRule,
   type TaxComponent,
   type TaxLine,
+  type MultiDayBillingStrategy,
 } from "./types";
 
 /**
@@ -20,7 +21,7 @@ import {
  * not present that total as final.
  *
  * Duration model, per item:
- *   billable days = ceil(duration / 24 h), minimum 1
+ *   billable days = billableDays(strategy), minimum 1 (rolling_24h: ceil(duration / 24 h))
  *   1 day, same local date     → base (+ extra hours beyond the included duration)
  *   1 day, crosses midnight    → base + overnight rule (no extra hours)
  *   > 1 day                    → base + additional-day rule × (days − 1)
@@ -35,6 +36,23 @@ function localDate(instant: number, timeZone: string): string {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(instant));
+}
+
+const DAY_MS = 86_400_000;
+
+/** Billable days for a period under an organization's multi-day strategy (minimum 1). */
+export function billableDays(
+  start: number,
+  end: number,
+  timeZone: string,
+  strategy: MultiDayBillingStrategy = "rolling_24h",
+): number {
+  if (strategy === "calendar_days") {
+    const first = Date.parse(`${localDate(start, timeZone)}T00:00:00Z`);
+    const last = Date.parse(`${localDate(end - 1, timeZone)}T00:00:00Z`);
+    return Math.max(1, Math.round((last - first) / DAY_MS) + 1);
+  }
+  return Math.max(1, Math.ceil(Math.round((end - start) / MINUTE) / 1440));
 }
 
 interface ItemCharges {
@@ -92,7 +110,7 @@ export function calculatePrice(input: PricingInput): PriceResult {
 
     const qty = item.quantity;
     const durationMinutes = Math.round((end - start) / MINUTE);
-    const billableDays = Math.max(1, Math.ceil(durationMinutes / 1440));
+    const days = billableDays(start, end, input.timeZone, input.multiDayBilling);
     const startDate = localDate(start, input.timeZone);
     const crossesMidnight = localDate(end - 1, input.timeZone) !== startDate;
 
@@ -106,7 +124,7 @@ export function calculatePrice(input: PricingInput): PriceResult {
     });
     let discountable = item.basePriceCents * qty;
 
-    if (billableDays > 1) {
+    if (days > 1) {
       const rule = selectRule(rules, "additional_day", item, startDate, codes);
       const params = rule ? parseRuleParams("additional_day", rule.params) : null;
       if (!rule) {
@@ -115,7 +133,7 @@ export function calculatePrice(input: PricingInput): PriceResult {
         invalidRule(rule);
       } else {
         markApplied(rule);
-        const extraDays = billableDays - 1;
+        const extraDays = days - 1;
         const perDay =
           "amount_cents" in params
             ? params.amount_cents

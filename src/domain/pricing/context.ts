@@ -3,6 +3,7 @@ import { postalAddressSchema } from "@/domain/delivery/address";
 import type { AreaContext, DeliveryConfig } from "@/domain/delivery/quote";
 import { DomainError } from "@/domain/errors";
 import {
+  MULTI_DAY_BILLING_STRATEGIES,
   PRICING_RULE_TYPES,
   TAX_COMPONENTS,
   type DeliveryResult,
@@ -16,10 +17,16 @@ import {
  */
 const isoInstant = z.iso.datetime({ offset: true });
 
-export const priceRequestSchema = z.object({
+/**
+ * What a caller may submit: product/variant ids, quantities, times, an address, discount codes and
+ * (staff only) manual adjustments with a reason. Strict: any other key — a price, a total, a tax or
+ * delivery amount, an organization id, an engine version — is rejected, never silently used.
+ * Everything else is loaded from the database and computed by the engine on the server.
+ */
+export const priceRequestSchema = z.strictObject({
   items: z
     .array(
-      z.object({
+      z.strictObject({
         variantId: z.uuid(),
         quantity: z.int().min(1).max(1000),
         kind: z.enum(["rental", "add_on"]).default("rental"),
@@ -30,13 +37,14 @@ export const priceRequestSchema = z.object({
     .min(1)
     .max(50),
   /** Event/service location. Null = customer pickup (no delivery; tax uses the depot location). */
-  eventAddress: postalAddressSchema.nullable(),
+  eventAddress: postalAddressSchema.strict().nullable(),
   discountCodes: z.array(z.string().trim().min(1).max(40)).max(5).default([]),
   adjustments: z
     .array(
-      z.object({
+      z.strictObject({
         label: z.string().trim().min(1).max(120),
         amountCents: z.int().min(-100_000_000).max(100_000_000),
+        reason: z.string().trim().min(3, "Give a reason for the adjustment.").max(500),
       }),
     )
     .max(10)
@@ -50,6 +58,7 @@ export const pricingContextSchema = z.object({
     currency: z.string().length(3),
     timezone: z.string(),
     status: z.string(),
+    multiDayBilling: z.enum(MULTI_DAY_BILLING_STRATEGIES).default("rolling_24h"),
   }),
   delivery: z.object({
     depot: postalAddressSchema.nullable(),
@@ -138,6 +147,8 @@ export function assemblePricingInput(args: {
   tax: TaxContext;
   /** Public/assistant callers may only price published products and cannot add adjustments. */
   channel: "staff" | "public";
+  /** The verified staff member who entered the adjustments (from the session, never input). */
+  adjustmentsAuthorizedBy?: string | null;
 }): PricingInput {
   const { context, request } = args;
   const byId = new Map(context.variants.map((v) => [v.variantId, v]));
@@ -163,16 +174,25 @@ export function assemblePricingInput(args: {
       end: new Date(it.end).toISOString(),
     };
   });
-  if (args.channel === "public" && request.adjustments.length > 0)
+  if (
+    request.adjustments.length > 0 &&
+    (args.channel === "public" || !args.adjustmentsAuthorizedBy)
+  )
     throw new DomainError("FORBIDDEN");
   return {
     currency: context.organization.currency,
     timeZone: context.organization.timezone,
+    multiDayBilling: context.organization.multiDayBilling,
     items,
     rules: context.rules,
     discountCodes: request.discountCodes,
     delivery: args.delivery,
     tax: args.tax,
-    adjustments: request.adjustments,
+    adjustments: request.adjustments.map((a) => ({
+      label: a.label,
+      amountCents: a.amountCents,
+      reason: a.reason,
+      authorizedBy: args.adjustmentsAuthorizedBy ?? null,
+    })),
   };
 }

@@ -219,13 +219,18 @@ describe("end-to-end pricing from database configuration", () => {
 
 describe("quote price stability (snapshots)", () => {
   it("a stored $475 price does not change when the product becomes $525 or rules are edited", async () => {
-    const { input, output } = await price(staff(), org, {
-      items: [item(castle.variantId, june(19, "12:00"), june(20, "18:00"))],
-      eventAddress: EVENT,
-    });
+    const { output, calculationId } = await price(
+      staff(),
+      org,
+      {
+        items: [item(castle.variantId, june(19, "12:00"), june(20, "18:00"))],
+        eventAddress: EVENT,
+      },
+      { save: true },
+    );
     expect(output.summary.base).toBe(47500);
     expect(output.summary.additional_days).toBe(11875); // 25 % of $475
-    const id = await record(staff(), org, input, output);
+    const id = calculationId!;
     const before = await admin<{ output: PriceResult; total_cents: string }>(
       "select output, total_cents from public.pricing_calculations where id = $1",
       [id],
@@ -278,11 +283,16 @@ describe("quote price stability (snapshots)", () => {
   });
 
   it("stored calculations are immutable for everyone", async () => {
-    const { input, output } = await price(staff(), org, {
-      items: [item(castle.variantId, june(19, "12:00"), june(19, "16:00"))],
-      eventAddress: EVENT,
-    });
-    const id = await record(staff(), org, input, output);
+    const { calculationId } = await price(
+      staff(),
+      org,
+      {
+        items: [item(castle.variantId, june(19, "12:00"), june(19, "16:00"))],
+        eventAddress: EVENT,
+      },
+      { save: true },
+    );
+    const id = calculationId!;
     await expectDenied(
       admin("update public.pricing_calculations set total_cents = 1 where id = $1", [id]),
     );
@@ -407,7 +417,7 @@ describe("configuration integrity", () => {
     expect(
       await outcome(
         rpc(
-          staff(),
+          SYSTEM,
           "select public.put_cached_distance($1, 'fake', '1', repeat('c', 64), 100, 31)",
           [org.id],
         ),
@@ -439,10 +449,19 @@ describe("tenant isolation and permissions", () => {
       ["select public.tax_context($1, 'TN', '38138', '2027-06-19')", [org.id]],
       ["select public.delivery_area_context($1, 'Germantown', 'TN', '38138')", [org.id]],
       ["select public.get_cached_distance($1, 'fake', '1', repeat('a', 64))", [org.id]],
-      ["select public.put_cached_distance($1, 'fake', '1', repeat('a', 64), 1)", [org.id]],
     ] as const) {
       expect(await outcome(rpc(other.users.owner, sql, [...params]))).toBe("RA005");
     }
+    // Writing the cache is not callable by any signed-in user at all (hardening H3).
+    expect(
+      await outcome(
+        rpc(
+          other.users.owner,
+          "select public.put_cached_distance($1, 'fake', '1', repeat('a', 64), 1)",
+          [org.id],
+        ),
+      ),
+    ).toBe("42501");
   });
 
   it("another tenant's variant ids return nothing under your own organization id (→ NOT_FOUND in the pipeline)", async () => {
@@ -460,13 +479,14 @@ describe("tenant isolation and permissions", () => {
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it("saving calculations needs quotes.write in the same organization", async () => {
+  it("only the trusted server (service role) can store calculations — no signed-in user can", async () => {
     const { input, output } = await price(staff(), org, {
       items: [item(castle.variantId, june(19, "12:00"), june(19, "16:00"))],
       eventAddress: EVENT,
     });
-    expect(await outcome(record(org.users.staff, org, input, output))).toBe("RA005");
-    expect(await outcome(record(other.users.owner, org, input, output))).toBe("RA005");
+    expect(await outcome(record(org.users.staff, org, input, output))).toBe("42501");
+    expect(await outcome(record(org.users.owner, org, input, output))).toBe("42501");
+    expect(await outcome(record(other.users.owner, org, input, output))).toBe("42501");
     expect(await outcome(record(SYSTEM, org, input, output))).toBe("ok");
     expect(await outcome(record({ kind: "anon" }, org, input, output))).toBe("42501");
   });
@@ -516,7 +536,7 @@ describe("tenant isolation and permissions", () => {
         {
           items: [item(slide.variantId, june(19, "12:00"), june(19, "16:00"))],
           eventAddress: EVENT,
-          adjustments: [{ label: "x", amountCents: -100 }],
+          adjustments: [{ label: "x", amountCents: -100, reason: "test" }],
         },
         { channel: "public" },
       ),

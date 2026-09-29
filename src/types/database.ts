@@ -645,6 +645,7 @@ export type Database = {
           mileage_basis: Database["public"]["Enums"]["mileage_basis"];
           mileage_rounding_method: Database["public"]["Enums"]["mileage_rounding"];
           min_booking_lead_time_minutes: number;
+          multi_day_billing: Database["public"]["Enums"]["multi_day_billing"];
           organization_id: string;
           overnight_allowed: boolean;
           per_mile_rate_cents: number | null;
@@ -688,6 +689,7 @@ export type Database = {
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
           mileage_rounding_method?: Database["public"]["Enums"]["mileage_rounding"];
           min_booking_lead_time_minutes?: number;
+          multi_day_billing?: Database["public"]["Enums"]["multi_day_billing"];
           organization_id: string;
           overnight_allowed?: boolean;
           per_mile_rate_cents?: number | null;
@@ -731,6 +733,7 @@ export type Database = {
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
           mileage_rounding_method?: Database["public"]["Enums"]["mileage_rounding"];
           min_booking_lead_time_minutes?: number;
+          multi_day_billing?: Database["public"]["Enums"]["multi_day_billing"];
           organization_id?: string;
           overnight_allowed?: boolean;
           per_mile_rate_cents?: number | null;
@@ -2249,6 +2252,8 @@ export type Database = {
       };
       record_pricing_calculation: {
         Args: {
+          p_created_by?: string;
+          p_created_by_type: Database["public"]["Enums"]["audit_actor_type"];
           p_engine_version: string;
           p_input: Json;
           p_input_hash: string;
@@ -2343,6 +2348,7 @@ export type Database = {
       member_status: "active" | "suspended";
       mileage_basis: "one_way" | "round_trip";
       mileage_rounding: "ceil_whole_mile" | "round_whole_mile" | "none";
+      multi_day_billing: "rolling_24h" | "calendar_days";
       org_role: "owner" | "admin" | "office" | "staff";
       org_status: "onboarding" | "active" | "suspended" | "closed";
       pricing_rule_type:
@@ -2500,6 +2506,7 @@ export const Constants = {
       member_status: ["active", "suspended"],
       mileage_basis: ["one_way", "round_trip"],
       mileage_rounding: ["ceil_whole_mile", "round_whole_mile", "none"],
+      multi_day_billing: ["rolling_24h", "calendar_days"],
       org_role: ["owner", "admin", "office", "staff"],
       org_status: ["onboarding", "active", "suspended", "closed"],
       pricing_rule_type: [

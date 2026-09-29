@@ -3,7 +3,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # Development happens on claude/* branches before any PR exists; they must be verified too.
+    branches: [main, "claude/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read

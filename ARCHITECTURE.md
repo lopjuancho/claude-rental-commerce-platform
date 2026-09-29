@@ -211,6 +211,14 @@ The hardest correctness problem in the product. Approach:
 
 Rationale and SQL: DATABASE.md §6.
 
+### 7.2.1 Concurrency protocol (ADR 0014)
+
+Every write that can reduce availability takes the organization advisory lock (shared, or
+exclusive for organization-wide changes) and then per-variant locks, in a fixed order. The same
+applies to holds, confirmations, renewals, quantity and unit changes, blocks, weather confirmation
+and settings. The database is the final authority: capacity-reducing edits that would strand a
+booking fail with `CAPACITY_IN_USE`.
+
 ### 7.3 Pricing engine
 
 Implemented in M4 (ADR 0013). Sample outputs against the Tiky Jumps configuration are in `docs/pricing-review.md`.
@@ -234,6 +242,7 @@ Implemented in M4 (ADR 0013). Sample outputs against the Tiky Jumps configuratio
   - The jurisdiction comes from the event address (depot for pickup).
   - Taxability is set per component: rental, add_on, delivery, labor, fee, discount, adjustment.
   - A missing rule, a `test` jurisdiction or a boundary ZIP triggers review.
+- **Trust boundary (ADR 0014):** callers submit only items, quantities, times, address, codes and (staff) reasoned adjustments. The request schema is strict. Only server code, through the trusted gateway (service role), stores calculations and cached distances.
 - **Snapshots:** `pricing_calculations` is an immutable record of input, output, input hash and engine version. Historical prices never change when rules or base prices change. `verifyStoredCalculation` reproduces them.
 
 ### 7.4 Delivery / service areas

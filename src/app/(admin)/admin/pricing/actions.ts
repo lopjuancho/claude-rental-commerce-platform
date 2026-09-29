@@ -212,6 +212,10 @@ export async function calculateAction(_prev: CalcState, fd: FormData): Promise<C
       startTime: f.text("startTime") ?? "",
       endTime: f.text("endTime") ?? "",
       ...(f.text("endDate") ? { endDate: f.text("endDate") ?? "" } : {}),
+      fold:
+        f.text("fold") === "earlier" || f.text("fold") === "later"
+          ? (f.text("fold") as "earlier" | "later")
+          : null,
       timeZone,
     });
     const items = [0, 1, 2, 3]
@@ -241,6 +245,7 @@ export async function calculateAction(_prev: CalcState, fd: FormData): Promise<C
               {
                 label: f.text("adjustmentLabel") ?? "Manual adjustment",
                 amountCents: adjustment * (f.checkbox("adjustmentCredit") ? -1 : 1),
+                reason: f.text("adjustmentReason") ?? "",
               },
             ]
           : [],
