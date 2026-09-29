@@ -1,6 +1,6 @@
 -- Multi-day billing strategy (approved with M4, 2026-09-30; ADR 0013).
 -- How a rental period becomes billable days is an organization setting so other rental companies
--- can bill differently. Tiky Jumps: rolling_24h (Fri 5 PM → Sun noon = 2 days).
+-- can bill differently (e.g. rolling_24h: Fri 5 PM → Sun noon = 2 days; calendar_days: 3 days).
 create type public.multi_day_billing as enum ('rolling_24h', 'calendar_days');
 
 alter table public.organization_settings
