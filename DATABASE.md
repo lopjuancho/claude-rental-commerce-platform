@@ -554,108 +554,88 @@ Concurrency: per-variant `pg_advisory_xact_lock` (taken in sorted order: no dead
 
 ## 7. Delivery / service areas
 
+As implemented in migration `20260929000900_pricing_delivery_tax.sql`. Organization mileage settings (`primary_depot_*`, `free_delivery_miles`, `per_mile_rate_cents`, `maximum_delivery_miles`, `delivery_mileage_rounding`, `delivery_distance_basis`) live on `organization_settings` (migration 0004).
+
 ```sql
+create type service_area_pricing as enum ('flat', 'mileage', 'manual_review');
+
 create table service_areas (
-  id                     uuid primary key default gen_random_uuid(),
-  organization_id        uuid not null references organizations(id) on delete cascade,
-  name                   text not null,                 -- "Zone A – Memphis metro"
-  delivery_fee_cents     bigint not null default 0 check (delivery_fee_cents >= 0),
-  minimum_order_cents    bigint check (minimum_order_cents >= 0),
-  requires_manual_review boolean not null default false,
-  priority               integer not null default 0,    -- most specific match wins
-  is_active              boolean not null default true,
-  unique (organization_id, id)
+  id, organization_id, name,
+  pricing          service_area_pricing not null default 'mileage',
+  flat_fee_cents   bigint check (>= 0),              -- required when pricing = 'flat'
+  priority         integer not null default 0,
+  is_active        boolean not null default true,
+  revision         integer not null default 1,       -- bumped by app.bump_revision()
+  created_at, updated_at, unique (organization_id, id)
 );
 
 create table service_area_rules (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null,
-  service_area_id  uuid not null,
-  rule_type        text not null check (rule_type in ('postal_code','city')),  -- later: 'polygon'
-  postal_code      text,
-  city             citext,
-  state            text,
-  foreign key (organization_id, service_area_id) references service_areas(organization_id, id) on delete cascade,
-  check ((rule_type = 'postal_code' and postal_code is not null)
-      or (rule_type = 'city' and city is not null and state is not null))
+  id, organization_id, service_area_id,               -- composite FK to service_areas
+  rule_type   text check (rule_type in ('postal_code', 'city')),
+  postal_code text check (postal_code ~ '^\d{5}$'),
+  city citext, state text check (state ~ '^[A-Z]{2}$')
 );
 
-create table delivery_distance_cache (           -- ADR 0009
-  organization_id  uuid not null references organizations(id) on delete cascade,
-  provider         text not null,
-  route_key        text not null,                -- sha256(normalized origin || normalized destination || basis)
-  meters           integer not null check (meters >= 0),
-  fetched_at       timestamptz not null default now(),
-  expires_at       timestamptz not null,         -- default fetched_at + 30 days (provider terms)
-  primary key (organization_id, provider, route_key)
+create table delivery_distance_cache (
+  organization_id, provider, provider_version,
+  route_key   text check (route_key ~ '^[0-9a-f]{64}$'),  -- sha256(normalized origin | destination)
+  meters      integer check (meters >= 0),
+  fetched_at, expires_at,                                 -- TTL 1–30 days (put_cached_distance)
+  primary key (organization_id, provider, provider_version, route_key)
 );
-create unique index on service_area_rules (organization_id, postal_code) where rule_type = 'postal_code';
 ```
 
-Resolution order (ADR 0009): zone match (postal code, then city + state) → organization mileage settings via `DistanceProvider` road distance (one-way from the primary depot, `ceil((miles − free) )` × rate; beyond `maximum_delivery_miles` → manual review) → otherwise `manual_review` with no fee. Any provider failure is also `manual_review`. Straight-line distance is never billed. Example: 8.2 mi → ceil(8.2 − 5) = 4 mi × $4 = $16.
+Functions:
+- `delivery_area_context(org, city, state, postal)` returns `{areasConfigured, match}`, where a postal-code match beats a city match, and higher priority wins.
+- `get_cached_distance(...)` and `put_cached_distance(...)`.
 
-## 8. Pricing
+Cache rows can only be written through these functions, never directly (RLS). The resolution order and failure handling are described in ARCHITECTURE §7.4. Straight-line distance is never billed.
+
+## 8. Pricing and tax
 
 ```sql
+create type pricing_rule_type as enum ('extra_hour', 'overnight', 'additional_day', 'attendant_fee',
+                                       'fee', 'discount_percent', 'discount_fixed', 'minimum_charge');
+
 create table pricing_rules (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null references organizations(id) on delete cascade,
-  name             text not null,
-  rule_type        text not null check (rule_type in (
-                     'extra_hour','overnight','additional_day','quantity_tier','attendant_fee',
-                     'date_surcharge','discount_percent','discount_fixed','minimum_charge')),
-                                             -- additional_day params: {"percent_of_base_bps": 2500}
-  scope            text not null check (scope in ('organization','category','product','variant')),
-  category_id uuid, product_id uuid, variant_id uuid,
-  params           jsonb not null,           -- validated per rule_type by Zod (e.g. {"amount_cents":5000})
-  priority         integer not null default 0,
-  valid_from date, valid_to date,
-  discount_code    citext,                   -- null = automatic
-  is_active        boolean not null default true,
-  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
-  unique (organization_id, id),
-  foreign key (organization_id, category_id) references categories(organization_id, id),
-  foreign key (organization_id, product_id)  references products(organization_id, id),
-  foreign key (organization_id, variant_id)  references product_variants(organization_id, id)
+  id, organization_id, name (unique per org),
+  rule_type     pricing_rule_type not null,
+  scope         text check (scope in ('organization','category','product','variant')),
+  category_id, product_id, variant_id,                -- composite FKs; exactly the one matching scope
+  params        jsonb not null,                       -- per-type CHECK + Zod (RULE_PARAM_SCHEMAS)
+  priority      integer not null default 0,
+  discount_code citext,                               -- null = automatic
+  valid_from date, valid_to date, is_active boolean,
+  revision      integer not null default 1,           -- trigger-bumped on real changes only
+  created_at, updated_at
 );
 
-create type tax_component as enum ('rental','delivery','labor','fee','discount','adjustment');  -- ADR 0004
+create type tax_component as enum ('rental','add_on','delivery','labor','fee','discount','adjustment');
+create type tax_jurisdiction_status as enum ('test', 'active');
 
 create table tax_jurisdictions (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null references organizations(id) on delete cascade,
-  name             text not null,             -- "Germantown, TN"
-  state            text not null,             -- 'TN'
-  postal_codes     text[] not null default '{}',   -- Phase 1 matching; address-level provider later
-  requires_review_postal_codes text[] not null default '{}',  -- ZIPs straddling boundaries
-  priority         integer not null default 0,
-  is_active        boolean not null default true,
-  unique (organization_id, id)
+  id, organization_id, name, state,
+  postal_codes                 text[],   -- empty = statewide; ZIP-specific beats statewide
+  requires_review_postal_codes text[],   -- boundary ZIPs, which always require review
+  status tax_jurisdiction_status default 'test',      -- test always requires review
+  priority, is_active, revision, created_at, updated_at
 );
+create table tax_rates (id, organization_id, jurisdiction_id, name, rate_bps 0..5000, valid_from, valid_to);
+create table tax_component_rules (organization_id, jurisdiction_id, component, taxable,
+                                  primary key (jurisdiction_id, component));
 
-create table tax_rates (                      -- components summed, e.g. state + local
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null,
-  jurisdiction_id  uuid not null,
-  name             text not null,             -- "State", "Local"
-  rate_bps         integer not null check (rate_bps between 0 and 5000),
-  valid_from date, valid_to date,
-  foreign key (organization_id, jurisdiction_id) references tax_jurisdictions(organization_id, id) on delete cascade
-);
-
-create table tax_component_rules (            -- taxability per jurisdiction × component
-  organization_id  uuid not null,
-  jurisdiction_id  uuid not null,
-  component        tax_component not null,
-  taxable          boolean not null,
-  primary key (jurisdiction_id, component),
-  foreign key (organization_id, jurisdiction_id) references tax_jurisdictions(organization_id, id) on delete cascade
+create table pricing_calculations (      -- immutable (trigger); deleted only with the organization
+  id, organization_id, engine_version,
+  input jsonb, output jsonb,
+  input_hash text,                       -- sha256(canonicalJson(input))
+  currency, total_cents, manual_review_required,
+  created_by_type, created_by, created_at
 );
 ```
 
-No tax values are seeded by the platform. Missing a `tax_component_rules` row for a component is treated as **unresolved** (warning, staff review), never as a silent default.
-
-Base price is on the product/variant (`base_price_cents`, `included_duration_minutes`, `price_override_cents`) because every product has exactly one; rules modify it. `params` is JSONB **by design** here: each rule type has a different shape, the set is small and code-owned, and the Zod schema per `rule_type` is the contract (a DB `CHECK` validates required keys). Pricing results are not stored in `pricing_rules`; quotes store snapshots.
+- **RLS:** select needs `org.read`. Rule, area and tax writes need `pricing.write`. `pricing_calculations` rows can only be written by `record_pricing_calculation`, which needs `quotes.write`.
+- **Context functions:** `pricing_context(org, variant_ids[])` and `tax_context(org, state, postal, date)`. Both are tenant-checked with `app.assert_can_act`, which raises `RA005` for other tenants.
+- **No tax values are seeded by the platform.** A missing `tax_component_rules` row for a component is **unresolved** (review), never a silent default.
 
 ## 9. Customers, events, quotes
 

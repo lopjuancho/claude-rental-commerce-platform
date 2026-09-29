@@ -45,6 +45,10 @@ test("catalog admin pages require sign-in", async ({ page }) => {
     "/admin/availability",
     "/admin/availability/blocks",
     "/admin/availability/weather",
+    "/admin/pricing",
+    "/admin/pricing/delivery",
+    "/admin/pricing/tax",
+    "/admin/pricing/calculator",
   ]) {
     await page.goto(path);
     await expect(page).toHaveURL(new RegExp(`/sign-in\\?next=${encodeURIComponent(path)}$`));

@@ -213,31 +213,36 @@ Rationale and SQL: DATABASE.md §6.
 
 ### 7.3 Pricing engine
 
-- **Pure, deterministic TypeScript** in `src/domain/pricing`: `calculatePrice(input, rules) → PriceBreakdown`. Same input ⇒ same output; no clock reads, no I/O (the event date/time and rules are inputs).
-- Input: line items (variant, quantity, rental period), event date, delivery result (from the service-area module), applied discount codes, manual adjustments, the tax configuration.
-- Rules come from `pricing_rules` rows: a typed `rule_type` (`base_rate`, `extra_hour`, `overnight`, `additional_day`, `quantity_tier`, `date_surcharge`, `discount_percent`, `discount_fixed`, `minimum_charge`) with Zod-validated parameters and a scope (organization / category / product / variant). Evaluation order is fixed by **phase** (base → duration → quantity → surcharges → discounts → delivery → tax → rounding), with explicit priority within a phase.
-- Output is itemized, each line carrying the rule that produced it:
-  ```json
-  { "currency": "USD",
-    "lines": [
-      {"kind":"base","label":"Tropical Crush Combo – 6 hr","amount_cents":45000,"rule_id":"…"},
-      {"kind":"extra_hour","label":"Extra hour ×1","amount_cents":5000,"rule_id":"…"},
-      {"kind":"delivery","label":"Delivery – Zone B","amount_cents":3500,"source":"service_area:…"},
-      {"kind":"discount","label":"Weekday discount","amount_cents":-2500,"rule_id":"…"},
-      {"kind":"tax","label":"Sales tax 9.75%","amount_cents":4924}
-    ],
-    "subtotal_cents":50000, "discount_cents":2500, "delivery_cents":3500,
-    "tax_cents":4924, "total_cents":55924,
-    "engine_version":"1", "warnings":[] }
-  ```
-- All arithmetic in integer cents; percentages as basis points; one documented rounding rule (half-up at line level for tax; Decision D4 confirms tax rules).
-- **Additional days** are a percentage of the base rental (`additional_day` rule with `percent_of_base_bps`; Tiky Jumps: 2500 = +25 %/day). **Included duration** follows the override chain (e.g. Water Slides category = 4 h).
-- **Tax (ADR 0004):** each line carries a tax component class (`rental`, `delivery`, `labor`, `fee`, `discount`, `adjustment`). Tax is computed from the jurisdiction resolved from the event address and the jurisdiction's per-component taxability rules. Unresolved jurisdiction → warning + quote cannot leave `draft` without staff review.
-- Quotes store the full breakdown as an immutable **pricing snapshot** plus normalized totals. Re-pricing is an explicit action; historical quotes never silently change when rules change.
+Implemented in M4 (ADR 0013). Sample outputs against the Tiky Jumps configuration are in `docs/pricing-review.md`.
+
+- **Pure, deterministic TypeScript**: `calculatePrice(input) → PriceResult` in `src/domain/pricing/engine.ts`. It does no I/O and reads no clock. Integer cents, basis points, half-up rounding.
+- **Input** (`PricingInput`), assembled by `src/server/pricing/run.ts` from the tenant-checked SQL functions `pricing_context`, `tax_context` and `delivery_area_context`:
+  - line items with a resolved base price, included duration, `overnight_allowed` and the org time zone;
+  - the rules;
+  - the delivery result;
+  - tax context;
+  - discount codes;
+  - manual adjustments (staff only).
+- **Rules** (`pricing_rules`): `extra_hour`, `overnight`, `additional_day`, `attendant_fee`, `fee`, `discount_percent`, `discount_fixed`, `minimum_charge`. Each has Zod-validated `params` mirrored by a DB CHECK. Precedence is variant > product > category > organization, then priority. Optional discount code and validity dates.
+- **Duration:** billable days = max(1, ceil(hours / 24)).
+  - Same local date: base plus extra hours beyond the included duration.
+  - Crossing local midnight: the overnight rule.
+  - Multi-day: `additional_day` (e.g. +25 % of base per day).
+- **Missing configuration → `manual_review_required`** with reason codes, never a guessed or $0 charge.
+- **Output:** `lines[]` (each with kind, tax component, taxable flag, rule id and revision), `taxLines[]` and `summary`. The summary has `base`, `extra_hours`, `overnight`, `additional_days`, `quantity`, `add_ons`, `labor`, `fees`, `delivery`, `discounts`, `adjustments`, `subtotal`, `taxable_subtotal`, `tax`, `total` and `manual_review_required`. It also carries `appliedRules` (id, revision) and `reviewReasons`.
+- **Tax (ADR 0004):**
+  - The jurisdiction comes from the event address (depot for pickup).
+  - Taxability is set per component: rental, add_on, delivery, labor, fee, discount, adjustment.
+  - A missing rule, a `test` jurisdiction or a boundary ZIP triggers review.
+- **Snapshots:** `pricing_calculations` is an immutable record of input, output, input hash and engine version. Historical prices never change when rules or base prices change. `verifyStoredCalculation` reproduces them.
 
 ### 7.4 Delivery / service areas
 
-`service_areas` (zones) with match rules (`postal_code`, `city` + state) and a flat fee / minimum order / "requires confirmation" flag. `check_service_area(address)` returns `{served, area_id, fee_cents, requires_manual_review, reason}`. Delivery pricing supports **flat zone fees** and **road-distance mileage** configured on the organization (ADR 0009: one-way road distance from the primary depot via a vendor-neutral `DistanceProvider`; Tiky Jumps: first 5 miles free, then $4/mile, rounded up to the next whole mile). Anything outside configured zones/distance, or any provider failure, returns `manual_review` with no fee (DATABASE.md §7).
+Delivery is priced before the engine runs (`src/domain/delivery/quote.ts`, ADR 0009):
+
+1. Active service areas decide *where* delivery is offered. A ZIP or city+state match yields `flat`, `mileage` or `manual_review`. If areas are configured and none matches, the result is manual review. If no areas are configured, mileage applies everywhere.
+2. Mileage uses one-way (or round-trip, if configured) **road** distance from the depot. It comes from a `DistanceProvider`: Google Routes API `computeRoutes`, DRIVE, traffic-unaware. The first N miles are free, then the per-mile rate applies to billable miles rounded up (8.2 mi → 4 × $4 = $16). Beyond `maximum_delivery_miles`, the result is manual review.
+3. Distances are cached per org, provider, provider version and route key for up to 30 days. Provider failure, an unresolvable address, or no route all lead to manual review, and the failure is not cached.
 
 ### 7.5 Customers, events, quotes
 

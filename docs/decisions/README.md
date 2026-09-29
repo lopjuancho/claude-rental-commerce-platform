@@ -17,3 +17,4 @@ Decision IDs (D1…) refer to the list in `ARCHITECTURE.md` §12.
 | [0010](./0010-wind-safety.md) | D16: per-hazard weather rules (wind, lightning, rain, severe weather, temperature, custom); staff-confirmed weather blocks; no automatic cancellations | Accepted 2026-09-28 |
 | [0011](./0011-import-adapters.md) | Import adapters map source formats (ERS is one) onto the canonical product model | Accepted 2026-09-28 |
 | [0012](./0012-branding-and-policies.md) | Tenant branding assets (logo, mark, favicon, 3 colours) and unpublishable placeholder policies | Accepted 2026-09-28 |
+| [0013](./0013-pricing-engine.md) | Deterministic pricing engine: rule precedence, review-first gaps, immutable calculation snapshots with rule revisions | Accepted 2026-09-29 |

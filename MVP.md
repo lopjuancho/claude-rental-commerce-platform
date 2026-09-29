@@ -77,6 +77,8 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 - **Tests:** all scenarios in DATABASE.md §6.3 including the concurrency race and DST.
 
 ### M4 — Pricing engine (+ service areas, tax)
+
+**Status: implemented 2026-09-29** (ADR 0013). Outputs for review are in `docs/pricing-review.md`. See §10 for follow-ups.
 - `domain/pricing` rule engine with itemized output; migration `0006`; service-area resolution + road-distance mileage via `DistanceProvider` with caching (ADR 0009); location-based tax with per-component taxability (ADR 0004).
 - Admin: pricing rules, tax jurisdictions/rates/taxability, service areas (ZIP/city lists, mileage rule).
 - **Tests:** base, extra hours, overnight, multi-day (+25 % of base per extra day), mileage (≤5 mi free, 5.1 mi, beyond max), quantity, discount percent/fixed/code, min charge, delivery, taxability per component (rental/delivery/labor/fee/discount), unresolved jurisdiction warning, rounding, negative totals prevented, unknown rule type rejected, deterministic output snapshot tests.
@@ -119,7 +121,7 @@ Still open:
 
 1. Exact Tennessee tax configuration (rates, taxability of delivery/labor/fees) — before production.
 2. A sample ERS CSV export (a few rows) to verify the ERS adapter's header mapping.
-3. Distance provider account: Google Maps or Mapbox (M4), and Tiky Jumps' depot address and maximum delivery distance.
+3. ~~Distance provider, depot, maximum distance~~: answered for M4 (Google Maps; 2560 Overton Crossing St, Memphis TN 38127; no maximum). The Google Maps API key is still needed.
 4. Do they sell packages/bundles today (D5)?
 5. ZIP/city delivery zones, if any, in addition to mileage.
 6. Discounts in use today (weekday, multi-item, promo codes)?
@@ -154,3 +156,15 @@ Still open:
 - **Weather data feed:** blocks from a weather API would be created as `proposed` by the system context. Only staff can confirm (enforced).
 - **Calendar view:** the admin shows an upcoming list, a checker, blocks and weather. A visual calendar is M8.
 
+## 10. M4 follow-ups (carried forward)
+
+- **Pricing outputs await product-owner review** (`docs/pricing-review.md`) before M5 starts.
+- **Missing Tiky Jumps configuration**, which currently yields manual review:
+  - extra-hour rates, overnight charge (and `overnight_allowed`), attendant fees;
+  - Tennessee tax jurisdictions, rates and taxability;
+  - optional service areas or a maximum delivery distance.
+- **Google Maps API key** (`GOOGLE_MAPS_API_KEY`, server-only). Without it, every delivery goes to review. The Routes adapter is tested with a mocked `fetch` only, because the sandbox has no network access to Google.
+- **Depot geocoding:** the depot is sent as an address. Stored coordinates would save a geocode per request.
+- **Quantity tiers and date surcharges** are not rule types yet.
+- **Add-ons:** the engine prices `add_on` items (their own tax component). Product-relation suggestions come with quotes (M5) and the storefront (M6).
+- **Quotes (M5)** reference `pricing_calculations` snapshots, and re-pricing is an explicit action.
