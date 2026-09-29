@@ -27,6 +27,7 @@ export const ENGINE_ERRORS = {
   RA008: "REVIEW_REQUIRED",
   RA009: "QUOTE_EXPIRED",
   RA010: "INVALID_STATE",
+  RA013: "STALE_BOOKING_REQUEST",
 } as const;
 
 export type EngineError = (typeof ENGINE_ERRORS)[keyof typeof ENGINE_ERRORS];

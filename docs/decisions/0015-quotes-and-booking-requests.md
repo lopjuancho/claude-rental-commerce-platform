@@ -33,11 +33,12 @@
    - `request_booking` holds the quote's items through `reserve_inventory` (lock protocol, capacity,
      blocks, weather, lead time) for the organization's hold duration (15 minutes by default). It is
      idempotent while the hold is live, and there is one pending request per quote.
+     (See §10: requests are bound to the quote revision, and the hold budget is per attempt.)
    - Renewal uses the M3 limits; cancelling releases the hold.
    - `confirm_booking_request` is staff only (the service role cannot execute it). It requires the
-     review gate. A live hold is confirmed through `confirm_reservation`, which re-validates
-     availability (hardening B1). An expired hold is re-reserved as confirmed, which fails cleanly if
-     the stock was taken. The quote becomes accepted.
+     review gate and the integrity checks of §10. Only a live hold can be confirmed; an expired hold
+     requires a new request. Availability is re-validated (hardening B1). The quote becomes
+     accepted.
    - Declining (staff) or cancelling releases the hold. Confirmed bookings are never cancelled
      automatically.
 7. **Customers** are matched by email (case-insensitive) and then by phone, serialized per
@@ -59,6 +60,57 @@
 
    Bookable items for the form come from the anon-safe view `public_catalog_variants`, which holds
    ids and names only, no prices.
+
+## 10. Workflow boundaries (Codex review of `b59a7ea`)
+
+Migration `20260930001100_m5_workflow_boundaries.sql`. Each item below was reproduced by a failing
+test first (`tests/integration/quote-workflow-boundaries.test.ts`).
+
+1. **A hold is bound to what it was granted for.** A booking request records:
+   - the quote `revision`;
+   - the `pricing_calculation_id`;
+   - a signature of the held items (variant, period, quantity);
+   - a signature of the event (times, address).
+
+   A quote's revision increments whenever its snapshot, price request, event or customer changes,
+   and when it is revised back to draft. Callers cannot write it. A new revision closes the pending
+   request and releases its hold.
+2. **One confirmation path.** `confirm_booking_request` is the only way to confirm a quote's hold.
+   - `confirm_reservation`, `renew_hold` and `release_reservation` refuse reservations that belong
+     to a quote or booking request (`RA010`). They remain only for staff manual holds that are not
+     quotes.
+   - The service role cannot execute `confirm_reservation`.
+   - The internals are `app.*` functions that no client can call.
+3. **Cancelling, declining or expiring a quote** closes its pending request and releases the hold,
+   atomically with the status change. Renew, confirm and a new request are then refused.
+4. **Canonical lock order**, used by every workflow function and trigger:
+   1. quote row;
+   2. booking-request row;
+   3. organization advisory lock, then variant advisory locks in uuid order;
+   4. reservation rows.
+
+   Functions given a booking-request id read it without a lock, lock the quote, then lock and
+   re-read the request. Before the fix, 40 concurrent mixed operations produced deadlocks (`40P01`);
+   after it, three rounds produce none.
+5. **No enrichment from anonymous input.** A public submission may reuse an existing customer
+   matched by email or phone, but never changes it. What the visitor typed is stored in
+   `quotes.submitted_contact` (immutable) for staff to review. Staff may still fill empty fields.
+6. **The renewal budget belongs to the booking attempt.** For public and assistant callers,
+   `quote_hold_budgets` (quote, revision) counts every hold granted and every extension. The cap is
+   `1 + max_hold_renewals`, so cancelling and requesting again cannot roll holds forever. Staff
+   holds are not limited. A new revision (a staff action) starts a new attempt.
+7. **Final integrity check** in `confirm_booking_request`. Each of these is verified, and nothing
+   is "fixed up":
+   - the quote is confirmable (draft, sent or viewed) and not expired;
+   - the revision and snapshot match;
+   - the review is approved when required;
+   - the held items equal the quote's items and the reservation's allocations;
+   - the event is unchanged;
+   - the hold is live;
+   - availability is re-validated.
+
+   A mismatch raises `STALE_BOOKING_REQUEST` (`RA013`), `HOLD_EXPIRED` (`RA004`) or the
+   availability error. The customer or staff must request the booking again.
 
 ## Not in M5
 

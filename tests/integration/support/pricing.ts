@@ -117,7 +117,7 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
     createQuote: async (org, q) => {
       const v = await svc<{ quote_id: string; quote_number: string }>(
         "create_quote",
-        "select row_to_json(q) as v from public.create_quote($1, $2, $3, $4, $5, $6, $7, $8) q",
+        "select row_to_json(q) as v from public.create_quote($1, $2, $3, $4, $5, $6, $7, $8, null, $9) q",
         [
           org,
           q.customerId,
@@ -127,6 +127,7 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
           q.source,
           q.tokenHash,
           q.customerNotes,
+          JSON.stringify(q.submittedContact),
         ],
       );
       return { quoteId: v.quote_id, quoteNumber: v.quote_number };

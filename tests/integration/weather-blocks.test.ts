@@ -186,11 +186,12 @@ describe("weather blocks", () => {
     const hold = await reserve(SYSTEM, org, [{ variantId: inflatable.variantId, ...slot }]);
     const id = await proposeBlock("wind");
     await confirm(id);
+    // The server's system context can never confirm a hold (workflow-boundary review, finding 2).
     expect(await outcome(rpc(SYSTEM, "select public.confirm_reservation($1)", [hold]))).toBe(
-      "RA002",
+      "42501",
     );
     expect(await outcome(rpc(SYSTEM, "select public.confirm_reservation($1, true)", [hold]))).toBe(
-      "RA002",
+      "42501",
     );
     expect(
       await outcome(rpc(org.users.office, "select public.confirm_reservation($1, true)", [hold])),

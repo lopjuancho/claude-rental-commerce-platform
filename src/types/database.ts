@@ -159,9 +159,13 @@ export type Database = {
           decided_by: string | null;
           decision_note: string | null;
           event_id: string | null;
+          event_signature: string | null;
           id: string;
+          items_signature: string | null;
           organization_id: string;
+          pricing_calculation_id: string | null;
           quote_id: string;
+          quote_revision: number | null;
           reservation_id: string | null;
           source: string;
           status: Database["public"]["Enums"]["booking_request_status"];
@@ -177,9 +181,13 @@ export type Database = {
           decided_by?: string | null;
           decision_note?: string | null;
           event_id?: string | null;
+          event_signature?: string | null;
           id?: string;
+          items_signature?: string | null;
           organization_id: string;
+          pricing_calculation_id?: string | null;
           quote_id: string;
+          quote_revision?: number | null;
           reservation_id?: string | null;
           source: string;
           status?: Database["public"]["Enums"]["booking_request_status"];
@@ -195,9 +203,13 @@ export type Database = {
           decided_by?: string | null;
           decision_note?: string | null;
           event_id?: string | null;
+          event_signature?: string | null;
           id?: string;
+          items_signature?: string | null;
           organization_id?: string;
+          pricing_calculation_id?: string | null;
           quote_id?: string;
+          quote_revision?: number | null;
           reservation_id?: string | null;
           source?: string;
           status?: Database["public"]["Enums"]["booking_request_status"];
@@ -1695,6 +1707,42 @@ export type Database = {
           },
         ];
       };
+      quote_hold_budgets: {
+        Row: {
+          organization_id: string;
+          quote_id: string;
+          revision: number;
+          used: number;
+        };
+        Insert: {
+          organization_id: string;
+          quote_id: string;
+          revision: number;
+          used?: number;
+        };
+        Update: {
+          organization_id?: string;
+          quote_id?: string;
+          revision?: number;
+          used?: number;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "quote_hold_budgets_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "quote_hold_budgets_organization_id_quote_id_fkey";
+            columns: ["organization_id", "quote_id"];
+            isOneToOne: false;
+            referencedRelation: "quotes";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
       quote_items: {
         Row: {
           id: string;
@@ -1805,9 +1853,11 @@ export type Database = {
           review_approved_by: string | null;
           review_note: string | null;
           review_reasons: string[] | null;
+          revision: number;
           sent_at: string | null;
           source: string;
           status: Database["public"]["Enums"]["quote_status"];
+          submitted_contact: Json | null;
           subtotal_cents: number | null;
           tax_cents: number | null;
           token_hash: string | null;
@@ -1840,9 +1890,11 @@ export type Database = {
           review_approved_by?: string | null;
           review_note?: string | null;
           review_reasons?: string[] | null;
+          revision?: number;
           sent_at?: string | null;
           source?: string;
           status?: Database["public"]["Enums"]["quote_status"];
+          submitted_contact?: Json | null;
           subtotal_cents?: number | null;
           tax_cents?: number | null;
           token_hash?: string | null;
@@ -1875,9 +1927,11 @@ export type Database = {
           review_approved_by?: string | null;
           review_note?: string | null;
           review_reasons?: string[] | null;
+          revision?: number;
           sent_at?: string | null;
           source?: string;
           status?: Database["public"]["Enums"]["quote_status"];
+          submitted_contact?: Json | null;
           subtotal_cents?: number | null;
           tax_cents?: number | null;
           token_hash?: string | null;
@@ -2831,6 +2885,7 @@ export type Database = {
           p_organization_id: string;
           p_price_request: Json;
           p_source: string;
+          p_submitted_contact?: Json;
           p_token_hash?: string;
         };
         Returns: {

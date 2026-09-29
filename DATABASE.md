@@ -693,6 +693,17 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
 
 **Views:** `public_catalog_variants` (anon-safe; bookable variant ids and names only).
 
+**Workflow boundaries** (`20260930001100`, ADR 0015 §10):
+
+- `quotes.revision` is trigger-maintained and cannot be written directly.
+- `quotes.submitted_contact` holds what a visitor typed; it is immutable.
+- `booking_requests` records `quote_revision`, `pricing_calculation_id`, `items_signature` and
+  `event_signature`.
+- `quote_hold_budgets (quote_id, revision, used)` limits public holds and extensions to
+  `1 + max_hold_renewals` per revision.
+- The generic reservation functions refuse quote-managed reservations. A quote revision,
+  cancellation, decline or expiry releases the quote's hold.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

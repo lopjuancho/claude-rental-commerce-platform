@@ -57,6 +57,8 @@ export interface NewQuote {
   source: "web" | "assistant";
   tokenHash: string;
   customerNotes: string | null;
+  /** What the visitor typed; kept on the quote, never merged into an existing customer. */
+  submittedContact: Record<string, unknown>;
 }
 
 export interface BookingHold {
@@ -232,6 +234,7 @@ export function systemGateway(): TrustedGateway {
             p_source: q.source,
             p_token_hash: q.tokenHash,
             ...(q.customerNotes ? { p_customer_notes: q.customerNotes } : {}),
+            p_submitted_contact: q.submittedContact as Json,
           }),
         ),
         "create_quote",

@@ -107,6 +107,7 @@ export async function submitQuoteRequest(
       source,
       tokenHash: await hashQuoteToken(token),
       customerNotes: input.message ?? null,
+      submittedContact: input.contact,
     }),
     "Quote",
   );

@@ -219,6 +219,9 @@ applies to holds, confirmations, renewals, quantity and unit changes, blocks, we
 and settings. The database is the final authority: capacity-reducing edits that would strand a
 booking fail with `CAPACITY_IN_USE`.
 
+Booking workflow lock order (ADR 0015 §10): quote row → booking-request row → organization and
+variant advisory locks → reservation rows.
+
 ### 7.3 Pricing engine
 
 Implemented in M4 (ADR 0013). Sample outputs against the Tiky Jumps configuration are in `docs/pricing-review.md`.

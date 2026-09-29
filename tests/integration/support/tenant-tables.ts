@@ -464,6 +464,16 @@ export const TENANT_TABLES: Record<
       await ensureQuote(org);
     },
   },
+  quote_hold_budgets: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      const quote = await ensureQuote(org);
+      await admin(
+        "insert into public.quote_hold_budgets (organization_id, quote_id, revision, used) values ($1, $2, 1, 1) on conflict do nothing",
+        [org.id, quote],
+      );
+    },
+  },
   booking_requests: {
     orgColumn: "organization_id",
     ensureRow: async (org) => {

@@ -844,7 +844,7 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
     expect((await quoteRow(q.quoteId)).status).toBe("draft");
   });
 
-  it("an expired hold is re-reserved at confirmation only if the stock is still free", async () => {
+  it("an expired hold is rejected at confirmation; a fresh request is needed and fails if the stock was taken", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const a = await publicQuote(serial.variantId, 1, "2027-07-10");
     await requestPublicBooking(tenantOf(org), a.token, {}, meta, deps());
@@ -859,14 +859,21 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
       "update public.reservations set hold_expires_at = now() - interval '1 second' where id = $1",
       [brA.reservation_id],
     );
-    // Someone else takes the unit meanwhile.
-    const b = await publicQuote(serial.variantId, 1, "2027-07-10");
-    await requestPublicBooking(tenantOf(org), b.token, {}, meta, deps());
+    // Never silently re-reserved at confirmation (workflow-boundary review, finding 7).
     expect(
       await outcome(rpc(org.users.office, "select public.confirm_booking_request($1)", [brA.id])),
-    ).toBe("RA001");
-    // After B's hold is cancelled, A can be confirmed with a fresh firm reservation.
+    ).toBe("RA004");
+    // Someone else takes the unit meanwhile: A's fresh request fails cleanly.
+    const b = await publicQuote(serial.variantId, 1, "2027-07-10");
+    await requestPublicBooking(tenantOf(org), b.token, {}, meta, deps());
+    await expect(
+      requestPublicBooking(tenantOf(org), a.token, {}, meta, deps()),
+    ).rejects.toMatchObject({
+      code: "INSUFFICIENT_AVAILABILITY",
+    });
+    // After B cancels, A requests again and staff confirm the live hold.
     await cancelPublicBooking(tenantOf(org), b.token, meta, deps());
+    await requestPublicBooking(tenantOf(org), a.token, {}, meta, deps());
     expect(
       await outcome(rpc(org.users.office, "select public.confirm_booking_request($1)", [brA.id])),
     ).toBe("ok");
