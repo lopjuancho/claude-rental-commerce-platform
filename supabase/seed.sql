@@ -31,6 +31,11 @@ begin
   end loop;
 end $$;
 
+-- Every organization this seed writes is declared up front (ADR 0015 §16): its gates are taken
+-- before any of their rows. The seed runs as one transaction (the Supabase CLI sends it as a batch).
+select app.acquire_org_gates(array['10000000-0000-4000-8000-000000000001',
+                                   '20000000-0000-4000-8000-000000000001']::uuid[]);
+
 insert into public.organizations (id, slug, name, legal_name, status, timezone) values
   ('10000000-0000-4000-8000-000000000001', 'acme',    'Acme Party Rentals', 'Acme Party Rentals LLC', 'active', 'America/Chicago'),
   ('20000000-0000-4000-8000-000000000001', 'funtime', 'FunTime Rentals',    'FunTime Rentals Inc.',   'active', 'America/New_York')

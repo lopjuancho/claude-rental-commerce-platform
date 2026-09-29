@@ -337,6 +337,9 @@ gates are taken, exclusive and in ascending uuid order.
 - **Functions** call `app.acquire_org_gates` or `app.acquire_writable_org_gates` for their known
   target: weather confirm/lift for the block's organization, `commit_product_import` for the
   batch's organization.
+- **Scripts** that write several organizations in one transaction declare all of them first.
+  `supabase/seed.sql` calls `app.acquire_org_gates(<both seeded organizations>)`; a test applies
+  the seed in one rolled-back transaction.
 - **Service role** calls `public.acquire_organization_gates(<targets>)` first in the same
   transaction.
 - **Never a gate after another gate.** The statement trigger does nothing when the transaction
