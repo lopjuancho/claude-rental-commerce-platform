@@ -12,6 +12,9 @@ const MESSAGES = {
   NOT_FOUND: "Not found.",
   INVALID_REQUEST: "The request is invalid.",
   HOLD_RENEWAL_LIMIT: "This hold cannot be extended again.",
+  REVIEW_REQUIRED: "The price needs staff review before this step.",
+  QUOTE_EXPIRED: "This quote has expired.",
+  INVALID_STATE: "That action is not possible in the current state.",
 } as const;
 
 /** Maps availability-engine SQLSTATEs (RA001…) to domain errors with safe messages. */

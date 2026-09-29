@@ -1,0 +1,100 @@
+"use server";
+
+import { redirect } from "next/navigation";
+import type { FormState } from "@/components/form-message";
+import { toFormError } from "@/server/actions";
+import {
+  cancelPublicBooking,
+  renewPublicHold,
+  requestPublicBooking,
+  submitQuoteRequest,
+} from "@/server/public/quotes";
+import { readContactForm, readEventForm, readItemsForm } from "@/server/quotes/form";
+import { getClientIp, getRequestId } from "@/server/request";
+import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
+import { headers } from "next/headers";
+
+/**
+ * Storefront server actions (ADR 0001): the tenant comes from the Host header only; the browser
+ * sends form fields, never an organization id. Every action is rate-limited and audited inside the
+ * public services.
+ */
+async function context() {
+  const tenant = await getRequestTenant();
+  if (!tenant) throw new Error("Unknown storefront");
+  const h = await headers();
+  const requestId = await getRequestId();
+  return {
+    tenant,
+    meta: {
+      ip: await getClientIp(),
+      ...(h.get("user-agent") ? { userAgent: h.get("user-agent") ?? "" } : {}),
+      ...(requestId ? { requestId } : {}),
+    },
+  };
+}
+
+export async function submitQuoteAction(_prev: FormState, fd: FormData): Promise<FormState> {
+  let token: string;
+  try {
+    const { tenant, meta } = await context();
+    const message = fd.get("message");
+    const code = fd.get("discountCode");
+    ({ token } = await submitQuoteRequest(
+      tenant,
+      {
+        contact: readContactForm(fd),
+        event: readEventForm(fd),
+        items: readItemsForm(fd),
+        delivery: fd.get("delivery") === "pickup" ? "pickup" : "delivery",
+        ...(typeof code === "string" && code.trim() ? { discountCode: code.trim() } : {}),
+        ...(typeof message === "string" && message.trim() ? { message: message.trim() } : {}),
+      },
+      meta,
+    ));
+  } catch (error) {
+    return toFormError(error);
+  }
+  redirect(`/q/${token}`);
+}
+
+const tokenOf = (fd: FormData) => {
+  const t = fd.get("token");
+  return typeof t === "string" ? t : "";
+};
+
+export async function requestBookingAction(_prev: FormState, fd: FormData): Promise<FormState> {
+  try {
+    const { tenant, meta } = await context();
+    const message = fd.get("message");
+    await requestPublicBooking(
+      tenant,
+      tokenOf(fd),
+      typeof message === "string" && message.trim() ? { message: message.trim() } : {},
+      meta,
+    );
+  } catch (error) {
+    return toFormError(error);
+  }
+  redirect(`/q/${tokenOf(fd)}`);
+}
+
+export async function renewHoldAction(_prev: FormState, fd: FormData): Promise<FormState> {
+  try {
+    const { tenant, meta } = await context();
+    await renewPublicHold(tenant, tokenOf(fd), meta);
+  } catch (error) {
+    return toFormError(error);
+  }
+  redirect(`/q/${tokenOf(fd)}`);
+}
+
+export async function cancelBookingAction(_prev: FormState, fd: FormData): Promise<FormState> {
+  try {
+    const { tenant, meta } = await context();
+    await cancelPublicBooking(tenant, tokenOf(fd), meta);
+  } catch (error) {
+    return toFormError(error);
+  }
+  redirect(`/q/${tokenOf(fd)}`);
+}

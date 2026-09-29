@@ -96,6 +96,8 @@ Each milestone ends with: `pnpm typecheck && pnpm lint && pnpm test && pnpm test
 M5 work is paused on a local WIP branch until this is reviewed.
 
 ### M5 — Customers, events, quotes
+
+**Status: implemented 2026-09-30** (ADR 0015). See §11 for follow-ups.
 - Migration `0007`; services for customer match/create, event create/update, quote create/add item/re-price/transition; per-org quote numbering.
 - Booking flow (ADR 0002): draft quote (no hold) → booking request (15-min hold, org-configurable) → staff confirmation (firm reservation); expired holds release automatically.
 - Admin: customers, events, quotes list/detail, status actions, print-friendly quote view.
@@ -180,3 +182,16 @@ Still open:
 - **Quantity tiers and date surcharges** are not rule types yet.
 - **Add-ons:** the engine prices `add_on` items (their own tax component). Product-relation suggestions come with quotes (M5) and the storefront (M6).
 - **Quotes (M5)** reference `pricing_calculations` snapshots, and re-pricing is an explicit action.
+
+## 11. M5 follow-ups (carried forward)
+
+- **Quote delivery to customers:** "send" marks the quote and creates the link. Email/SMS sending
+  is not built (open question 8).
+- **Payments / deposits** are out of scope until agreed.
+- **Assistant (M7)** will call the same public services with `actor: 'ai'` (source `assistant`).
+- **Sweepers:** `expire_quotes()` and `sweep_expired_holds()` need a Cloudflare cron. Correctness
+  never depends on them.
+- **UI polish:** the public quote pages are functional and minimal; the storefront experience is
+  M6. Editing an existing draft in the admin UI goes through re-pricing only; a line editor comes
+  later.
+

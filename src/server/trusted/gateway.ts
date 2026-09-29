@@ -43,6 +43,29 @@ export interface TrustedAuditEvent {
   userAgent?: string | null;
 }
 
+export interface EventWindow {
+  eventId: string;
+  startsAt: string | null;
+  endsAt: string | null;
+}
+
+export interface NewQuote {
+  customerId: string;
+  eventId: string;
+  calculationId: string;
+  priceRequest: unknown;
+  source: "web" | "assistant";
+  tokenHash: string;
+  customerNotes: string | null;
+}
+
+export interface BookingHold {
+  bookingRequestId: string;
+  reservationId: string;
+  holdExpiresAt: string;
+  quoteNumber: string;
+}
+
 export interface TrustedGateway {
   pricingContext(organizationId: string, variantIds: string[]): Promise<unknown>;
   deliveryAreaContext(
@@ -65,6 +88,26 @@ export interface TrustedGateway {
     actor: CalculationActor,
   ): Promise<string>;
   recordAudit(organizationId: string, event: TrustedAuditEvent): Promise<void>;
+  // ── M5 public quote / booking flow (ADR 0015) ──
+  matchOrCreateCustomer(organizationId: string, contact: Record<string, unknown>): Promise<string>;
+  createEvent(
+    organizationId: string,
+    customerId: string,
+    event: Record<string, unknown>,
+  ): Promise<EventWindow>;
+  createQuote(
+    organizationId: string,
+    quote: NewQuote,
+  ): Promise<{ quoteId: string; quoteNumber: string }>;
+  publicQuoteView(organizationId: string, tokenHash: string): Promise<unknown>;
+  requestBookingByToken(
+    organizationId: string,
+    tokenHash: string,
+    source: "web" | "assistant",
+    message: string | null,
+  ): Promise<BookingHold>;
+  renewBookingHoldByToken(organizationId: string, tokenHash: string): Promise<string>;
+  cancelBookingByToken(organizationId: string, tokenHash: string): Promise<string>;
 }
 
 /** Error carrying the database SQLSTATE, so callers map it like any other engine error. */
@@ -77,6 +120,11 @@ export class GatewayError extends Error {
 function unwrap<T>(res: { data: T; error: PostgrestError | null }): T {
   if (res.error) throw new GatewayError(res.error);
   return res.data;
+}
+
+function present<T>(value: T | null | undefined, fn: string): T {
+  if (value === null || value === undefined) throw new Error(`${fn} returned nothing`);
+  return value;
 }
 
 export function systemGateway(): TrustedGateway {
@@ -146,6 +194,100 @@ export function systemGateway(): TrustedGateway {
       );
       if (!id) throw new Error("record_pricing_calculation returned no id");
       return id;
+    },
+    async matchOrCreateCustomer(organizationId, contact) {
+      return present(
+        unwrap(
+          await db.rpc("match_or_create_customer", {
+            p_organization_id: organizationId,
+            p_customer: contact as Json,
+          }),
+        ),
+        "match_or_create_customer",
+      );
+    },
+    async createEvent(organizationId, customerId, event) {
+      const [row] = present(
+        unwrap(
+          await db.rpc("create_event", {
+            p_organization_id: organizationId,
+            p_customer_id: customerId,
+            p_event: event as Json,
+          }),
+        ),
+        "create_event",
+      );
+      if (!row) throw new Error("create_event returned no row");
+      return { eventId: row.event_id, startsAt: row.starts_at, endsAt: row.ends_at };
+    },
+    async createQuote(organizationId, q) {
+      const [row] = present(
+        unwrap(
+          await db.rpc("create_quote", {
+            p_organization_id: organizationId,
+            p_customer_id: q.customerId,
+            p_event_id: q.eventId,
+            p_calculation_id: q.calculationId,
+            p_price_request: q.priceRequest as Json,
+            p_source: q.source,
+            p_token_hash: q.tokenHash,
+            ...(q.customerNotes ? { p_customer_notes: q.customerNotes } : {}),
+          }),
+        ),
+        "create_quote",
+      );
+      if (!row) throw new Error("create_quote returned no row");
+      return { quoteId: row.quote_id, quoteNumber: row.quote_number };
+    },
+    async publicQuoteView(organizationId, tokenHash) {
+      return unwrap(
+        await db.rpc("public_quote_view", {
+          p_organization_id: organizationId,
+          p_token_hash: tokenHash,
+        }),
+      );
+    },
+    async requestBookingByToken(organizationId, tokenHash, source, message) {
+      const [row] = present(
+        unwrap(
+          await db.rpc("request_booking_by_token", {
+            p_organization_id: organizationId,
+            p_token_hash: tokenHash,
+            p_source: source,
+            ...(message ? { p_message: message } : {}),
+          }),
+        ),
+        "request_booking_by_token",
+      );
+      if (!row) throw new Error("request_booking_by_token returned no row");
+      return {
+        bookingRequestId: row.booking_request_id,
+        reservationId: row.reservation_id,
+        holdExpiresAt: row.hold_expires_at,
+        quoteNumber: row.quote_number,
+      };
+    },
+    async renewBookingHoldByToken(organizationId, tokenHash) {
+      return present(
+        unwrap(
+          await db.rpc("renew_booking_hold_by_token", {
+            p_organization_id: organizationId,
+            p_token_hash: tokenHash,
+          }),
+        ),
+        "renew_booking_hold_by_token",
+      );
+    },
+    async cancelBookingByToken(organizationId, tokenHash) {
+      return present(
+        unwrap(
+          await db.rpc("cancel_booking_by_token", {
+            p_organization_id: organizationId,
+            p_token_hash: tokenHash,
+          }),
+        ),
+        "cancel_booking_by_token",
+      );
     },
     async recordAudit(organizationId, event) {
       unwrap(

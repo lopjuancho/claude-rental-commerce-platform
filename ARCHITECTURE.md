@@ -253,13 +253,25 @@ Delivery is priced before the engine runs (`src/domain/delivery/quote.ts`, ADR 0
 2. Mileage uses one-way (or round-trip, if configured) **road** distance from the depot. It comes from a `DistanceProvider`: Google Routes API `computeRoutes`, DRIVE, traffic-unaware. The first N miles are free, then the per-mile rate applies to billable miles rounded up (8.2 mi → 4 × $4 = $16). Beyond `maximum_delivery_miles`, the result is manual review.
 3. Distances are cached per org, provider, provider version and route key for up to 30 days. Provider failure, an unresolvable address, or no route all lead to manual review, and the failure is not cached.
 
-### 7.5 Customers, events, quotes
+### 7.5 Customers, events, quotes (implemented in M5, ADR 0015)
 
-- `customers` — per-organization, deduplicated by normalized email/phone.
-- `events` — the structured description of the customer's party (type, date/time range, address, guest/children counts, ages, budget, indoor/outdoor, surface, power, water). Fields are nullable so the assistant can fill them progressively; completeness is computed by `domain/events`.
-- `quotes` → `quote_items` (products) + `quote_charges` (delivery, discounts, fees, tax, manual adjustments) + `pricing_snapshot`. Status state machine in `domain/quotes`: `draft → sent → viewed → accepted | expired | cancelled` (plus `declined`). Transitions validated in code and in a DB trigger. Acceptance is the future hook for payments/contracts and converts holds into confirmed reservations.
-- `booking_requests` — created when a customer starts checkout/requests booking from a quote; owns the temporary hold (ADR 0002) and moves `pending → confirmed | expired | cancelled`.
-- Quote numbers are per-organization sequential (`TJ-1042`) via a locked counter row.
+- `customers`: per organization, matched by email (case-insensitive) then phone. Public input
+  never overwrites existing values.
+- `events`: local date/time as stated. The database derives the instants DST-safely: a
+  nonexistent time is rejected and an ambiguous one needs `time_fold`.
+- `quotes` reference an immutable `pricing_calculations` snapshot.
+  - Totals and `quote_items` are derived from it by triggers and cannot be written.
+  - Status transitions are enforced by the database (mirrored in `domain/quotes/state-machine.ts`).
+  - A price flagged for manual review needs a staff sign-off before it can be sent, accepted or
+    confirmed.
+  - Re-pricing is draft-only and creates a new snapshot.
+  - Quote numbers come from a per-organization counter, with a prefix setting.
+- `booking_requests` own the 15-minute hold (ADR 0002). Staff confirmation re-validates
+  availability, and an expired hold is re-reserved only if the stock is still free. Declining or
+  cancelling releases the hold.
+- **Public flow**: `/quote` → `/q/<token>`. The server uses the host-resolved tenant, strict
+  schemas, the trusted gateway's explicit functions, rate limits and audit entries. No
+  anonymous database writes.
 
 ## 8. AI Event Assistant
 

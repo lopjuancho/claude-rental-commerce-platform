@@ -41,6 +41,63 @@ function ensureReservation(org: TestOrg): Promise<string> {
   return entry;
 }
 
+const quoteCache = new Map<string, Promise<string>>();
+function ensureQuote(org: TestOrg): Promise<string> {
+  let entry = quoteCache.get(org.id);
+  if (!entry) {
+    entry = (async () => {
+      const c = await ensureCatalog(org);
+      const customer = await admin<{ id: string }>(
+        "insert into public.customers (organization_id, email) values ($1, $2) returning id",
+        [org.id, `fixture-${randomUUID().slice(0, 8)}@example.test`],
+      );
+      const event = await admin<{ id: string }>(
+        "insert into public.events (organization_id, customer_id, title) values ($1, $2, 'Fixture party') returning id",
+        [org.id, customer.rows[0]!.id],
+      );
+      const input = {
+        items: [
+          {
+            lineId: "L1",
+            variantId: c.variantId,
+            productId: c.productId,
+            name: "Castle",
+            kind: "rental",
+            quantity: 1,
+            basePriceCents: 20000,
+            start: "2030-05-01T12:00:00.000Z",
+            end: "2030-05-01T16:00:00.000Z",
+          },
+        ],
+      };
+      const output = {
+        currency: "USD",
+        lines: [{ lineId: "L1", kind: "base", amountCents: 20000 }],
+        summary: { subtotal: 20000, delivery: 0, discounts: 0, tax: 0, total: 20000 },
+        reviewReasons: [],
+      };
+      const calc = await admin<{ id: string }>(
+        `insert into public.pricing_calculations (organization_id, engine_version, input, output, input_hash, currency, total_cents, manual_review_required, created_by_type)
+         values ($1, 'test', $2, $3, repeat('c', 64), 'USD', 20000, false, 'system') returning id`,
+        [org.id, JSON.stringify(input), JSON.stringify(output)],
+      );
+      const quote = await admin<{ id: string }>(
+        "insert into public.quotes (organization_id, customer_id, event_id, pricing_calculation_id) values ($1, $2, $3, $4) returning id",
+        [org.id, customer.rows[0]!.id, event.rows[0]!.id, calc.rows[0]!.id],
+      );
+      const reservation = await ensureReservation(org);
+      await admin(
+        `insert into public.booking_requests (organization_id, quote_id, customer_id, event_id, source, reservation_id, created_by_type)
+         values ($1, $2, $3, $4, 'web', $5, 'public')`,
+        [org.id, quote.rows[0]!.id, customer.rows[0]!.id, event.rows[0]!.id, reservation],
+      );
+      return quote.rows[0]!.id;
+    })();
+    quoteCache.set(org.id, entry);
+  }
+  return entry;
+}
+
 const weatherCache = new Map<string, Promise<string>>();
 function ensureWeatherBlock(org: TestOrg): Promise<string> {
   let entry = weatherCache.get(org.id);
@@ -90,6 +147,7 @@ export const PUBLIC_VIEWS = [
   "public_catalog_categories",
   "public_catalog_product_media",
   "public_catalog_products",
+  "public_catalog_variants",
 ] as const;
 
 /** Creates a category + product (with its default variant) and returns their ids. Idempotent per org. */
@@ -374,6 +432,42 @@ export const TENANT_TABLES: Record<
          values ($1, 'test', '{}', '{}', repeat('b', 64), 'USD', 0, false, 'system')`,
         [org.id],
       );
+    },
+  },
+  customers: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureQuote(org);
+    },
+  },
+  events: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureQuote(org);
+    },
+  },
+  quote_counters: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureQuote(org);
+    },
+  },
+  quotes: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureQuote(org);
+    },
+  },
+  quote_items: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureQuote(org);
+    },
+  },
+  booking_requests: {
+    orgColumn: "organization_id",
+    ensureRow: async (org) => {
+      await ensureQuote(org);
     },
   },
   organization_invitations: {

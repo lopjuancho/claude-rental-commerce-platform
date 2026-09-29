@@ -39,6 +39,8 @@ const asPostgrest = (e: unknown): PostgrestError => {
   } as PostgrestError;
 };
 
+const iso = (v: Date | string | null) => (v === null ? null : new Date(v).toISOString());
+
 async function one<T>(actor: Actor, sql: string, params: unknown[]): Promise<T> {
   const rows = await rpc<{ v: T }>(actor, sql, params);
   return rows[0]!.v;
@@ -99,6 +101,69 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
           actor.type === "user" ? actor.userId : null,
         ],
       ),
+    matchOrCreateCustomer: (org, contact) =>
+      svc("match_or_create_customer", "select public.match_or_create_customer($1, $2) as v", [
+        org,
+        JSON.stringify(contact),
+      ]),
+    createEvent: async (org, customerId, event) => {
+      const v = await svc<{ event_id: string; starts_at: Date | null; ends_at: Date | null }>(
+        "create_event",
+        "select row_to_json(e) as v from public.create_event($1, $2, $3) e",
+        [org, customerId, JSON.stringify(event)],
+      );
+      return { eventId: v.event_id, startsAt: iso(v.starts_at), endsAt: iso(v.ends_at) };
+    },
+    createQuote: async (org, q) => {
+      const v = await svc<{ quote_id: string; quote_number: string }>(
+        "create_quote",
+        "select row_to_json(q) as v from public.create_quote($1, $2, $3, $4, $5, $6, $7, $8) q",
+        [
+          org,
+          q.customerId,
+          q.eventId,
+          q.calculationId,
+          JSON.stringify(q.priceRequest),
+          q.source,
+          q.tokenHash,
+          q.customerNotes,
+        ],
+      );
+      return { quoteId: v.quote_id, quoteNumber: v.quote_number };
+    },
+    publicQuoteView: (org, hash) =>
+      svc("public_quote_view", "select public.public_quote_view($1, $2) as v", [org, hash]),
+    requestBookingByToken: async (org, hash, source, message) => {
+      const v = await svc<{
+        booking_request_id: string;
+        reservation_id: string;
+        hold_expires_at: string;
+        quote_number: string;
+      }>(
+        "request_booking_by_token",
+        "select row_to_json(b) as v from public.request_booking_by_token($1, $2, $3, $4) b",
+        [org, hash, source, message],
+      );
+      return {
+        bookingRequestId: v.booking_request_id,
+        reservationId: v.reservation_id,
+        holdExpiresAt: v.hold_expires_at,
+        quoteNumber: v.quote_number,
+      };
+    },
+    renewBookingHoldByToken: async (org, hash) =>
+      iso(
+        await svc<Date>(
+          "renew_booking_hold_by_token",
+          "select public.renew_booking_hold_by_token($1, $2) as v",
+          [org, hash],
+        ),
+      ) ?? "",
+    cancelBookingByToken: (org, hash) =>
+      svc("cancel_booking_by_token", "select public.cancel_booking_by_token($1, $2) as v", [
+        org,
+        hash,
+      ]),
     recordAudit: async (org, e) => {
       calls.push("audit");
       await admin(

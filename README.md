@@ -8,7 +8,7 @@ First tenant: Tiky Jumps Inflatables LLC (onboarded as data, not code).
 - [MVP.md](./MVP.md): Phase 1 scope, milestones, acceptance criteria
 - [docs/decisions/](./docs/decisions/README.md): architecture decision records
 
-**Status:** Milestones 1 (foundation, auth, tenancy), 2 (catalog, media, inventory, CSV import), 3 (availability engine, holds, blocks, weather) and 4 (pricing engine, road-distance delivery, configurable tax; outputs for review in [docs/pricing-review.md](./docs/pricing-review.md)) implemented, plus a hardening pass (ADR 0014: availability lock protocol, pricing trust boundary, DST-safe times, service-role gateway).
+**Status:** Milestones 1 (foundation, auth, tenancy), 2 (catalog, media, inventory, CSV import), 3 (availability engine, holds, blocks, weather) and 4 (pricing engine, road-distance delivery, configurable tax; outputs for review in [docs/pricing-review.md](./docs/pricing-review.md)) implemented, plus a hardening pass (ADR 0014), and 5 (customers, events, quotes on immutable pricing snapshots, public quote/booking-request flow with 15-minute holds; ADR 0015).
 
 ## Stack
 

@@ -19,3 +19,4 @@ Decision IDs (D1…) refer to the list in `ARCHITECTURE.md` §12.
 | [0012](./0012-branding-and-policies.md) | Tenant branding assets (logo, mark, favicon, 3 colours) and unpublishable placeholder policies | Accepted 2026-09-28 |
 | [0013](./0013-pricing-engine.md) | Deterministic pricing engine: rule precedence, review-first gaps, immutable calculation snapshots with rule revisions | Accepted 2026-09-29 |
 | [0014](./0014-hardening-concurrency-trust-boundaries.md) | Hardening: one availability lock protocol for every capacity change; server-only pricing/cache writes; DST-safe local times; a single service-role gateway; CI on claude branches | Accepted 2026-09-30 |
+| [0015](./0015-quotes-and-booking-requests.md) | Quotes on immutable snapshots (derived totals/items), DB state machine and review gate; booking requests with 15-minute holds and staff confirmation; narrow service-role public path by link token | Accepted 2026-09-30 |

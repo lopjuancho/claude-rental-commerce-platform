@@ -24,6 +24,9 @@ export const ENGINE_ERRORS = {
   RA005: "NOT_FOUND",
   RA006: "INVALID_REQUEST",
   RA007: "HOLD_RENEWAL_LIMIT",
+  RA008: "REVIEW_REQUIRED",
+  RA009: "QUOTE_EXPIRED",
+  RA010: "INVALID_STATE",
 } as const;
 
 export type EngineError = (typeof ENGINE_ERRORS)[keyof typeof ENGINE_ERRORS];

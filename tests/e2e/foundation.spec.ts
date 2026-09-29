@@ -49,8 +49,28 @@ test("catalog admin pages require sign-in", async ({ page }) => {
     "/admin/pricing/delivery",
     "/admin/pricing/tax",
     "/admin/pricing/calculator",
+    "/admin/customers",
+    "/admin/quotes",
+    "/admin/quotes/new",
+    "/admin/bookings",
+    "/admin/quotes/00000000-0000-0000-0000-000000000000/print",
   ]) {
     await page.goto(path);
     await expect(page).toHaveURL(new RegExp(`/sign-in\\?next=${encodeURIComponent(path)}$`));
+  }
+});
+
+test("public quote pages 404 on a host that resolves to no tenant (nothing leaks)", async ({
+  page,
+}) => {
+  for (const path of ["/quote", "/q/not-a-real-token", `/q/${"A".repeat(43)}`]) {
+    const res = await page.goto(path);
+    // 404 when the host resolves to no tenant; if tenant resolution itself is unavailable the
+    // page fails closed (5xx). Either way nothing renders.
+    expect(res?.status() ?? 0).toBeGreaterThanOrEqual(400);
+    await expect(
+      page.locator('select[name^="variant"], input[name="email"], input[name="token"]'),
+    ).toHaveCount(0);
+    await expect(page.getByText(/estimated total|request this booking/i)).toHaveCount(0);
   }
 });

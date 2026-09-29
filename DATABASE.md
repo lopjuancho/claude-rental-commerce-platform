@@ -640,121 +640,65 @@ create table pricing_calculations (      -- immutable (trigger); deleted only wi
 
 ## 9. Customers, events, quotes
 
+As implemented in `20260930001000_customers_events_quotes.sql` (ADR 0015). Differences from the
+original design:
+
+- there is no `quote_charges` table: the itemized lines are the immutable engine snapshot in
+  `pricing_calculations.output`;
+- totals and items are derived by triggers.
+
 ```sql
-create type quote_status as enum ('draft','sent','viewed','accepted','declined','expired','cancelled');
-create type indoor_outdoor as enum ('indoor','outdoor','both','unknown');
+customers (id, organization_id, first_name, last_name, company_name, email citext, phone_e164,
+           sms_opt_in, email_opt_in, source web|assistant|admin|import, notes, archived_at, …)
+  -- unique (org, email), unique (org, phone); email or phone required
 
-create table customers (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null references organizations(id) on delete cascade,
-  first_name text, last_name text,
-  email            citext,
-  phone_e164       text check (phone_e164 ~ '^\+[1-9][0-9]{7,14}$'),
-  sms_opt_in       boolean not null default false,
-  email_opt_in     boolean not null default false,
-  source           text not null default 'web',     -- 'web','assistant','admin','import'
-  notes            text,
-  archived_at      timestamptz,
-  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
-  unique (organization_id, id),
-  check (email is not null or phone_e164 is not null)
-);
-create unique index on customers (organization_id, email) where email is not null;
-create unique index on customers (organization_id, phone_e164) where phone_e164 is not null;
+events (id, organization_id, customer_id, event_type, title,
+        event_date, end_date, start_time, end_time, time_fold earlier|later,   -- as stated, local
+        starts_at, ends_at,                                   -- derived: app.local_to_instant (DST-safe)
+        address_line1..postal_code, guest_count, children_count, ages, budget, indoor_outdoor,
+        water/power_available, surface_type, notes)
 
-create table events (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null,
-  customer_id      uuid,
-  event_type       event_type,
-  title            text,
-  event_date       date,                           -- local date (org tz)
-  start_time       time, end_time time,            -- local times as the customer states them
-  rental_period    tstzrange,                      -- computed server-side from date/time + org tz
-  address_line1 text, address_line2 text, city text, state text, postal_code text,
-  latitude numeric(9,6), longitude numeric(9,6),  -- routing seam
-  guest_count      integer check (guest_count >= 0),
-  children_count   integer check (children_count >= 0),
-  age_min smallint, age_max smallint check (age_max >= age_min),
-  budget_min_cents bigint, budget_max_cents bigint check (budget_max_cents >= budget_min_cents),
-  indoor_outdoor   indoor_outdoor not null default 'unknown',
-  water_available  boolean,
-  power_available  boolean,
-  surface_type     text,                           -- 'grass','concrete','asphalt','indoor_floor','other'
-  notes            text,
-  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
-  unique (organization_id, id),
-  foreign key (organization_id, customer_id) references customers(organization_id, id)
-);
-create index on events (organization_id, event_date);
+quote_counters (organization_id pk, next_value)             -- numbering; prefix in organization_settings
 
-create table organization_counters (
-  organization_id uuid not null references organizations(id) on delete cascade,
-  counter_name    text not null,              -- 'quote'
-  next_value      bigint not null default 1000,
-  prefix          text,                       -- 'TJ-'
-  primary key (organization_id, counter_name)
-);
+quotes (id, organization_id, quote_number (org-unique), customer_id, event_id,
+        status draft|sent|viewed|accepted|declined|expired|cancelled,
+        source admin|web|assistant, price_request jsonb, pricing_calculation_id → pricing_calculations,
+        -- derived from the calculation by app.quotes_guard (never written by callers):
+        currency, subtotal_cents, delivery_cents, discount_cents, tax_cents, total_cents,
+        manual_review_required, review_reasons,
+        review_approved_by/at, review_note,                   -- staff sign-off; reset on re-price
+        token_hash (sha256 of the customer link token), expires_at, sent/viewed/accepted/declined/cancelled_at,
+        customer_notes, internal_notes, created_by_type, created_by)
+  -- check total = subtotal + tax; non-draft ⇒ priced
 
-create table quotes (
-  id                 uuid primary key default gen_random_uuid(),
-  organization_id    uuid not null,
-  quote_number       text not null,
-  customer_id        uuid,
-  event_id           uuid,
-  conversation_id    uuid,
-  status             quote_status not null default 'draft',
-  currency           char(3) not null,
-  subtotal_cents     bigint not null default 0,
-  discount_cents     bigint not null default 0,  -- stored positive, subtracted
-  delivery_cents     bigint not null default 0,
-  tax_cents          bigint not null default 0,
-  total_cents        bigint not null default 0,
-  pricing_snapshot   jsonb,                      -- full itemized engine output + engine_version
-  expires_at         timestamptz,
-  sent_at timestamptz, viewed_at timestamptz, accepted_at timestamptz,
-  created_by_type    text not null check (created_by_type in ('user','ai','system')),
-  created_by         uuid references auth.users(id),
-  customer_notes text, internal_notes text,
-  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
-  unique (organization_id, id),
-  unique (organization_id, quote_number),
-  foreign key (organization_id, customer_id) references customers(organization_id, id),
-  foreign key (organization_id, event_id)    references events(organization_id, id),
-  check (total_cents = subtotal_cents - discount_cents + delivery_cents + tax_cents)
-);
+quote_items (quote_id, line_id, variant_id, product_id, kind, quantity, rental_period,
+             product_name, unit_price_cents, line_total_cents, sort_order)
+  -- rebuilt from the calculation input by app.quotes_sync_items; no write grants
 
-create table quote_items (
-  id                  uuid primary key default gen_random_uuid(),
-  organization_id     uuid not null,
-  quote_id            uuid not null,
-  product_id          uuid not null,
-  variant_id          uuid not null,
-  quantity            integer not null check (quantity > 0),
-  rental_period       tstzrange,
-  product_name        text not null,             -- snapshot at quote time
-  unit_price_cents    bigint not null,
-  line_total_cents    bigint not null,
-  sort_order          integer not null default 0,
-  foreign key (organization_id, quote_id)   references quotes(organization_id, id) on delete cascade,
-  foreign key (organization_id, product_id) references products(organization_id, id),
-  foreign key (organization_id, variant_id) references product_variants(organization_id, id)
-);
-
-create table quote_charges (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null,
-  quote_id         uuid not null,
-  kind             text not null check (kind in ('extra_time','overnight','additional_day','delivery','labor','fee','discount','tax','adjustment')),
-  tax_component    tax_component,                -- null only for kind = 'tax'
-  label            text not null,
-  amount_cents     bigint not null,              -- negative for discounts
-  source_rule_id   uuid,                         -- pricing_rules / tax_rates / service_areas id
-  foreign key (organization_id, quote_id) references quotes(organization_id, id) on delete cascade
-);
+booking_requests (id, organization_id, quote_id, customer_id, event_id,
+                  status pending|confirmed|declined|cancelled, source web|assistant|admin,
+                  reservation_id → reservations, customer_message, decided_by/at, decision_note, …)
+  -- one pending request per quote; reservations.quote_id/event_id/booking_request_id FKs added
 ```
 
-Quote totals are computed only by the pricing engine and written through `quoteService`; the `CHECK` ensures the stored totals are internally consistent. Status transitions are validated by a `BEFORE UPDATE` trigger (`draft→sent→viewed→accepted|declined|expired`, `* → cancelled` except from `accepted`), mirrored in `domain/quotes/stateMachine.ts`.
+**Functions:**
+
+| Function | Who may call it |
+|---|---|
+| `match_or_create_customer`, `create_event`, `create_quote` | staff, or the server's system context |
+| `request_booking`, `renew_booking_hold`, `close_booking_request` | staff, or the system context |
+| `confirm_booking_request` | staff only |
+| `expire_quotes` | service role only |
+| `public_quote_view`, `request_booking_by_token`, `renew_booking_hold_by_token`, `cancel_booking_by_token` | service role only, always keyed by tenant + token hash |
+
+**Views:** `public_catalog_variants` (anon-safe; bookable variant ids and names only).
+
+**RLS:**
+
+- `customers`: `customers.read` / `customers.write`.
+- `events`, `quotes`, `quote_items`, `booking_requests`: select with `org.read`.
+- `events` writes need `events.write`; `quotes` writes need `quotes.write`.
+- There are no deletes on customers or quotes (archive or cancel instead).
 
 ## 10. Conversations & AI actions
 

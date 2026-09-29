@@ -32,12 +32,21 @@ describe("service-role boundary", () => {
     const rpcs = [...src.matchAll(/\.rpc\("([a-z_]+)"/g)].map((m) => m[1]).sort();
     expect(rpcs).toEqual(
       [
+        // pricing (hardening H2/H3/H5)
         "delivery_area_context",
         "get_cached_distance",
         "pricing_context",
         "put_cached_distance",
         "record_pricing_calculation",
         "tax_context",
+        // public quote / booking flow (M5, ADR 0015)
+        "cancel_booking_by_token",
+        "create_event",
+        "create_quote",
+        "match_or_create_customer",
+        "public_quote_view",
+        "renew_booking_hold_by_token",
+        "request_booking_by_token",
       ].sort(),
     );
     const tables = [...src.matchAll(/\.from\("([a-z_]+)"\)/g)].map((m) => m[1]);

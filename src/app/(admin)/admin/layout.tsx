@@ -79,6 +79,17 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <Button asChild size="sm" variant="ghost">
             <Link href="/admin/pricing">Pricing</Link>
           </Button>
+          <Button asChild size="sm" variant="ghost">
+            <Link href="/admin/quotes">Quotes</Link>
+          </Button>
+          <Button asChild size="sm" variant="ghost">
+            <Link href="/admin/bookings">Bookings</Link>
+          </Button>
+          {ctx.permissions.has("customers.read") ? (
+            <Button asChild size="sm" variant="ghost">
+              <Link href="/admin/customers">Customers</Link>
+            </Button>
+          ) : null}
           {ctx.permissions.has("members.manage") ? (
             <Button asChild size="sm" variant="ghost">
               <Link href="/admin/members">Team</Link>
