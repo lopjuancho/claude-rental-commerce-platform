@@ -712,6 +712,16 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
   (trigger `quotes_require_booking`).
 - Renewal and confirmation share `app.assert_booking_current`.
 
+**Round 3** (`20260930001300`, ADR 0015 §12):
+
+- An accepted quote's links and snapshot, its event's date, times and address, and its confirmed
+  reservation are frozen (`RA010`).
+- `pricing_calculations.input.destination` records the priced address. Event validity is
+  checked against the snapshot, never against `price_request`.
+- Holds are capped at the quote's expiry. Expiry decisions use `clock_timestamp()` after locking.
+- Variant advisory locks are taken in ascending order per transaction (`RA014` otherwise).
+  Catalog and block edits lock the organization exclusively.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

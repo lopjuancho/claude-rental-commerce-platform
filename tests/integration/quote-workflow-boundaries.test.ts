@@ -732,7 +732,7 @@ describe("round 2 · 5 + 6. customers and budgets (regression coverage for the n
 });
 
 describe("round 2 · 4. lock order: event edits, quote status changes and sweeps join the canonical order", () => {
-  it("an event edit waits behind a running confirmation (event → quote order), then leaves the booking intact", async () => {
+  it("an event edit waits behind a running confirmation (event → quote order), then is refused; the booking stays intact", async () => {
     const q = await publicQuote();
     await approve(q.quoteId);
     await hold(q.token);
@@ -745,8 +745,8 @@ describe("round 2 · 4. lock order: event edits, quote status changes and sweeps
     );
     await waitUntilBlocked(b.pid); // B waits for the quote row; A never needs the event row
     await a.commit();
-    expect(await edit).toBe("ok");
-    await b.commit();
+    expect(await edit).toBe("RA010"); // the booking is confirmed now: its event is frozen (round 3)
+    await b.rollback();
     expect(await resStatus(br.reservation_id)).toBe("confirmed");
   });
 

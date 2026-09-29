@@ -150,6 +150,49 @@ Items 5 and 6 of §10 (customers, renewal budget) were re-verified with addition
 and needed no change. Those tests cover opt-in and company fields, swept holds, and a quote being
 viewed.
 
+## 12. Workflow boundaries, round 3 (Codex review of `0040188`)
+
+Migration `20260930001300_m5_boundaries_round3.sql`. Each HIGH finding was reproduced by a failing
+test first (`tests/integration/quote-workflow-round3.test.ts`).
+
+1. **A confirmed booking is frozen.**
+   - Once a quote is accepted, its `event_id`, `customer_id`, `pricing_calculation_id` and
+     `price_request` cannot change (`RA010`).
+   - Its event's date, times, fold and address cannot change either (`events_guard_booking`).
+     The trigger takes the quote locks first, so an edit that waited behind a confirmation is
+     refused once that confirmation commits.
+   - A quote-managed reservation cannot be re-linked or replaced (so `reserve_inventory`
+     replacement is refused). A confirmed one cannot be ended.
+   - Notes and guest counts stay editable.
+   - Changing a confirmed booking will need a separate, explicit amendment workflow (not in M5).
+2. **The immutable snapshot is the authority on what was priced.**
+   - Pricing input now records `destination`, the address delivery was priced for (`null` for
+     pickup).
+   - `app.quote_event_mismatch` compares the event with the snapshot's item periods and
+     `destination`. `quotes.price_request` no longer plays any part, so rewriting it cannot make
+     a stale quote valid.
+   - Request, renewal and confirmation share this comparison.
+   - A delivery snapshot made before `destination` existed counts as stale and must be re-priced.
+3. **Expiry after the locks; a hold never outlives its quote.**
+   - Every quote-expiry and hold-expiry decision uses `clock_timestamp()` after the locks are
+     held. `now()` is the transaction start, which is stale after a lock wait.
+   - A hold is capped at the quote's `expires_at` when it is created or extended, and whenever
+     the expiry moves. So an expired quote's hold is dead at that instant, even before
+     `expire_quotes` or the sweeper run.
+4. **One enforced order for inventory locks.** Per organization, variant advisory locks are taken
+   in ascending uuid order across the whole transaction. The lock functions record what is held.
+   - Acquiring a lower variant after a higher one, or upgrading a shared organization lock to
+     exclusive, raises `LOCK_ORDER_VIOLATION` (`RA014`) instead of waiting into a deadlock.
+   - Operations over several quotes (`expire_quotes`, event edits) lock quotes, then booking
+     requests, then the union of their variants.
+   - `request_booking` locks the old hold's and the new items' variants in one call.
+   - Catalog and block edits, whose row triggers fire in planner order, take the organization
+     lock exclusively. So do quote row triggers when nothing was pre-locked.
+   - Sweeps and `expire_quotes` process rows in id order and skip rows a live transaction holds.
+
+   Before the fix, the reversed-order rounds deadlocked 11–12 times each. After it, they produce
+   no `40P01`.
+
 ## Not in M5
 
 - Payments and contracts.

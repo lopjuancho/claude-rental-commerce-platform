@@ -198,6 +198,7 @@ export function assemblePricingInput(args: {
     rules: context.rules,
     discountCodes: request.discountCodes,
     delivery: args.delivery,
+    destination: request.eventAddress ?? null,
     tax: args.tax,
     adjustments: request.adjustments.map((a) => ({
       label: a.label,

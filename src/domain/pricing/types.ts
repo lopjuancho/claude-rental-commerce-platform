@@ -115,8 +115,22 @@ export interface PricingInput {
   rules: PricingRule[];
   discountCodes: string[];
   delivery: DeliveryResult;
+  /**
+   * The event address delivery was priced for (null for pickup). Not used by the engine: it makes
+   * the immutable snapshot the authority on WHERE the price applies (ADR 0015 §12). Absent in
+   * snapshots made before it existed; the database then treats a delivery quote as stale.
+   */
+  destination?: PostalAddressInput | null;
   tax: TaxContext;
   adjustments: ManualAdjustment[];
+}
+
+export interface PostalAddressInput {
+  line1: string;
+  line2?: string | null;
+  city: string;
+  state: string;
+  postalCode: string;
 }
 
 export type PriceLineKind =
