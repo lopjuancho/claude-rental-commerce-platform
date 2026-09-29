@@ -135,7 +135,6 @@ export async function quoteAction(
         result = { status: "success", message: "Items held for the customer." };
         break;
       case "send":
-      case "accepted":
       case "declined":
       case "cancelled":
       case "draft":

@@ -216,7 +216,8 @@ export async function repriceQuote(id: string) {
   );
 }
 
-const STAFF_TARGETS = ["sent", "accepted", "declined", "cancelled", "draft"] as const;
+// 'accepted' is not a staff target: a quote is accepted only by confirming its booking request.
+const STAFF_TARGETS = ["sent", "declined", "cancelled", "draft"] as const;
 
 /** Status change; the database validates the transition, review sign-off and expiry. */
 export async function transitionQuote(id: string, to: string) {

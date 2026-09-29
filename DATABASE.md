@@ -704,6 +704,14 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
 - The generic reservation functions refuse quote-managed reservations. A quote revision,
   cancellation, decline or expiry releases the quote's hold.
 
+**Round 2** (`20260930001200`, ADR 0015 §11):
+
+- A quote whose event changed after pricing is stale until it is re-priced
+  (`app.quote_event_mismatch`). Editing an event releases the pending holds of its open quotes.
+- `quotes.status = 'accepted'` requires a confirmed booking request of the same revision
+  (trigger `quotes_require_booking`).
+- Renewal and confirmation share `app.assert_booking_current`.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

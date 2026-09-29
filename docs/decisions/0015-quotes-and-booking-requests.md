@@ -112,6 +112,44 @@ test first (`tests/integration/quote-workflow-boundaries.test.ts`).
    A mismatch raises `STALE_BOOKING_REQUEST` (`RA013`), `HOLD_EXPIRED` (`RA004`) or the
    availability error. The customer or staff must request the booking again.
 
+## 11. Workflow boundaries, round 2 (re-verification before M6)
+
+Migration `20260930001200_m5_boundaries_round2.sql`. Re-checking items 1–7 against the code found
+four remaining gaps. Each was reproduced by a failing test first (the "round 2" blocks in
+`tests/integration/quote-workflow-boundaries.test.ts`).
+
+1. **The priced items are bound to the event.** `app.quote_event_mismatch` compares the quote's
+   item periods with the event's instants, and the priced delivery address with the event's
+   address. If the event is edited after pricing, the quote is stale: request, renewal and
+   confirmation raise `STALE_BOOKING_REQUEST` (`RA013`) until the quote is re-priced for the new
+   event. Editing an event also releases the pending hold of every open quote on it at once
+   (trigger `events_release_holds`).
+2. **Only confirmation accepts a quote.** Staff could previously set `status = 'accepted'`
+   directly, which skipped the hold, snapshot and availability checks. The trigger
+   `quotes_require_booking` now allows `accepted` only when a confirmed booking request of the
+   same revision and snapshot exists, with its confirmed reservation. `confirm_booking_request`
+   confirms the request first, then accepts the quote. The admin "Mark accepted" button is gone.
+3. **Renewal re-verifies the attempt.** Renewal now runs the same `app.assert_booking_current`
+   check as confirmation:
+   - the booking request is pending;
+   - the quote is open and not expired;
+   - the revision, snapshot, customer and event links match;
+   - the event and the items are unchanged.
+
+   A quote that expired by time, before the sweeper ran, can no longer keep a hold alive.
+4. **Lock order step 0.** An event UPDATE locks the event row first, then the quotes on it (ordered
+   by id), then steps 1–4. No function holding a quote lock locks an event row; they only read it.
+   Deterministic tests show that an event edit waits behind a confirmation, and a request waits
+   behind an event edit, with no deadlock. Three rounds of 48 mixed concurrent operations produce
+   no `40P01`. Those operations include event edits, quote cancel/expire, the hold sweeper, declines
+   and direct-accept attempts.
+5. **Confirmation also verifies the links.** The reservation must belong to this booking request
+   and quote (`RA013` otherwise), in addition to everything in §10.7.
+
+Items 5 and 6 of §10 (customers, renewal budget) were re-verified with additional regression tests
+and needed no change. Those tests cover opt-in and company fields, swept holds, and a quote being
+viewed.
+
 ## Not in M5
 
 - Payments and contracts.

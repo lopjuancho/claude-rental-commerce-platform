@@ -10,7 +10,6 @@ import { bookingAction, quoteAction, type QuoteActionState } from "./actions";
 
 const LABELS: Record<string, string> = {
   send: "Mark as sent",
-  accepted: "Mark accepted",
   declined: "Mark declined",
   cancelled: "Cancel quote",
   draft: "Revise (back to draft)",
@@ -35,7 +34,8 @@ export function QuoteControls({
     idleState,
   );
   const ops = QUOTE_TRANSITIONS[status]
-    .filter((s) => s !== "viewed" && s !== "expired")
+    // 'accepted' only via "Confirm booking" on the booking request (the database enforces it).
+    .filter((s) => s !== "viewed" && s !== "expired" && s !== "accepted")
     .map((s) => (s === "sent" ? "send" : s));
   const blocked = reviewBlocks({ manualReviewRequired, reviewApprovedAt });
   const btn = (op: string, label: string, variant: "default" | "outline" = "outline") => (

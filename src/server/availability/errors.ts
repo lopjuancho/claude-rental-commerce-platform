@@ -16,7 +16,7 @@ const MESSAGES = {
   QUOTE_EXPIRED: "This quote has expired.",
   INVALID_STATE: "That action is not possible in the current state.",
   STALE_BOOKING_REQUEST:
-    "The quote or event changed after the items were held. Please request the booking again.",
+    "This quote or its event changed after it was priced or held. Please request the booking again, or ask us for an updated quote.",
 } as const;
 
 /** Maps availability-engine SQLSTATEs (RA001…) to domain errors with safe messages. */
