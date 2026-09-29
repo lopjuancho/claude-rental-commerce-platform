@@ -12,6 +12,7 @@ import { enforceRateLimit } from "@/server/rate-limit";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { GatewayError, systemGateway } from "@/server/trusted/gateway";
 import type { PublicDeps, RequestMeta } from "./deps";
+import { hashVisitorToken, isWellFormedVisitorToken } from "@/server/visitor";
 
 /**
  * The public quote / booking-request flow (ADR 0001, 0002, 0014, 0015).
@@ -173,7 +174,11 @@ async function tokenHash(token: string) {
   return hashQuoteToken(token);
 }
 
-/** Holds the quote's items for the organization's hold duration (15 minutes by default). */
+/**
+ * Holds the quote's items for the organization's hold duration (15 minutes by default). Each
+ * anonymous visitor may have a limited number of live holds per organization (ADR 0015 §14); the
+ * database counts them by the hash of the visitor token, never by email or IP.
+ */
 export async function requestPublicBooking(
   tenant: ResolvedTenant,
   token: string,
@@ -183,12 +188,19 @@ export async function requestPublicBooking(
 ) {
   await deps.rateLimit("publicWrite", limitKey(tenant, meta));
   const { message } = bookingInput.parse(raw);
+  if (!isWellFormedVisitorToken(meta.visitorToken)) {
+    throw new DomainError(
+      "INVALID_INPUT",
+      "We could not identify your browser session. Please reload the page and try again.",
+    );
+  }
   const hold = await mapped(
     deps.gateway.requestBookingByToken(
       tenant.organizationId,
       await tokenHash(token),
       meta.actor === "ai" ? "assistant" : "web",
       message ?? null,
+      await hashVisitorToken(meta.visitorToken),
     ),
     "Booking request",
   );

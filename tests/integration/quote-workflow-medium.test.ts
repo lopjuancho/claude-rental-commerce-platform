@@ -6,6 +6,7 @@ import {
   requestPublicBooking,
   submitQuoteRequest,
 } from "@/server/public/quotes";
+import { generateVisitorToken } from "@/server/visitor";
 import { hashQuoteToken } from "@/server/quotes/token";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { makeProduct, outcome, rpc } from "./support/availability";
@@ -30,6 +31,8 @@ const tenant = () =>
     timezone: "America/Chicago",
   }) as unknown as ResolvedTenant;
 const meta = { ip: "198.51.100.11" };
+/** Each hold request comes from its own anonymous visitor (the per-visitor cap is tested separately). */
+const visitorMeta = () => ({ ...meta, visitorToken: generateVisitorToken() });
 const deps = () => ({
   gateway: pgGateway(),
   provider: fakeProvider(8.2),
@@ -70,7 +73,7 @@ async function publicQuote(opts: { variantId?: string; date?: string; email?: st
   ]);
   return { token, quoteId: q.rows[0]!.id, variantId };
 }
-const hold = (token: string) => requestPublicBooking(tenant(), token, {}, meta, deps());
+const hold = (token: string) => requestPublicBooking(tenant(), token, {}, visitorMeta(), deps());
 const latest = async (quoteId: string) =>
   (
     await admin<{ id: string; reservation_id: string }>(

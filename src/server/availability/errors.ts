@@ -15,6 +15,8 @@ const MESSAGES = {
   REVIEW_REQUIRED: "The price needs staff review before this step.",
   QUOTE_EXPIRED: "This quote has expired.",
   INVALID_STATE: "That action is not possible in the current state.",
+  PUBLIC_HOLD_LIMIT:
+    "You already have the maximum number of bookings on hold. Finish or cancel one of them, or wait for a hold to expire, then try again.",
   STALE_BOOKING_REQUEST:
     "This quote or its event changed after it was priced or held. Please request the booking again, or ask us for an updated quote.",
 } as const;

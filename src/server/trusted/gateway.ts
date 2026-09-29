@@ -107,6 +107,8 @@ export interface TrustedGateway {
     tokenHash: string,
     source: "web" | "assistant",
     message: string | null,
+    /** SHA-256 of the anonymous visitor token (never the token itself). */
+    visitorHash: string,
   ): Promise<BookingHold>;
   renewBookingHoldByToken(organizationId: string, tokenHash: string): Promise<string>;
   cancelBookingByToken(organizationId: string, tokenHash: string): Promise<string>;
@@ -250,7 +252,7 @@ export function systemGateway(): TrustedGateway {
         }),
       );
     },
-    async requestBookingByToken(organizationId, tokenHash, source, message) {
+    async requestBookingByToken(organizationId, tokenHash, source, message, visitorHash) {
       const [row] = present(
         unwrap(
           await db.rpc("request_booking_by_token", {
@@ -258,6 +260,7 @@ export function systemGateway(): TrustedGateway {
             p_token_hash: tokenHash,
             p_source: source,
             ...(message ? { p_message: message } : {}),
+            p_visitor_hash: visitorHash,
           }),
         ),
         "request_booking_by_token",

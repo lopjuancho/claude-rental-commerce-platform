@@ -10,6 +10,7 @@ import {
   submitQuoteRequest,
 } from "@/server/public/quotes";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
+import { generateVisitorToken } from "@/server/visitor";
 import { hashQuoteToken } from "@/server/quotes/token";
 import { june, makeProduct, outcome, rpc, SYSTEM } from "./support/availability";
 import { admin, as, createOrg, expectDenied, type TestOrg } from "./support/db";
@@ -39,6 +40,8 @@ const tenantOf = (o: TestOrg) =>
     timezone: "America/Chicago",
   }) as unknown as ResolvedTenant;
 const meta = { ip: "198.51.100.4", requestId: "req-m5" };
+/** Each hold request comes from its own anonymous visitor (the per-visitor cap is tested separately). */
+const visitorMeta = () => ({ ...meta, visitorToken: generateVisitorToken() });
 const deps = (keys: string[] = []) => {
   const gateway = pgGateway();
   return {
@@ -618,7 +621,7 @@ describe("public quote request (real public services, tenant from host)", () => 
     expect(await getPublicQuote(tenantOf(org), "not-a-token", deps())).toBeNull();
     expect(await getPublicQuote(tenantOf(org), "A".repeat(43), deps())).toBeNull();
     await expect(
-      requestPublicBooking(tenantOf(other), token, {}, meta, deps()),
+      requestPublicBooking(tenantOf(other), token, {}, visitorMeta(), deps()),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
@@ -699,13 +702,13 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
       tenantOf(org),
       token,
       { message: "Back yard" },
-      meta,
+      visitorMeta(),
       d,
     );
     const minutes = (Date.parse(first.holdExpiresAt) - Date.now()) / 60_000;
     expect(minutes).toBeGreaterThan(14);
     expect(minutes).toBeLessThanOrEqual(15);
-    const again = await requestPublicBooking(tenantOf(org), token, {}, meta, deps());
+    const again = await requestPublicBooking(tenantOf(org), token, {}, visitorMeta(), deps());
     expect(again.holdExpiresAt).toBe(first.holdExpiresAt);
     const br = await pending(quoteId);
     expect(br.status).toBe("pending");
@@ -723,9 +726,9 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
     const serial = await makeProduct(org, { units: 1 });
     const a = await publicQuote(serial.variantId, 1, "2027-07-04");
     const b = await publicQuote(serial.variantId, 1, "2027-07-04");
-    await requestPublicBooking(tenantOf(org), a.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), a.token, {}, visitorMeta(), deps());
     await expect(
-      requestPublicBooking(tenantOf(org), b.token, {}, meta, deps()),
+      requestPublicBooking(tenantOf(org), b.token, {}, visitorMeta(), deps()),
     ).rejects.toMatchObject({ code: "INSUFFICIENT_AVAILABILITY" });
     const none = await admin("select 1 from public.booking_requests where quote_id = $1", [
       b.quoteId,
@@ -739,7 +742,9 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
       [1, 2, 3, 4].map(() => publicQuote(serial.variantId, 1, "2027-07-05")),
     );
     const results = await Promise.all(
-      qs.map((q) => outcome(requestPublicBooking(tenantOf(org), q.token, {}, meta, deps()))),
+      qs.map((q) =>
+        outcome(requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps())),
+      ),
     );
     expect(results.filter((r) => r === "ok")).toHaveLength(1);
     expect(results.filter((r) => r === "INSUFFICIENT_AVAILABILITY")).toHaveLength(3);
@@ -748,7 +753,7 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
   it("holds can be renewed up to the limit; cancelling releases the items", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const q = await publicQuote(serial.variantId, 1, "2027-07-06");
-    await requestPublicBooking(tenantOf(org), q.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps());
     for (let i = 0; i < 3; i++) await renewPublicHold(tenantOf(org), q.token, meta, deps());
     await expect(renewPublicHold(tenantOf(org), q.token, meta, deps())).rejects.toMatchObject({
       code: "HOLD_RENEWAL_LIMIT",
@@ -759,14 +764,14 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
     expect((await reservation(br.reservation_id)).status).toBe("released");
     const q2 = await publicQuote(serial.variantId, 1, "2027-07-06");
     await expect(
-      requestPublicBooking(tenantOf(org), q2.token, {}, meta, deps()),
+      requestPublicBooking(tenantOf(org), q2.token, {}, visitorMeta(), deps()),
     ).resolves.toBeTruthy();
   });
 
   it("an expired hold no longer blocks others and can no longer be renewed", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const q = await publicQuote(serial.variantId, 1, "2027-07-07");
-    await requestPublicBooking(tenantOf(org), q.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps());
     const br = await pending(q.quoteId);
     await admin(
       "update public.reservations set hold_expires_at = now() - interval '1 second' where id = $1",
@@ -777,14 +782,14 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
     });
     const other2 = await publicQuote(serial.variantId, 1, "2027-07-07");
     await expect(
-      requestPublicBooking(tenantOf(org), other2.token, {}, meta, deps()),
+      requestPublicBooking(tenantOf(org), other2.token, {}, visitorMeta(), deps()),
     ).resolves.toBeTruthy();
   });
 
   it("staff confirmation: needs review sign-off, then confirms the reservation and accepts the quote", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const q = await publicQuote(serial.variantId, 1, "2027-07-08");
-    await requestPublicBooking(tenantOf(org), q.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps());
     const br = await pending(q.quoteId);
     expect(
       await outcome(rpc(org.users.office, "select public.confirm_booking_request($1)", [br.id])),
@@ -820,7 +825,7 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
   it("confirmation re-validates: a maintenance block after the hold makes it fail; the hold stays", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const q = await publicQuote(serial.variantId, 1, "2027-07-09");
-    await requestPublicBooking(tenantOf(org), q.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps());
     await as(
       org.users.office,
       (sql) =>
@@ -847,7 +852,7 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
   it("an expired hold is rejected at confirmation; a fresh request is needed and fails if the stock was taken", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const a = await publicQuote(serial.variantId, 1, "2027-07-10");
-    await requestPublicBooking(tenantOf(org), a.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), a.token, {}, visitorMeta(), deps());
     await as(
       org.users.office,
       (sql) =>
@@ -865,15 +870,15 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
     ).toBe("RA004");
     // Someone else takes the unit meanwhile: A's fresh request fails cleanly.
     const b = await publicQuote(serial.variantId, 1, "2027-07-10");
-    await requestPublicBooking(tenantOf(org), b.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), b.token, {}, visitorMeta(), deps());
     await expect(
-      requestPublicBooking(tenantOf(org), a.token, {}, meta, deps()),
+      requestPublicBooking(tenantOf(org), a.token, {}, visitorMeta(), deps()),
     ).rejects.toMatchObject({
       code: "INSUFFICIENT_AVAILABILITY",
     });
     // After B cancels, A requests again and staff confirm the live hold.
     await cancelPublicBooking(tenantOf(org), b.token, meta, deps());
-    await requestPublicBooking(tenantOf(org), a.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), a.token, {}, visitorMeta(), deps());
     expect(
       await outcome(rpc(org.users.office, "select public.confirm_booking_request($1)", [brA.id])),
     ).toBe("ok");
@@ -883,7 +888,7 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
   it("declining releases the hold; only staff can decline", async () => {
     const serial = await makeProduct(org, { units: 1 });
     const q = await publicQuote(serial.variantId, 1, "2027-07-11");
-    await requestPublicBooking(tenantOf(org), q.token, {}, meta, deps());
+    await requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps());
     const br = await pending(q.quoteId);
     expect(
       await outcome(rpc(SYSTEM, "select public.close_booking_request($1, 'declined')", [br.id])),
@@ -904,7 +909,7 @@ describe("booking requests: 15-minute holds, renewal, cancellation, staff confir
     const q = await publicQuote(chairs.variantId, 1, "2027-07-12");
     await admin("update public.quotes set status = 'cancelled' where id = $1", [q.quoteId]);
     await expect(
-      requestPublicBooking(tenantOf(org), q.token, {}, meta, deps()),
+      requestPublicBooking(tenantOf(org), q.token, {}, visitorMeta(), deps()),
     ).rejects.toMatchObject({ code: "INVALID_STATE" });
   });
 });

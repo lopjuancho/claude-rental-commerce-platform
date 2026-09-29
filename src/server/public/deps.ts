@@ -9,6 +9,11 @@ export interface RequestMeta {
   requestId?: string;
   /** 'ai' when the assistant acts for the visitor (M7). */
   actor?: "public" | "ai";
+  /**
+   * The raw anonymous visitor token from the HttpOnly cookie (server-issued, see
+   * `@/server/visitor`). Server-side only; the services hash it before any database use.
+   */
+  visitorToken?: string;
 }
 
 /** Everything a public service may touch. Injected so tests run the real code against the DB. */

@@ -16,6 +16,7 @@ export const ERROR_CODES = [
   "QUOTE_EXPIRED",
   "INVALID_STATE",
   "STALE_BOOKING_REQUEST",
+  "PUBLIC_HOLD_LIMIT",
   "INTERNAL",
 ] as const;
 

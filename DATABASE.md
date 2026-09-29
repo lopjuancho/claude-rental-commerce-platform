@@ -729,6 +729,14 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
   linked back to the request.
 - `quote_hold_budgets` is scoped to a quote revision, not to a visitor or customer.
 
+**Per-visitor public hold cap** (`20260930001500`, ADR 0015 §14):
+
+- `reservations.public_visitor_hash` holds the SHA-256 of the server-issued anonymous visitor
+  token. It is set on public holds only and immutable once the hold belongs to a request.
+- `organization_settings.max_public_holds_per_visitor` defaults to 2 live public holds per
+  visitor per organization. It is enforced atomically in `request_booking` (`RA015`
+  `PUBLIC_HOLD_LIMIT`). Staff holds are exempt.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

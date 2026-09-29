@@ -221,7 +221,8 @@ booking fail with `CAPACITY_IN_USE`.
 
 Booking workflow lock order (ADR 0015 §10–12): event row (only when an event is edited) → quote
 rows (by id) → booking-request rows (by id) → organization advisory lock, then variant advisory
-locks in ascending uuid order across the whole transaction → reservation rows (by id). The lock
+locks in ascending uuid order across the whole transaction → the public visitor lock (public holds
+only, ADR 0015 §14) → reservation rows (by id). The lock
 functions enforce the variant order (`LOCK_ORDER_VIOLATION`, `RA014`). Catalog and block edits take
 the organization lock exclusively.
 

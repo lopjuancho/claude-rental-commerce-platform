@@ -134,7 +134,7 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
     },
     publicQuoteView: (org, hash) =>
       svc("public_quote_view", "select public.public_quote_view($1, $2) as v", [org, hash]),
-    requestBookingByToken: async (org, hash, source, message) => {
+    requestBookingByToken: async (org, hash, source, message, visitorHash) => {
       const v = await svc<{
         booking_request_id: string;
         reservation_id: string;
@@ -142,8 +142,8 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
         quote_number: string;
       }>(
         "request_booking_by_token",
-        "select row_to_json(b) as v from public.request_booking_by_token($1, $2, $3, $4) b",
-        [org, hash, source, message],
+        "select row_to_json(b) as v from public.request_booking_by_token($1, $2, $3, $4, $5) b",
+        [org, hash, source, message, visitorHash],
       );
       return {
         bookingRequestId: v.booking_request_id,

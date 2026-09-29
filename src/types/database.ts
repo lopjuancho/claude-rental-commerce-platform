@@ -932,6 +932,7 @@ export type Database = {
           logo_mark_media_path: string | null;
           logo_media_path: string | null;
           max_hold_renewals: number;
+          max_public_holds_per_visitor: number;
           max_rental_days: number;
           maximum_delivery_miles: number | null;
           mileage_basis: Database["public"]["Enums"]["mileage_basis"];
@@ -977,6 +978,7 @@ export type Database = {
           logo_mark_media_path?: string | null;
           logo_media_path?: string | null;
           max_hold_renewals?: number;
+          max_public_holds_per_visitor?: number;
           max_rental_days?: number;
           maximum_delivery_miles?: number | null;
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
@@ -1022,6 +1024,7 @@ export type Database = {
           logo_mark_media_path?: string | null;
           logo_media_path?: string | null;
           max_hold_renewals?: number;
+          max_public_holds_per_visitor?: number;
           max_rental_days?: number;
           maximum_delivery_miles?: number | null;
           mileage_basis?: Database["public"]["Enums"]["mileage_basis"];
@@ -2118,6 +2121,7 @@ export type Database = {
           id: string;
           notes: string | null;
           organization_id: string;
+          public_visitor_hash: string | null;
           quote_id: string | null;
           replaced_by: string | null;
           source: Database["public"]["Enums"]["reservation_source"];
@@ -2136,6 +2140,7 @@ export type Database = {
           id?: string;
           notes?: string | null;
           organization_id: string;
+          public_visitor_hash?: string | null;
           quote_id?: string | null;
           replaced_by?: string | null;
           source: Database["public"]["Enums"]["reservation_source"];
@@ -2154,6 +2159,7 @@ export type Database = {
           id?: string;
           notes?: string | null;
           organization_id?: string;
+          public_visitor_hash?: string | null;
           quote_id?: string | null;
           replaced_by?: string | null;
           source?: Database["public"]["Enums"]["reservation_source"];
@@ -2965,7 +2971,12 @@ export type Database = {
       };
       renew_hold: { Args: { p_reservation_id: string }; Returns: string };
       request_booking: {
-        Args: { p_message?: string; p_quote_id: string; p_source?: string };
+        Args: {
+          p_message?: string;
+          p_quote_id: string;
+          p_source?: string;
+          p_visitor_hash?: string;
+        };
         Returns: {
           booking_request_id: string;
           hold_expires_at: string;
@@ -2978,6 +2989,7 @@ export type Database = {
           p_organization_id: string;
           p_source: string;
           p_token_hash: string;
+          p_visitor_hash?: string;
         };
         Returns: {
           booking_request_id: string;

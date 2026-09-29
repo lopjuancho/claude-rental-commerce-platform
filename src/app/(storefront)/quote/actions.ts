@@ -11,6 +11,7 @@ import {
 } from "@/server/public/quotes";
 import { readContactForm, readEventForm, readItemsForm } from "@/server/quotes/form";
 import { getClientIp, getRequestId } from "@/server/request";
+import { getOrIssueVisitorToken } from "@/server/visitor";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 import { headers } from "next/headers";
 
@@ -71,7 +72,8 @@ export async function requestBookingAction(_prev: FormState, fd: FormData): Prom
       tenant,
       tokenOf(fd),
       typeof message === "string" && message.trim() ? { message: message.trim() } : {},
-      meta,
+      // The anonymous visitor (HttpOnly cookie, issued here if absent) that live holds count against.
+      { ...meta, visitorToken: await getOrIssueVisitorToken() },
     );
   } catch (error) {
     return toFormError(error);

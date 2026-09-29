@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { renewPublicHold, requestPublicBooking, submitQuoteRequest } from "@/server/public/quotes";
+import { generateVisitorToken } from "@/server/visitor";
 import { hashQuoteToken } from "@/server/quotes/token";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { makeProduct, outcome, rpc, SYSTEM } from "./support/availability";
@@ -28,6 +29,8 @@ const tenant = () =>
     timezone: "America/Chicago",
   }) as unknown as ResolvedTenant;
 const meta = { ip: "198.51.100.10" };
+/** Each hold request comes from its own anonymous visitor (the per-visitor cap is tested separately). */
+const visitorMeta = () => ({ ...meta, visitorToken: generateVisitorToken() });
 const deps = () => ({
   gateway: pgGateway(),
   provider: fakeProvider(8.2),
@@ -85,7 +88,7 @@ async function publicQuote(
     customerId: q.rows[0]!.customer_id,
   };
 }
-const hold = (token: string) => requestPublicBooking(tenant(), token, {}, meta, deps());
+const hold = (token: string) => requestPublicBooking(tenant(), token, {}, visitorMeta(), deps());
 const latest = async (quoteId: string) =>
   (
     await admin<{ id: string; status: string; reservation_id: string }>(

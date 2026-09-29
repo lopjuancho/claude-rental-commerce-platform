@@ -231,7 +231,40 @@ Migration `20260930001400_m5_medium_findings.sql`. Tests are in
    - **c. Public share cap per variant and period.** Public holds may occupy at most N units or X%
      of a variant's capacity at any moment; staff holds are unaffected.
 
-   M5 ships with (a) until the owner chooses.
+   The owner chose (b); it is implemented in §14.
+
+## 14. Per-visitor cap on live public holds (M3 decision)
+
+Migration `20260930001500_m5_public_hold_cap.sql`. Tests are in
+`tests/integration/public-hold-cap.test.ts` and `tests/unit/visitor-token.test.ts`.
+
+- **Identity.** A server-issued anonymous visitor token (`src/server/visitor.ts`): 256
+  random bits, base64url, no PII. The browser keeps it in the `rc_visitor` cookie: HttpOnly,
+  SameSite=Lax, Secure in production, 180 days.
+  - It is issued when a visitor first requests a booking.
+  - A malformed cookie is replaced, never trusted.
+  - The server sends only `SHA-256("rental-commerce:visitor:v1:" + token)` to the database. The
+    domain prefix keeps it distinct from quote-link hashes.
+  - Emails and IPs are never the identity.
+- **Policy.** At most `organization_settings.max_public_holds_per_visitor` (default 2) live
+  public holds per visitor per organization.
+  - "Live" means `held` and not yet expired (clock time). Released, cancelled, declined, expired
+    and confirmed holds do not count.
+  - The count is per visitor, so a new quote does not reset it.
+  - Staff holds are exempt: they carry no visitor hash.
+  - Over the cap, the request fails with `PUBLIC_HOLD_LIMIT` (`RA015`), with a safe customer
+    message. Nothing is created and no per-quote budget is consumed.
+- **Atomic.** `request_booking` takes a per-(organization, visitor) advisory lock after the
+  quote, request and variant locks, counts with `clock_timestamp()`, and creates the hold in the
+  same transaction. `reserve_inventory` only re-enters variant locks already held.
+  Concurrent requests from one visitor therefore cannot exceed the cap: a deterministic test
+  plus three rounds of 6 parallel requests.
+- **Required.** A public (non-staff) hold without a well-formed visitor hash is refused
+  (`RA006`, `INVALID_INPUT`). `public_visitor_hash` is part of the hold's immutable identity.
+- **Unchanged.** The per-quote renewal budget (§10.6) and the per-tenant, per-client-IP write
+  rate limit still apply as separate controls.
+- **Limits of this control.** A visitor who clears their cookies gets a new identity. The rate
+  limit bounds how fast that can be exploited.
 
 ## Not in M5
 
