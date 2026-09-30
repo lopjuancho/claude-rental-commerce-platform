@@ -97,7 +97,7 @@ Single Next.js application, not a monorepo. Domain modules are separated by fold
 │   │   │                          # quotes, conversations, settings
 │   │   ├── (auth)/                # sign-in, invite acceptance, org switcher
 │   │   └── api/
-│   │       ├── assistant/route.ts # streaming chat endpoint
+│   │       ├── assistant/route.ts # assistant endpoint (POST turn, DELETE new chat)
 │   │       └── health/route.ts
 │   ├── domain/                    # PURE business logic — no I/O, no Supabase, no React
 │   │   ├── availability/          # interval math, buffers, capacity calculation
@@ -112,12 +112,15 @@ Single Next.js application, not a monorepo. Domain modules are separated by fold
 │   │   ├── auth/                  # session, requirePermission(), role→permission map
 │   │   ├── repositories/          # typed data access per aggregate (thin)
 │   │   ├── services/              # use cases: catalogService, quoteService, …
-│   │   ├── ai/
-│   │   │   ├── orchestrator.ts    # conversation loop, tool dispatch, limits
-│   │   │   ├── provider/          # LlmProvider interface + OpenAI implementation
-│   │   │   ├── tools/             # one file per tool: schema + handler + policy
-│   │   │   ├── prompts/           # versioned system prompts
-│   │   │   └── guardrails/        # output grounding validator
+│   │   ├── ai/                    # M7 assistant (ADR 0017)
+│   │   │   ├── assistant.ts       # runTurn: conversation loop, tool dispatch, budgets
+│   │   │   ├── tools.ts           # the 10 tools → existing public services
+│   │   │   ├── schemas.ts         # strict Zod tool inputs → JSON schema for the model
+│   │   │   ├── policy.ts          # system prompt, grounding validator, safe fallbacks
+│   │   │   ├── context.ts         # conversation state + tool context/outcomes
+│   │   │   ├── handler.ts         # /api/assistant: body, rate limits, session cookie
+│   │   │   ├── session.ts  telemetry.ts  config.ts
+│   │   │   └── providers/         # LlmProvider: OpenAI (fetch) + scripted test double
 │   │   ├── audit/                 # audit log writer
 │   │   └── rate-limit/            # RateLimiter interface + implementations
 │   ├── components/
@@ -397,6 +400,34 @@ The system prompt instructs the model to ask at most one or two questions per tu
 - `ai_actions` records every tool call (name, validated input, output summary, status, error code, latency, model, prompt version, token usage).
 - Conversations are reviewable in admin.
 - A scripted **evaluation suite** (fixture catalog + canned conversations) runs against a mocked provider in CI (deterministic tool-dispatch/validation tests) and against the live model on demand (behavioral evals: "never states unconfirmed price", "asks for ZIP before promising delivery").
+
+### 8.6 As implemented in M7 (ADR 0017)
+
+§8.1–8.5 were the plan; the implementation keeps its principles and differs in these details:
+
+- **Endpoint:** `POST /api/assistant` returns one JSON turn (`status`, `reply`, `blocks`, `correlationId`); no streaming yet. Tenant from the Host header; the body is a strict schema `{ message ≤ 1000 chars, page? }` (8 KB max, JSON only) — any other key (e.g. `organizationId`) is a 400. `DELETE` clears the session cookie ("New chat").
+- **Session:** opaque 256-bit HttpOnly `rc_ai` cookie; the database stores only its SHA-256 (`ai_conversations.session_hash`, DATABASE.md §10), scoped per organization, so the same cookie on another tenant's host is a different, empty conversation.
+- **Tools** (`src/server/ai/tools.ts`) are thin adapters over the M5/M6 public services, called with the host-resolved tenant and `actor: 'ai'` — no pricing, availability or quote logic of their own:
+
+| Tool | Service |
+|---|---|
+| `search_products` | `searchProducts` (published storefront catalog, M6) |
+| `get_product_details` | `loadProductBySlug` + storefront presenters (M6) |
+| `check_availability` | `checkPublicAvailability` → M3 availability engine |
+| `calculate_price` | `priceForTenant` (no save) → M4 pricing engine; manual-review totals withheld |
+| `check_service_area` | `checkPublicServiceArea` → M4 `quoteDelivery` |
+| `create_customer` | validates and stages contact; matched/created by `submitQuoteRequest` (never overwrites) |
+| `create_event` | validates and stages the event (M5 `eventInputSchema`, DST-safe local time) |
+| `create_quote` | `submitQuoteRequest` (customer + event + priced draft quote, `source = 'assistant'`) |
+| `add_quote_item` | stages an item; with a quote already open, a new fully re-priced quote replaces it (snapshots are immutable) |
+| `request_booking` | `requestPublicBooking` (15-min hold, visitor hold cap, stale/expired/closed refusal) |
+
+- **Model contract:** strict Zod schemas → JSON schema; unknown tools, malformed JSON, schema failures and forbidden keys (`organizationId`, `price`, `total`, `status`, `customerId`, `quoteId`, `token`, …) are rejected before any service runs. The model refers to products by their public slug; each is re-resolved in the tenant's published catalog (another tenant's or an unpublished product is simply not found).
+- **Grounding** (`checkGrounding`): money amounts must appear in this turn's tool results; "available", "held" and "booked/confirmed" claims need the matching tool status; payment claims are always rejected. A violation replaces the reply with a neutral fallback and records `guardrail_violation`. Cards (product, availability, price, quote link, booking) are rendered from tool results, never from model text; the quote link is only in the card, never in the model's context.
+- **Budgets** (`src/server/ai/config.ts`): message length, history size (messages + chars), tool calls per turn, model steps, per-call and per-turn timeouts, max output tokens, conversation length; per-IP and per-session rate limits.
+- **Provider:** `LlmProvider` with an OpenAI Chat Completions implementation (server-side `OPENAI_API_KEY`, `AI_MODEL`, `AI_MAX_OUTPUT_TOKENS`, `AI_TIMEOUT_MS`) and a deterministic scripted provider for integration/E2E tests (`AI_PROVIDER=scripted`, forbidden in production). A provider failure returns a neutral "unavailable, try again" and persists nothing.
+- **Telemetry:** `ai_actions` stores tool name, status, error code, latency, correlation id and model — no inputs, outputs or customer data. Errors are logged server-side as JSON with the correlation id; the browser sees only the neutral message and the id.
+- **UI:** `src/components/storefront/assistant/assistant-widget.tsx` — floating launcher, desktop side panel / mobile bottom sheet, page context (product/category/quote) sent as slugs or the quote token, resolved server-side.
 
 ## 9. Deployment architecture
 

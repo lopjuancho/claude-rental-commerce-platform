@@ -34,6 +34,11 @@
       "namespace_id": "1004",
       "simple": { "limit": 60, "period": 60 },
     },
+    {
+      "name": "ASSISTANT_SESSION_RATE_LIMITER",
+      "namespace_id": "1005",
+      "simple": { "limit": 12, "period": 60 },
+    },
   ],
   "env": {
     "staging": {
@@ -60,6 +65,11 @@
           "name": "PUBLIC_QUERY_RATE_LIMITER",
           "namespace_id": "2004",
           "simple": { "limit": 60, "period": 60 },
+        },
+        {
+          "name": "ASSISTANT_SESSION_RATE_LIMITER",
+          "namespace_id": "2005",
+          "simple": { "limit": 12, "period": 60 },
         },
       ],
     },
@@ -89,6 +99,11 @@
           "name": "PUBLIC_QUERY_RATE_LIMITER",
           "namespace_id": "3004",
           "simple": { "limit": 60, "period": 60 },
+        },
+        {
+          "name": "ASSISTANT_SESSION_RATE_LIMITER",
+          "namespace_id": "3005",
+          "simple": { "limit": 12, "period": 60 },
         },
       ],
     },

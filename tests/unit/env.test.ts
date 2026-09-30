@@ -23,6 +23,31 @@ describe("parseServerEnv", () => {
     expect(run).not.toThrow(/secretish/);
   });
 
+  it("treats empty values from .env.example as unset", () => {
+    const env = parseServerEnv({ ...base, OPENAI_API_KEY: "", AI_PROVIDER: "", AI_TIMEOUT_MS: "" });
+    expect(env.AI_PROVIDER).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+  });
+
+  it("guards the assistant provider configuration", () => {
+    expect(() => parseServerEnv({ ...base, AI_PROVIDER: "openai" })).toThrow(/OPENAI_API_KEY/);
+    expect(() =>
+      parseServerEnv({
+        ...base,
+        NEXT_PUBLIC_SUPABASE_URL: "https://x.supabase.co",
+        APP_ENV: "production",
+        AI_PROVIDER: "scripted",
+      }),
+    ).toThrow(/AI_PROVIDER/);
+    expect(() =>
+      parseServerEnv({
+        ...base,
+        OPENAI_API_KEY: "sk-secretish-value-that-is-long",
+        AI_MODEL: "x y",
+      }),
+    ).not.toThrow(/secretish/);
+  });
+
   it("forbids DEV_TENANT_SLUG in production", () => {
     expect(() =>
       parseServerEnv({

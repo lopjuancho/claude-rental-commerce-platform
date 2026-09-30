@@ -117,7 +117,7 @@ export async function submitQuoteRequest(
     items: input.items.length,
     totalCents: pricing.output.summary.total,
   });
-  return { token, quoteNumber: quote.quoteNumber };
+  return { token, quoteNumber: quote.quoteNumber, quoteId: quote.quoteId };
 }
 
 const viewSchema = z.object({
@@ -162,25 +162,37 @@ const viewSchema = z.object({
 });
 export type PublicQuoteView = z.infer<typeof viewSchema>;
 
+/**
+ * Proof of access to a quote: the raw link token (storefront), or its SHA-256 for server-side
+ * holders that never keep the raw token (the assistant's session, ADR 0017 §6).
+ */
+export type QuoteCredential = string | { tokenHash: string };
+
+async function credentialHash(credential: QuoteCredential): Promise<string | null> {
+  if (typeof credential !== "string") {
+    return /^[0-9a-f]{64}$/.test(credential.tokenHash) ? credential.tokenHash : null;
+  }
+  return isWellFormedQuoteToken(credential) ? hashQuoteToken(credential) : null;
+}
+
 /** The customer's view of their quote (marks a sent quote viewed). Unknown token → null. */
 export async function getPublicQuote(
   tenant: ResolvedTenant,
-  token: string,
+  token: QuoteCredential,
   deps: PublicDeps = defaultDeps(),
 ): Promise<PublicQuoteView | null> {
-  if (!isWellFormedQuoteToken(token)) return null;
-  const view = await mapped(
-    deps.gateway.publicQuoteView(tenant.organizationId, await hashQuoteToken(token)),
-    "Quote",
-  );
+  const hash = await credentialHash(token);
+  if (!hash) return null;
+  const view = await mapped(deps.gateway.publicQuoteView(tenant.organizationId, hash), "Quote");
   return view === null ? null : viewSchema.parse(view);
 }
 
 const bookingInput = z.strictObject({ message: z.string().trim().max(2000).optional() });
 
-async function tokenHash(token: string) {
-  if (!isWellFormedQuoteToken(token)) throw new DomainError("NOT_FOUND", "Quote not found.");
-  return hashQuoteToken(token);
+async function tokenHash(token: QuoteCredential) {
+  const hash = await credentialHash(token);
+  if (!hash) throw new DomainError("NOT_FOUND", "Quote not found.");
+  return hash;
 }
 
 /**
@@ -190,7 +202,7 @@ async function tokenHash(token: string) {
  */
 export async function requestPublicBooking(
   tenant: ResolvedTenant,
-  token: string,
+  token: QuoteCredential,
   raw: unknown,
   meta: RequestMeta,
   deps: PublicDeps = defaultDeps(),

@@ -297,3 +297,62 @@ export function brandAssetUrl(path: string | null): string | null {
   const base = getServerEnv().NEXT_PUBLIC_SUPABASE_URL.replace(/\/$/, "");
   return `${base}/storage/v1/object/public/brand-assets/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
+
+export interface ProductSearch {
+  query?: string | undefined;
+  categoryId?: string | undefined;
+  categoryIdsMatchingQuery?: string[] | undefined;
+  eventType?: string | undefined;
+  minCapacity?: number | undefined;
+  wet?: boolean | undefined;
+  limit: number;
+}
+
+/**
+ * Plain search words from free text: letters and digits only (nothing can reach the PostgREST
+ * filter syntax), common filler words dropped, plurals folded ("slides" → "slide"), at most five.
+ */
+const STOP_WORDS = new Set(
+  "a an and any are can do for from have i in is it me my need of on or our some the this to we what with you your want would rent rental".split(
+    " ",
+  ),
+);
+
+export function searchWords(query: string | undefined): string[] {
+  return [
+    ...new Set(
+      (query ?? "")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((w) => w.length >= 2 && !STOP_WORDS.has(w))
+        .map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w)),
+    ),
+  ].slice(0, 5);
+}
+
+/**
+ * Published products of the tenant matching structured filters and (optionally) search words in
+ * the name or short description, or in a matching category. Assistant `search_products`.
+ */
+export async function searchProducts(
+  tenant: ResolvedTenant,
+  search: ProductSearch,
+  db: PublicClient = createPublicClient(),
+): Promise<Product[]> {
+  const org = tenant.organizationId;
+  let q = db.from("public_catalog_products").select("*").eq("organization_id", org);
+  const words = searchWords(search.query);
+  if (words.length) {
+    const clauses = words.flatMap((w) => [`name.ilike.*${w}*`, `short_description.ilike.*${w}*`]);
+    const cats = (search.categoryIdsMatchingQuery ?? []).filter((id) => /^[0-9a-f-]{36}$/.test(id));
+    if (cats.length) clauses.push(`category_ids.ov.{${cats.join(",")}}`);
+    q = q.or(clauses.join(","));
+  }
+  if (search.categoryId) q = q.contains("category_ids", [search.categoryId]);
+  if (search.eventType) q = q.contains("ideal_event_types", [search.eventType as never]);
+  if (search.minCapacity !== undefined) q = q.gte("recommended_capacity", search.minCapacity);
+  if (search.wet === true) q = q.eq("wet_allowed", true);
+  if (search.wet === false) q = q.eq("dry_allowed", true);
+  const res = await orderProducts(q).limit(Math.min(Math.max(search.limit, 1), 12));
+  return withDetails(org, rowsOf(res, "Product"), db);
+}

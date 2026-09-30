@@ -16,7 +16,10 @@ export const RATE_LIMIT_POLICIES = {
   publicWrite: { limit: 20, windowSeconds: 60 },
   /** Anonymous reads that cost work (pricing may call the maps provider; availability queries). */
   publicQuery: { limit: 60, windowSeconds: 60 },
+  /** Assistant turns per client IP (each turn may run several tools and a model call). */
   assistant: { limit: 30, windowSeconds: 60 },
+  /** Assistant turns per conversation (opaque session), independent of IP. */
+  assistantSession: { limit: 12, windowSeconds: 60 },
 } as const;
 
 export type RateLimitPolicy = keyof typeof RATE_LIMIT_POLICIES;

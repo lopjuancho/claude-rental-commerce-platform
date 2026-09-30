@@ -62,6 +62,7 @@ describe("Worker environments", () => {
       "PUBLIC_WRITE_RATE_LIMITER",
       "ASSISTANT_RATE_LIMITER",
       "PUBLIC_QUERY_RATE_LIMITER",
+      "ASSISTANT_SESSION_RATE_LIMITER",
     ];
     const expected = (base: number) => names.map((n, i) => `${n}=${base + i + 1}`);
     expect(ids(envs.development)).toEqual(expected(1000));

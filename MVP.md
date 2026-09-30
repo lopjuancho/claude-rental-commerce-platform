@@ -113,6 +113,8 @@ M5 work is paused on a local WIP branch until this is reviewed.
 - Migration `0008`; `LlmProvider` + OpenAI implementation; tool registry with the Phase 1 tools; orchestrator loop with budgets; structured final output; grounding validator; streaming endpoint; Turnstile + rate limits.
 - Assistant UI: chat, event summary chip bar (date · place · kids · budget), recommendation cards rendered from tool facts, "needs confirmation" badges, "Create my quote" flow.
 - **Tests:** tool arg validation failures; injected `organizationId` ignored; unknown tool; budget exhaustion; idempotent writes; validator rejects fabricated price / unconfirmed "available"; mock-provider conversation E2E; on-demand live eval suite.
+- **Implemented (ADR 0017, ARCHITECTURE.md §8.6):** migration `20261002000100_m7_assistant` (ai_conversations / ai_messages / ai_actions, service-role functions); `src/server/ai` (10 tools over the M3–M6 public services, strict schemas, grounding validator, budgets, OpenAI + scripted providers, telemetry); `POST/DELETE /api/assistant` with per-IP and per-session rate limits; storefront widget (launcher, desktop panel / mobile bottom sheet, page context, product/availability/price/quote/booking cards). Tests: unit (schemas, policy, grounding, forbidden keys), integration (every tool through the real backend, tenant isolation, stale/expired/manual review/hold cap/weather/service area/duplicate customers, adversarial prompts via the scripted provider), E2E (full conversation → quote → booking request verified in the database, reload continuation, tenant isolation, API failure, mobile, API contract).
+- **Deferred (see §12):** streaming responses; Turnstile; conversation retention sweeper; event summary chip bar and "Ask AI about this item" deep links; staff conversation viewer (M8); on-demand live-model eval suite; idempotency by tool-call id (writes are instead guarded by conversation state and optimistic concurrency).
 
 ### M8 — Admin interface polish
 - Dashboard summary (new conversations, quotes created, quotes awaiting action, upcoming events); conversation viewer with tool trace; settings (branding, contact, policies, defaults, assistant toggle); member management.
@@ -197,4 +199,18 @@ Still open:
 - **UI polish:** the public quote pages are functional and minimal; the storefront experience is
   M6. Editing an existing draft in the admin UI goes through re-pricing only; a line editor comes
   later.
+
+## 12. M7 follow-ups (carried forward)
+
+- **Streaming:** the endpoint returns one JSON turn. Streaming needs the grounding validator to run
+  before any text reaches the browser, so it would buffer anyway; revisit with sentence-level checks.
+- **Bot protection:** per-IP and per-session rate limits only; add Turnstile before a public launch.
+- **Retention:** conversations expire after 30 days and are reset on next use; a sweeper that deletes
+  expired rows needs the same Cloudflare cron as the M5 sweepers.
+- **Live evals:** CI runs the deterministic scripted provider only. An on-demand suite against the
+  real model (never states unconfirmed prices, asks for the ZIP before promising delivery) is still to
+  be written, together with prompt tuning on real conversations.
+- **Staff view:** the conversation viewer with tool trace is M8 (`org.read` select policies exist).
+- **Policies tool:** `get_business_policies` and `request_human_followup` from the plan are not in
+  the M7 tool set; the assistant points to the policy pages and the team instead.
 

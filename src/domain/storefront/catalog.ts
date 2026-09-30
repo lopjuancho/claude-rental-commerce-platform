@@ -174,6 +174,8 @@ export interface Product {
   eventTypes: string[];
   images: Image[];
   defaultVariantId: string | null;
+  /** Bookable variants (default first), with the price the pricing engine starts from. */
+  variants: { id: string; name: string; isDefault: boolean; priceCents: number | null }[];
   row: ProductRow;
 }
 
@@ -305,6 +307,14 @@ export function assembleProducts(
         eventTypes: (p.ideal_event_types ?? []).filter((t) => t.trim() !== ""),
         images: imagesByProduct.get(p.id) ?? [],
         defaultVariantId: defaultVariant?.id ?? null,
+        variants: variants
+          .map((v) => ({
+            id: v.id ?? "",
+            name: v.name ?? "",
+            isDefault: v.is_default === true,
+            priceCents: v.effective_base_price_cents,
+          }))
+          .sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.id.localeCompare(b.id)),
         row: p,
       };
     });

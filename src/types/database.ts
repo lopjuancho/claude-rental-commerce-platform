@@ -4,6 +4,160 @@ export type Json = string | number | boolean | null | { [key: string]: Json | un
 export type Database = {
   public: {
     Tables: {
+      ai_actions: {
+        Row: {
+          conversation_id: string;
+          correlation_id: string | null;
+          created_at: string;
+          duration_ms: number | null;
+          error_code: string | null;
+          id: string;
+          model: string | null;
+          organization_id: string;
+          status: string;
+          tool_name: string;
+        };
+        Insert: {
+          conversation_id: string;
+          correlation_id?: string | null;
+          created_at?: string;
+          duration_ms?: number | null;
+          error_code?: string | null;
+          id?: string;
+          model?: string | null;
+          organization_id: string;
+          status: string;
+          tool_name: string;
+        };
+        Update: {
+          conversation_id?: string;
+          correlation_id?: string | null;
+          created_at?: string;
+          duration_ms?: number | null;
+          error_code?: string | null;
+          id?: string;
+          model?: string | null;
+          organization_id?: string;
+          status?: string;
+          tool_name?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ai_actions_organization_id_conversation_id_fkey";
+            columns: ["organization_id", "conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "ai_conversations";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      ai_conversations: {
+        Row: {
+          channel: string;
+          created_at: string;
+          expires_at: string;
+          id: string;
+          last_message_at: string | null;
+          message_count: number;
+          organization_id: string;
+          prompt_version: string | null;
+          quote_id: string | null;
+          session_hash: string;
+          state: NonNullable<Json>;
+          state_version: number;
+          token_usage: number;
+          tool_call_count: number;
+        };
+        Insert: {
+          channel?: string;
+          created_at?: string;
+          expires_at?: string;
+          id?: string;
+          last_message_at?: string | null;
+          message_count?: number;
+          organization_id: string;
+          prompt_version?: string | null;
+          quote_id?: string | null;
+          session_hash: string;
+          state?: NonNullable<Json>;
+          state_version?: number;
+          token_usage?: number;
+          tool_call_count?: number;
+        };
+        Update: {
+          channel?: string;
+          created_at?: string;
+          expires_at?: string;
+          id?: string;
+          last_message_at?: string | null;
+          message_count?: number;
+          organization_id?: string;
+          prompt_version?: string | null;
+          quote_id?: string | null;
+          session_hash?: string;
+          state?: NonNullable<Json>;
+          state_version?: number;
+          token_usage?: number;
+          tool_call_count?: number;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ai_conversations_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ai_conversations_organization_id_quote_id_fkey";
+            columns: ["organization_id", "quote_id"];
+            isOneToOne: false;
+            referencedRelation: "quotes";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      ai_messages: {
+        Row: {
+          content: string | null;
+          conversation_id: string;
+          created_at: string;
+          id: string;
+          organization_id: string;
+          role: string;
+          seq: number;
+          structured: Json | null;
+        };
+        Insert: {
+          content?: string | null;
+          conversation_id: string;
+          created_at?: string;
+          id?: string;
+          organization_id: string;
+          role: string;
+          seq: number;
+          structured?: Json | null;
+        };
+        Update: {
+          content?: string | null;
+          conversation_id?: string;
+          created_at?: string;
+          id?: string;
+          organization_id?: string;
+          role?: string;
+          seq?: number;
+          structured?: Json | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ai_messages_organization_id_conversation_id_fkey";
+            columns: ["organization_id", "conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "ai_conversations";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
       audit_logs: {
         Row: {
           action: string;
@@ -2983,6 +3137,51 @@ export type Database = {
     Functions: {
       accept_invitation: { Args: { p_token: string }; Returns: string };
       acquire_organization_gates: { Args: { p_organization_ids: string[] }; Returns: undefined };
+      ai_action_record: {
+        Args: {
+          p_conversation_id: string;
+          p_correlation_id: string;
+          p_duration_ms: number;
+          p_error_code: string;
+          p_model: string;
+          p_organization_id: string;
+          p_status: string;
+          p_tool_name: string;
+        };
+        Returns: undefined;
+      };
+      ai_conversation_append: {
+        Args: {
+          p_conversation_id: string;
+          p_expected_version: number;
+          p_messages: Json;
+          p_organization_id: string;
+          p_prompt_version: string;
+          p_quote_id: string;
+          p_state: Json;
+          p_tokens: number;
+          p_tool_calls: number;
+        };
+        Returns: number;
+      };
+      ai_conversation_history: {
+        Args: { p_conversation_id: string; p_limit: number; p_organization_id: string };
+        Returns: {
+          content: string;
+          role: string;
+          seq: number;
+          structured: Json;
+        }[];
+      };
+      ai_conversation_open: {
+        Args: { p_organization_id: string; p_session_hash: string };
+        Returns: {
+          id: string;
+          message_count: number;
+          state: Json;
+          state_version: number;
+        }[];
+      };
       cancel_booking_by_token: {
         Args: { p_organization_id: string; p_token_hash: string };
         Returns: string;

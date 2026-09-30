@@ -47,6 +47,11 @@ describe("service-role boundary", () => {
         "public_quote_view",
         "renew_booking_hold_by_token",
         "request_booking_by_token",
+        // assistant conversations and telemetry (M7, ADR 0017)
+        "ai_action_record",
+        "ai_conversation_append",
+        "ai_conversation_history",
+        "ai_conversation_open",
       ].sort(),
     );
     const tables = [...src.matchAll(/\.from\("([a-z_]+)"\)/g)].map((m) => m[1]);

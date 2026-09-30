@@ -72,6 +72,8 @@ jobs:
           E2E_START_SERVER: "1"
           E2E_TENANTS: "1"
           E2E_STORAGE: "1"
+          # Deterministic test-double model (never allowed in production); no OpenAI key in CI.
+          AI_PROVIDER: scripted
           APP_ENV: development
 
       - name: Cloudflare Workers bundle builds

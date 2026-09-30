@@ -43,8 +43,8 @@ organizations ─┬─ organization_domains
                ├─ customers ── events ── quotes ─┬─ quote_items
                │                                 ├─ quote_charges
                │                                 └─ booking_requests ── reservations (held → confirmed)
-               ├─ conversations ── conversation_messages
-               │                └─ ai_actions
+               ├─ ai_conversations ─┬─ ai_messages
+               │                    └─ ai_actions
                ├─ organization_counters         (quote numbers)
                └─ audit_logs
  global:  role_permissions
@@ -775,65 +775,29 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
 - `events` writes need `events.write`; `quotes` writes need `quotes.write`.
 - There are no deletes on customers or quotes (archive or cancel instead).
 
-## 10. Conversations & AI actions
+## 10. Conversations & AI actions (implemented M7: `supabase/migrations/20261002000100_m7_assistant.sql`, ADR 0017)
 
-```sql
-create type conversation_status as enum ('active','awaiting_customer','needs_human','converted','closed');
-create type message_role as enum ('user','assistant','tool','system_note');
+The storefront assistant's anonymous, tenant-scoped sessions and tool telemetry. **None of these tables grants a business capability**: every transactional step the assistant takes (customer, event, quote, booking request) goes through the existing M3–M5 services and lands in `customers` / `events` / `quotes` / `booking_requests` exactly as the M5 public quote form would (`quotes.source = 'assistant'`).
 
-create table conversations (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null references organizations(id) on delete cascade,
-  channel          text not null default 'web',     -- 'web' now; 'sms','admin' later
-  visitor_id       text,                            -- opaque signed cookie id for anonymous visitors
-  customer_id      uuid,
-  event_id         uuid,
-  status           conversation_status not null default 'active',
-  event_draft      jsonb not null default '{}'::jsonb,  -- Zod-validated slot state; promoted to events row
-  prompt_version   text,
-  message_count    integer not null default 0,
-  tool_call_count  integer not null default 0,
-  token_usage      integer not null default 0,
-  last_message_at  timestamptz,
-  created_at timestamptz not null default now(),
-  unique (organization_id, id),
-  foreign key (organization_id, customer_id) references customers(organization_id, id),
-  foreign key (organization_id, event_id)    references events(organization_id, id)
-);
+| Table | Purpose |
+|---|---|
+| `ai_conversations` | One per `(organization_id, session_hash)`. `session_hash` = SHA-256 of the opaque HttpOnly session cookie (the cookie is never stored). `state` (jsonb ≤ 32 KB) is the Zod-validated working state — draft contact, event input, staged items, and the current quote referenced by **token hash**, never the token. `state_version` drives optimistic concurrency. Counters (`message_count`, `tool_call_count`, `token_usage`), `prompt_version`, `quote_id` (composite FK to the same org's quote), `expires_at` (30 days, sliding). |
+| `ai_messages` | Ordered transcript (`seq`) with `role in ('user','assistant','tool')`. Assistant tool-call arguments are stored with contact details redacted; tool results are the JSON the model saw (no quote tokens). |
+| `ai_actions` | Troubleshooting telemetry per tool call: `tool_name`, `status in ('ok','manual_review','rejected_validation','rejected_policy','error','guardrail_violation')`, `error_code`, `duration_ms`, `correlation_id`, `model`. **No arguments, no results, no customer data.** |
 
-create table conversation_messages (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null,
-  conversation_id  uuid not null,
-  role             message_role not null,
-  content          text,
-  structured       jsonb,                   -- recommendations/questions payload for assistant turns
-  created_at       timestamptz not null default now(),
-  foreign key (organization_id, conversation_id) references conversations(organization_id, id) on delete cascade
-);
+Access:
 
-create table ai_actions (
-  id               uuid primary key default gen_random_uuid(),
-  organization_id  uuid not null,
-  conversation_id  uuid,
-  message_id       uuid,
-  tool_name        text not null,
-  tool_call_id     text,                    -- provider id; idempotency key with conversation_id
-  input            jsonb,
-  output           jsonb,
-  status           text not null check (status in ('ok','rejected_validation','rejected_policy','error','guardrail_violation')),
-  error_code       text,
-  duration_ms      integer,
-  model            text,
-  prompt_version   text,
-  created_at       timestamptz not null default now(),
-  unique (conversation_id, tool_call_id),
-  foreign key (organization_id, conversation_id) references conversations(organization_id, id) on delete cascade
-);
-create index on ai_actions (organization_id, created_at desc);
-```
+- RLS enabled **and forced** on all three; `anon` has no privileges; `authenticated` has no insert/update/delete and may only `select` rows of an organization where it holds `org.read` (the staff conversation viewer is M8). `organization_id` is immutable (`app.prevent_organization_change`).
+- The server reaches them only through four `security definer` functions that call `app.require_service_role()` and are executable by `service_role` only (listed in the trusted-gateway RPC allow-list, `tests/unit/service-role-inventory.test.ts`):
 
-`event_draft` is JSONB intentionally: it is transient, partially filled working state whose shape evolves with the assistant; it is promoted to a typed `events` row once `create_event` runs.
+| Function | Behaviour |
+|---|---|
+| `ai_conversation_open(org, session_hash)` | Requires an active organization; creates or locks the session's row; an expired conversation is reset (messages deleted, state cleared). Returns `id, state, state_version, message_count`. |
+| `ai_conversation_history(org, conversation, limit)` | The last `limit` (1–200) messages of that organization's conversation, oldest first. |
+| `ai_conversation_append(org, conversation, expected_version, state, quote_id, messages, tool_calls, tokens, prompt_version)` | Appends ≤ 40 messages and the new state atomically; `RA010 CONFLICT` if `state_version` moved (a concurrent turn in the same session). |
+| `ai_action_record(...)` | Inserts one `ai_actions` row. |
+
+The organization id passed to every function comes from the request host (server-resolved tenant), never from the browser or the model.
 
 ## 11. Audit log
 
@@ -973,4 +937,4 @@ create table import_rows (
 | `0005b_weather_blocks` | M3 |
 | `0006_service_areas_pricing` (service areas incl. mileage rules, pricing rules, tax jurisdictions/rates/component rules) | M4 |
 | `0007_customers_events_quotes` (+ counters, status trigger, booking requests) | M5 |
-| `0008_conversations_ai` | M7 |
+| `20261002000100_m7_assistant` (ai_conversations, ai_messages, ai_actions, service-role functions) | M7 |

@@ -1,5 +1,6 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { admin, type TestOrg } from "./db";
+import { rpc, SYSTEM } from "./availability";
 
 /**
  * Every table in the public schema must be classified here. The RLS coverage test fails when a
@@ -500,4 +501,29 @@ export const TENANT_TABLES: Record<
       );
     },
   },
+  // M7 assistant (ADR 0017): written only through the service-role functions.
+  ai_conversations: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
+  ai_messages: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
+  ai_actions: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
 };
+
+/** One conversation with a message and a telemetry row, created as the server would. */
+async function ensureAiConversation(org: TestOrg): Promise<void> {
+  const hash = createHash("sha256").update(`fixture:${org.id}`).digest("hex");
+  const [c] = await rpc<{ id: string; state_version: number }>(
+    SYSTEM,
+    "select * from public.ai_conversation_open($1, $2)",
+    [org.id, hash],
+  );
+  if (c!.state_version > 0) return;
+  await rpc(
+    SYSTEM,
+    "select public.ai_conversation_append($1, $2, 0, '{}'::jsonb, null, $3::jsonb, 0, 0, 'fixture')",
+    [org.id, c!.id, JSON.stringify([{ role: "user", content: "hello" }])],
+  );
+  await rpc(
+    SYSTEM,
+    "select public.ai_action_record($1, $2, 'search_products', 'ok', null, 1, null, null)",
+    [org.id, c!.id],
+  );
+}

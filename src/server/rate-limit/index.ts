@@ -15,6 +15,7 @@ const BINDINGS: Record<RateLimitPolicy, string> = {
   publicWrite: "PUBLIC_WRITE_RATE_LIMITER",
   publicQuery: "PUBLIC_QUERY_RATE_LIMITER",
   assistant: "ASSISTANT_RATE_LIMITER",
+  assistantSession: "ASSISTANT_SESSION_RATE_LIMITER",
 };
 
 const memoryLimiters = new Map<RateLimitPolicy, InMemoryRateLimiter>();

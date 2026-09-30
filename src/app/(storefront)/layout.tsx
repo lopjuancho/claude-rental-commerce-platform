@@ -1,7 +1,9 @@
 import { notFound } from "next/navigation";
 import type * as React from "react";
+import { AssistantWidget } from "@/components/storefront/assistant/assistant-widget";
 import { SiteFooter, SiteHeader, type SiteBrand } from "@/components/storefront/site-chrome";
 import { TenantTheme } from "@/components/tenant-theme";
+import { assistantEnabled } from "@/server/ai/config";
 import { brandAssetUrl, getShell } from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 
@@ -31,6 +33,7 @@ export default async function StorefrontLayout({ children }: { children: React.R
         {children}
       </main>
       <SiteFooter brand={brand} store={store} />
+      {assistantEnabled() ? <AssistantWidget businessName={tenant.name} /> : null}
     </TenantTheme>
   );
 }

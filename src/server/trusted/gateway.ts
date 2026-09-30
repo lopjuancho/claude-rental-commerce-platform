@@ -313,3 +313,127 @@ export function systemGateway(): TrustedGateway {
     },
   };
 }
+
+// ── M7 assistant conversations (ADR 0017 §6, §10) ──────────────────────────
+// Separate from TrustedGateway: these functions store conversation state and telemetry only and
+// grant no business capability. Every organization id comes from the server-resolved tenant.
+
+export interface AiConversation {
+  id: string;
+  state: unknown;
+  stateVersion: number;
+  messageCount: number;
+}
+
+export interface AiStoredMessage {
+  seq: number;
+  role: "user" | "assistant" | "tool";
+  content: string | null;
+  structured: Json | null;
+}
+
+export interface AiTurnUpdate {
+  state: Json;
+  quoteId: string | null;
+  messages: { role: "user" | "assistant" | "tool"; content: string | null; structured?: Json }[];
+  toolCalls: number;
+  tokens: number;
+  promptVersion: string;
+}
+
+export interface AiActionRecord {
+  conversationId: string;
+  toolName: string;
+  status: string;
+  errorCode: string | null;
+  durationMs: number;
+  correlationId: string | null;
+  model: string | null;
+}
+
+export interface AiConversationStore {
+  open(organizationId: string, sessionHash: string): Promise<AiConversation>;
+  history(
+    organizationId: string,
+    conversationId: string,
+    limit: number,
+  ): Promise<AiStoredMessage[]>;
+  /** Optimistic: fails with a GatewayError (RA010) when another turn changed the conversation. */
+  append(
+    organizationId: string,
+    conversationId: string,
+    expectedVersion: number,
+    update: AiTurnUpdate,
+  ): Promise<number>;
+  recordAction(organizationId: string, action: AiActionRecord): Promise<void>;
+}
+
+export function systemAiStore(): AiConversationStore {
+  const db = createSystemClient();
+  return {
+    async open(organizationId, sessionHash) {
+      const [row] = present(
+        unwrap(
+          await db.rpc("ai_conversation_open", {
+            p_organization_id: organizationId,
+            p_session_hash: sessionHash,
+          }),
+        ),
+        "ai_conversation_open",
+      );
+      const r = present(row, "ai_conversation_open");
+      return {
+        id: r.id,
+        state: r.state,
+        stateVersion: r.state_version,
+        messageCount: r.message_count,
+      };
+    },
+    async history(organizationId, conversationId, limit) {
+      const rows = unwrap(
+        await db.rpc("ai_conversation_history", {
+          p_organization_id: organizationId,
+          p_conversation_id: conversationId,
+          p_limit: limit,
+        }),
+      );
+      return (rows ?? []).map((r) => ({
+        seq: r.seq,
+        role: r.role as AiStoredMessage["role"],
+        content: r.content,
+        structured: r.structured,
+      }));
+    },
+    async append(organizationId, conversationId, expectedVersion, u) {
+      const version = unwrap(
+        await db.rpc("ai_conversation_append", {
+          p_organization_id: organizationId,
+          p_conversation_id: conversationId,
+          p_expected_version: expectedVersion,
+          p_state: u.state,
+          // Nullable in SQL; the generated type does not say so.
+          p_quote_id: u.quoteId as string,
+          p_messages: u.messages as unknown as Json,
+          p_tool_calls: u.toolCalls,
+          p_tokens: u.tokens,
+          p_prompt_version: u.promptVersion,
+        }),
+      );
+      return present(version, "ai_conversation_append");
+    },
+    async recordAction(organizationId, a) {
+      unwrap(
+        await db.rpc("ai_action_record", {
+          p_organization_id: organizationId,
+          p_conversation_id: a.conversationId,
+          p_tool_name: a.toolName,
+          p_status: a.status,
+          p_error_code: a.errorCode as string,
+          p_duration_ms: a.durationMs,
+          p_correlation_id: a.correlationId as string,
+          p_model: a.model as string,
+        }),
+      );
+    },
+  };
+}

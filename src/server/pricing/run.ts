@@ -108,7 +108,8 @@ async function mapped<T>(p: Promise<T>): Promise<T> {
   }
 }
 
-function gatewayCache(gateway: TrustedGateway, organizationId: string): DistanceCache {
+/** Distance cache reads/writes through the trusted gateway (shared with the service-area check). */
+export function gatewayCache(gateway: TrustedGateway, organizationId: string): DistanceCache {
   return {
     get: (key) => gateway.getCachedDistance(organizationId, key),
     put: (key, meters) => gateway.putCachedDistance(organizationId, key, meters),
