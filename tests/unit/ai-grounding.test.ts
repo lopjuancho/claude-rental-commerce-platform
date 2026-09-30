@@ -5,6 +5,7 @@ import {
   factSentences,
   type GroundingInput,
   parseQuantity,
+  timeSensitiveClaims,
 } from "@/domain/assistant/grounding";
 
 /**
@@ -656,5 +657,110 @@ describe("Codex round-4 bypasses: every asserted subject is resolved and support
     for (const form of ["quantity twenty-five", "quantity twenty five", "twenty-five units"]) {
       expect(twentyFive(form), form).toBe(true);
     }
+  });
+});
+
+describe("Codex round-5: a stated count never silently disappears (H1)", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const confirmed = (n: number) =>
+    Array.from({ length: n }, (_, i) => confirmedQ(`Q-${String(i + 1)}`));
+  const held = (n: number) => Array.from({ length: n }, (_, i) => heldQ(`Q-${String(i + 1)}`));
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+
+  it("two confirmed quotes: counts above ten are read and rejected", () => {
+    const two = confirmed(2);
+    for (const reply of [
+      "All eleven quotes are booked.",
+      "All twelve bookings are confirmed.",
+      "All twenty quotes are confirmed.",
+      "All thirteen quotes are booked.",
+      "All thirty quotes are booked.",
+      "All one hundred quotes are booked.",
+      "All 11 quotes are booked.",
+      "All 1,000 quotes are booked.",
+      "Twenty-one quotes are booked.",
+    ]) {
+      expect(run(reply, two), reply).toBe(false);
+    }
+    expect(run("All twenty-one quotes are held.", held(2))).toBe(false);
+  });
+
+  it("matching counts pass when every subject is supported", () => {
+    expect(run("All eleven quotes are booked.", confirmed(11))).toBe(true);
+    expect(run("All twelve bookings are confirmed.", confirmed(12))).toBe(true);
+    expect(run("All twenty quotes are confirmed.", confirmed(20))).toBe(true);
+    expect(run("All twenty-one quotes are held.", held(21))).toBe(true);
+    expect(run("All eleven quotes are booked.", confirmed(12))).toBe(false);
+  });
+
+  it("numeric and written counts give identical results", () => {
+    for (const [written, numeric] of [
+      ["eleven", "11"],
+      ["twelve", "12"],
+      ["thirteen", "13"],
+      ["twenty", "20"],
+      ["twenty-one", "21"],
+      ["thirty", "30"],
+      ["one hundred", "100"],
+      ["one thousand", "1,000"],
+    ] as const) {
+      for (const n of [2, 11, 12, 20, 21]) {
+        const ev = confirmed(n);
+        expect(run(`All ${written} quotes are booked.`, ev), `${written}/${String(n)}`).toBe(
+          run(`All ${numeric} quotes are booked.`, ev),
+        );
+      }
+    }
+  });
+
+  it("an unreadable count is rejected, not ignored", () => {
+    expect(run("All umpteen quotes are booked.", confirmed(2))).toBe(false);
+    expect(run("All several quotes are booked.", confirmed(2))).toBe(false);
+  });
+
+  it("singular and plural edge cases", () => {
+    const one = confirmed(1);
+    expect(run("One quote is booked.", one)).toBe(true);
+    expect(run("Your one booking is confirmed.", one)).toBe(true);
+    expect(run("All one quote is booked.", one)).toBe(false); // conservative
+    expect(run("Both two quotes are booked.", confirmed(2))).toBe(true);
+    expect(run("Both two quotes are booked.", confirmed(3))).toBe(false);
+    expect(run("Both three quotes are booked.", confirmed(3))).toBe(false); // conflicting counts
+    expect(run("All 2 quotes are booked.", confirmed(2))).toBe(true);
+    expect(run("All 2 quotes are booked.", confirmed(1))).toBe(false);
+    expect(run("One quote is booked.", confirmed(2))).toBe(true); // the latest single booking
+    // An article is not a count.
+    expect(run("Your items are held while a hold is active.", held(1))).toBe(true);
+  });
+});
+
+describe("availability wording of either polarity is time-sensitive (R3-M1, round 5)", () => {
+  it.each([
+    "Party Slide is unavailable.",
+    "Party Slide is not available.",
+    "Party Slide is available on Saturday.",
+    "Sorry, that date is sold out.",
+    "There is no availability that day.",
+    "Good news: availability is confirmed.",
+    "The castle is still open that afternoon.",
+    "It's out of stock for that time.",
+  ])("%s", (reply) => {
+    expect(timeSensitiveClaims(reply).availability).toBe(true);
+  });
+  it("plain replies are not", () => {
+    expect(timeSensitiveClaims("Here is what I found.").availability).toBe(false);
+    expect(timeSensitiveClaims("Your quote Q-1 is ready.").availability).toBe(false);
   });
 });

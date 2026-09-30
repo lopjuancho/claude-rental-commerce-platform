@@ -468,33 +468,66 @@ const PLURAL_QUOTE_NOUN = /\b(?:quotes|bookings|reservations|booking requests|ho
 /** Other plural wording ("both", "all of them", "they"): several subjects, which must be resolved. */
 const PLURAL_WORD =
   /\b(?:both|each of (?:them|these|those|the)|all of (?:them|these|those|the)|every one|each one|all (?!set\b)(?:\w+ )?(?:are|were|have|is)|are all|they|they're|them|these|those)\b/i;
-const COUNT_WORDS: Record<string, number> = {
-  both: 2,
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  nine: 9,
-  ten: 10,
-};
-/** How many quotes the wording says it is about ("both", "all three quotes", "2 bookings"). */
-function statedCount(text: string): number | null {
-  const m =
-    /\b(both|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\s+(?:of\s+(?:the|your|my|our|these|those)\s+)?(?:quotes|bookings|reservations|booking requests|holds)\b/i.exec(
-      text,
-    ) ??
-    /\ball\s+(two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\b/i.exec(text) ??
-    /\b(both)\b/i.exec(text);
-  if (!m) return null;
-  const w = (m[1] ?? "").toLowerCase();
-  return COUNT_WORDS[w] ?? (Number.isFinite(Number(w)) ? Number(w) : null);
+const SUBJECT_NOUN = "(?:quotes?|bookings?|reservations?|booking requests?|holds?)";
+/** A number (digits or words, through parseQuantity) right before a quote/booking noun. */
+const COUNTED_SUBJECT = new RegExp(
+  `(?<![\\w,-])(${QTY_NUMBER})\\s+(?:of\\s+(?:the|your|my|our|these|those)\\s+)?(?:[a-z]+\\s+)?${SUBJECT_NOUN}\\b`,
+  "gi",
+);
+/** "all eleven", "all 11" — a count after "all", with or without a noun. */
+const ALL_COUNT = new RegExp(`\\ball\\s+(${QTY_NUMBER})(?![\\w,])`, "gi");
+/** Words that may sit between "all"/"both" and the noun without being a count. */
+const NOT_A_COUNT =
+  /^(?:the|your|my|our|these|those|of|current|other|remaining|pending|confirmed|held|booked|active|requested|new|existing|previous|open)$/i;
+
+/**
+ * How many quotes the wording says it is about, through the SAME canonical number parser as
+ * quantities ("both", "all eleven quotes", "twenty-one bookings", "1,000 quotes"). A stated count
+ * never silently disappears: a count word the parser cannot read, counts that disagree ("both
+ * three quotes") or a plural quantifier with fewer than two ("all one quote") make the subject
+ * UNRESOLVED — and an unresolved plural claim is rejected.
+ */
+function statedCount(text: string): { count: number | null; unresolved: boolean } {
+  const counts: number[] = [];
+  let unresolved = false;
+  const take = (raw: string) => {
+    if (/^(?:a|an|and)$/i.test(raw.trim())) return; // an article is not a count ("a hold")
+    const n = parseQuantity(raw);
+    if (n === null) unresolved = true;
+    else counts.push(n);
+  };
+  for (const m of text.matchAll(COUNTED_SUBJECT)) take(m[1] ?? "");
+  for (const m of text.matchAll(ALL_COUNT)) take(m[1] ?? "");
+  const both = /\bboth\b/i.test(text);
+  if (both) counts.push(2);
+  // "all <word> quotes" where <word> is neither a count we read nor a plain determiner.
+  for (const m of text.matchAll(
+    new RegExp(`\\b(?:all|both)\\s+([a-z][a-z-]*)\\s+${SUBJECT_NOUN}\\b`, "gi"),
+  )) {
+    const w = m[1] ?? "";
+    if (!NOT_A_COUNT.test(w) && parseQuantity(w) === null) unresolved = true;
+  }
+  const distinct = [...new Set(counts)];
+  if (distinct.length > 1) unresolved = true;
+  const count = distinct[0] ?? null;
+  const quantifier = both || /\b(?:all|each of|every one of)\b/i.test(text);
+  if (quantifier && count !== null && count < 2) unresolved = true;
+  return { count, unresolved };
 }
-function pluralSubject(text: string): { plural: boolean; noun: boolean; count: number | null } {
+function pluralSubject(text: string): {
+  plural: boolean;
+  noun: boolean;
+  count: number | null;
+  unresolved: boolean;
+} {
   const noun = PLURAL_QUOTE_NOUN.test(text);
-  return { noun, plural: noun || PLURAL_WORD.test(text), count: statedCount(text) };
+  const { count, unresolved } = statedCount(text);
+  return {
+    noun,
+    plural: noun || PLURAL_WORD.test(text) || (count ?? 0) >= 2 || unresolved,
+    count,
+    unresolved,
+  };
 }
 
 // ── claim patterns ───────────────────────────────────────────────────────────
@@ -789,6 +822,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       const shape = pluralSubject(sentence);
       const bookingOf = (n: string) => latest(input, "booking", (b) => b.quoteNumber === n);
       const named = [...new Set(quoteNumbers.length ? quoteNumbers : earlier)];
+      if (shape.unresolved) return [null];
       if (named.length) {
         if (shape.count !== null && shape.count !== named.length) return [null];
         if (shape.noun && named.length < 2) return [null];
@@ -866,6 +900,14 @@ const BOOKING_STATUS_MENTION =
   /\b(?:book(?:ed|ing)|confirm(?:ed|ation)|reserv(?:ed|ation)|held|holds?|holding|on hold|declined|cancel(?:l)?ed|awaiting|pending|locked in|secured|all set)\b/i;
 
 /**
+ * Any availability statement, in either polarity ("available", "unavailable", "not available",
+ * "sold out", "no availability", "is open"…): an old "unavailable" is as stale as an old
+ * "available".
+ */
+const AVAILABILITY_MENTION =
+  /\b(?:available|unavailable|availability|in stock|out of stock|sold out|booked up|fully booked|bookable|(?:is|are|'s|'re|remains?|looks?)\s+(?:still\s+|currently\s+|now\s+|not\s+)?(?:open|free)\b|(?:that|the|your) (?:date|day|time) (?:works|doesn't work|does not work))/i;
+
+/**
  * Whether a stored reply states something TIME-SENSITIVE: a booking/hold status or availability.
  * Such prose was true when it passed grounding, not necessarily now, so it is never replayed as
  * stored (ADR 0017 §14): the server re-reads the current state or replaces it with a neutral line.
@@ -877,7 +919,8 @@ export function timeSensitiveClaims(reply: string): { booking: boolean; availabi
       BOOKING_STATUS_MENTION.test(text) ||
       new RegExp(BOOKED_CLAIM.source, "i").test(text) ||
       new RegExp(HOLD_CLAIM.source, "i").test(text),
-    availability: new RegExp(AVAILABLE_CLAIM.source, "i").test(text),
+    availability:
+      AVAILABILITY_MENTION.test(text) || new RegExp(AVAILABLE_CLAIM.source, "i").test(text),
   };
 }
 

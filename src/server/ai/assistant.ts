@@ -204,7 +204,7 @@ interface ReplayRefs {
 const BOOKING_RECHECK =
   "The booking status needs to be checked again. Ask me for the latest status and I'll look it up.";
 const AVAILABILITY_RECHECK =
-  "Availability can change, so it needs to be checked again. Ask me and I'll check it now.";
+  "Availability needs to be checked again: it can change at any time. Ask me and I'll check it now.";
 
 /**
  * What is stored for replay: quote links only sealed to this session (never in clear), and — when
@@ -274,8 +274,13 @@ async function replayOf(
     : [];
   const blocks: AssistantBlock[] = [];
   let staleBookingCard = false;
+  let staleAvailability = claims.availability;
   for (const b of opened) {
-    if (b.type !== "booking") blocks.push(b);
+    // An availability result is never replayed: it was true when checked, not necessarily now,
+    // and re-running it would need the complete original request. The customer is asked to
+    // check again instead — no old Available/Unavailable badge is shown as current.
+    if (b.type === "availability") staleAvailability = true;
+    else if (b.type !== "booking") blocks.push(b);
     else if (b.quoteRef)
       targets.set(b.quoteRef, { tokenHash: b.quoteRef, quoteNumber: b.quoteNumber });
     else staleBookingCard = true; // no reference to re-read: never shown as current
@@ -287,16 +292,17 @@ async function replayOf(
     const message = current.result.message;
     if (typeof message === "string") refreshed.push(message);
   }
+  const recheck = staleAvailability ? [AVAILABILITY_RECHECK] : [];
   let reply = r.reply;
   if (refreshed.length) {
-    reply = [
-      `Here is where your request stands now. ${refreshed.join(" ")}`,
-      ...(claims.availability ? [AVAILABILITY_RECHECK] : []),
-    ].join(" ");
+    reply = [`Here is where your request stands now. ${refreshed.join(" ")}`, ...recheck].join(" ");
   } else if (claims.booking || staleBookingCard) {
-    reply = [BOOKING_RECHECK, ...(claims.availability ? [AVAILABILITY_RECHECK] : [])].join(" ");
+    reply = [BOOKING_RECHECK, ...recheck].join(" ");
   } else if (claims.availability) {
     reply = AVAILABILITY_RECHECK;
+  } else if (staleAvailability) {
+    // Prose without any availability statement keeps its words; the dropped card is explained.
+    reply = [r.reply, AVAILABILITY_RECHECK].join(" ");
   }
   return {
     status: r.status === "ok" ? "ok" : "error",

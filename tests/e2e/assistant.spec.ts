@@ -900,3 +900,27 @@ test("HTTP responses never carry a quote token hash or session hash, live or rep
     expect(body).not.toMatch(/quoteRef|sealedLink|"refs"/);
   }
 });
+
+test("a replayed availability answer shows no old Available/Unavailable card (R3-M1)", async ({
+  request,
+}) => {
+  const headers = { host: `acme.localhost:${port}`, "cf-connecting-ip": testIp() };
+  await request.get(`http://localhost:${port}/`, { headers });
+  const say = async (message: string, requestId: string) =>
+    (await (
+      await request.post(`http://localhost:${port}/api/assistant`, {
+        headers: { ...headers, "content-type": "application/json" },
+        data: JSON.stringify({ message, requestId }),
+      })
+    ).json()) as { reply: string; replayed?: boolean; blocks: { type: string }[] };
+  await say("Do you have a water slide?", randomUUID().replace(/-/g, ""));
+  const key = randomUUID().replace(/-/g, "");
+  const question = `Is it available on ${randomSaturday()} from 12:00 to 16:00?`;
+  const first = await say(question, key);
+  expect(first.blocks.some((b) => b.type === "availability")).toBe(true);
+  const replay = await say(question, key); // the first response was "lost"
+  expect(replay.replayed).toBe(true);
+  expect(replay.blocks.some((b) => b.type === "availability")).toBe(false);
+  expect(replay.reply).toMatch(/Availability needs to be checked again/);
+  expect(replay.reply).not.toMatch(/is available|not available|unavailable/i);
+});

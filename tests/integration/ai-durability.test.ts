@@ -12,7 +12,7 @@ import type { AiConversationStore } from "@/server/trusted/gateway";
 import { generateVisitorToken } from "@/server/visitor";
 import { makeProduct, rpc } from "./support/availability";
 import { pgAiStore } from "./support/ai";
-import { admin, createOrg, type TestOrg } from "./support/db";
+import { admin, adminGated, createOrg, type TestOrg } from "./support/db";
 import { fakeProvider, pgGateway } from "./support/pricing";
 import { describeRest } from "./support/rest";
 
@@ -1427,7 +1427,7 @@ describeRest("time-sensitive prose is revalidated on replay (R3-M1, round 4)", (
       [await hashSessionToken(c.session), key],
     );
     const replay = await c.turn("hi", deps(model([{ fail: true }])), key);
-    expect(replay.reply).toMatch(/^Availability can change/);
+    expect(replay.reply).toMatch(/^Availability needs to be checked again/);
     // A reply with nothing time-sensitive replays as it was.
     const other = randomUUID();
     await c.turn("thanks", deps(model([{ say: "You're welcome!" }])), other);
@@ -1464,4 +1464,116 @@ describeRest("time-sensitive prose is revalidated on replay (R3-M1, round 4)", (
       expect(await bookingsFor(c.email)).toBe(1);
     },
   );
+});
+
+// ── round 5 (Codex review of c319024) ───────────────────────────────────────
+
+describeRest("availability is never replayed as current (R3-M1, round 5)", () => {
+  /** A pooled product of its own (its inventory changes per test), named "Party Slide". */
+  async function partySlide(pooled: number) {
+    const p = await makeProduct(org, { pooled });
+    const slug = `party-slide-${randomUUID().slice(0, 6)}`;
+    await admin("update public.products set slug = $2, name = 'Party Slide' where id = $1", [
+      p.productId,
+      slug,
+    ]);
+    const setPooled = (n: number) =>
+      adminGated(org.id, "update public.product_variants set pooled_quantity = $2 where id = $1", [
+        p.variantId,
+        n,
+      ]);
+    return { slug, setPooled };
+  }
+  const check = (slug: string, date: string, quantity: number) =>
+    tool("check_availability", {
+      productSlug: slug,
+      quantity,
+      date,
+      startTime: "12:00",
+      endTime: "16:00",
+    });
+  const RECHECK = /Availability needs to be checked again/;
+
+  it("A. available → inventory becomes unavailable → replay: no old Available prose or card", async () => {
+    const c = conversation();
+    const ps = await partySlide(1);
+    const key = randomUUID();
+    const said = "Party Slide is available on that date.";
+    const first = await c.turn(
+      "is it free?",
+      deps(model([check(ps.slug, c.date, 1), { say: said }])),
+      key,
+    );
+    expect(first.reply).toBe(said);
+    expect(first.blocks.find((b) => b.type === "availability")).toMatchObject({
+      status: "available",
+    });
+    await ps.setPooled(0);
+    const replay = await c.turn("is it free?", deps(model([{ fail: true }])), key);
+    expect(replay.replayed).toBe(true);
+    expect(replay.reply).not.toContain(said);
+    expect(replay.reply).toMatch(RECHECK);
+    expect(replay.blocks.find((b) => b.type === "availability")).toBeUndefined();
+  });
+
+  it("B. unavailable → inventory becomes available → replay: no old Unavailable prose or card", async () => {
+    const c = conversation();
+    const ps = await partySlide(1);
+    const key = randomUUID();
+    const said = "Party Slide is not available for two on that date.";
+    const first = await c.turn(
+      "two of them?",
+      deps(model([check(ps.slug, c.date, 2), { say: said }])),
+      key,
+    );
+    expect(first.reply).toBe(said);
+    expect(first.blocks.find((b) => b.type === "availability")).toMatchObject({
+      status: "unavailable",
+    });
+    await ps.setPooled(5);
+    const replay = await c.turn("two of them?", deps(model([{ fail: true }])), key);
+    expect(replay.reply).not.toContain(said);
+    expect(replay.reply).not.toMatch(/\bnot available\b|\bunavailable\b/i);
+    expect(replay.reply).toMatch(RECHECK);
+    expect(replay.blocks.find((b) => b.type === "availability")).toBeUndefined();
+  });
+
+  it("E. an availability card with prose that states nothing: the card is still not shown as current", async () => {
+    const c = conversation();
+    const ps = await partySlide(1);
+    const key = randomUUID();
+    await c.turn(
+      "check it",
+      deps(model([check(ps.slug, c.date, 1), { say: "Here is what I found." }])),
+      key,
+    );
+    const replay = await c.turn("check it", deps(model([{ fail: true }])), key);
+    expect(replay.blocks.find((b) => b.type === "availability")).toBeUndefined();
+    expect(replay.reply).toBe(
+      "Here is what I found. Availability needs to be checked again: it can change at any time. Ask me and I'll check it now.",
+    );
+  });
+
+  it("F. availability prose with no card (live and stored): never repeated as current", async () => {
+    const c = conversation();
+    const key = randomUUID();
+    const said = "Party Slide is not available on that date.";
+    const first = await c.turn("any slides?", deps(model([{ say: said }])), key);
+    expect(first.reply).toBe(said);
+    expect(first.blocks).toEqual([]);
+    const replay = await c.turn("any slides?", deps(model([{ fail: true }])), key);
+    expect(replay.reply).not.toContain(said);
+    expect(replay.reply).toMatch(RECHECK);
+    // Stored as before this change: "unavailable" wording only.
+    const legacy = randomUUID();
+    await c.turn("hello", deps(model([{ say: "Hello!" }])), legacy);
+    await admin(
+      `update public.ai_turns t set response = jsonb_build_object('status','ok','reply','Party Slide is unavailable.','blocks','[]'::jsonb)
+       from public.ai_conversations c where c.id = t.conversation_id and c.session_hash = $1 and t.request_key = $2`,
+      [await hashSessionToken(c.session), legacy],
+    );
+    const legacyReplay = await c.turn("hello", deps(model([{ fail: true }])), legacy);
+    expect(legacyReplay.reply).toMatch(RECHECK);
+    expect(legacyReplay.reply).not.toMatch(/unavailable/);
+  });
 });

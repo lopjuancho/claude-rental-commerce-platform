@@ -231,6 +231,19 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       its private link (`scripts/ai-smoke-db.mjs`), regression-tested against two tenants sharing
       a quote number.
 
+16. **Round 5 of the review (Codex, c319024).**
+    - **Stated counts never disappear (H1):** quote/booking counts go through the same canonical
+      number parser as quantities ("eleven", "twenty-one", "one hundred", "11", "1,000", "both").
+      A stated count must equal the resolved subject set; a count the parser cannot read ("all
+      umpteen quotes"), counts that disagree ("both three quotes") or a plural quantifier with
+      fewer than two ("all one quote") leave the subject unresolved, and the claim is rejected.
+    - **Availability is never replayed as current (R3-M1):** availability wording of either
+      polarity ("available", "unavailable", "not available", "sold out", "no availability", "is
+      open"…) marks a stored reply time-sensitive, and availability cards are never replayed.
+      A replay does not re-run the check (the complete original request is not stored for it);
+      it says "Availability needs to be checked again…" instead, so no old Available or
+      Unavailable badge or sentence is presented as the current state.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,
