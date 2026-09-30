@@ -175,6 +175,27 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
     - **No false "saved" (N3):** if the turn cannot be saved, the conversation is released with
       only what is durable and the customer is told to resend — never that staging was saved.
 
+14. **Round 3 of the review (Codex, efb4fca).**
+    - **Every assertion, its own subject (H1):** conversational fillers ("no worries", "no
+      problem", "not a problem"…) are neutralised before negation is judged, so they never make a
+      following claim look negated. A server booking message is exempt only where the reply
+      attributes it to that message's own quote (nearest quote number before it, or any in its
+      sentence). A sentence naming several quotes needs the claimed state for EACH of them (the
+      same already held for products). Quantities are also recognised in words ("five hundred
+      units", "twenty-five of them", "a dozen", "1,000 units").
+    - **Time-sensitive presentation is refreshed (R3-M1):** a booking request's identity is
+      durable, but its state is always re-read when shown again. A replayed reply, a replayed
+      journal entry and a recovered request all build their booking card and text from the
+      database now (`currentBooking`): a live hold with its real end time ("held until 3:45 PM"),
+      an ended hold, declined, cancelled or confirmed — never the stored "held for 15 minutes".
+      Stored booking cards carry the quote's token hash for this (server-side only; stripped from
+      every response).
+    - **New Chat is a confirmed replacement (R3-M2):** the widget enters a resetting state;
+      nothing can be sent until the DELETE has returned the new session; a failed DELETE is shown
+      with "Retry new chat" and nothing is sent to the old session meanwhile; repeated clicks do
+      nothing while one replacement is in flight; every await (bootstrap GET, POST, response)
+      re-checks the chat generation before it continues.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

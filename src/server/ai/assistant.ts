@@ -43,7 +43,7 @@ import type { LlmMessage, LlmProvider, LlmToolSpec } from "./provider";
 import { strictToolJsonSchema, TOOL_DESCRIPTIONS, TOOL_NAMES } from "./schemas";
 import { hashSessionToken } from "./session";
 import { logAssistantError, recordToolAction } from "./telemetry";
-import { adoptPageQuote, executeTool } from "./tools";
+import { adoptPageQuote, currentBooking, executeTool } from "./tools";
 
 /**
  * One assistant turn (ADR 0017): claim the conversation, re-apply committed mutations, let the
@@ -204,18 +204,45 @@ async function storable(result: TurnResult, sealer: Sealer): Promise<Json> {
   } as unknown as Json;
 }
 
-async function replayOf(stored: unknown, sealer: Sealer): Promise<TurnResult> {
+/**
+ * A completed turn replayed for the same request (lost response). Its quote links are reopened
+ * for this session; its booking outcomes are time-sensitive, so they are re-read from the database
+ * (current status, real hold end) and the reply is rebuilt from them — an old "held for 15
+ * minutes" is never repeated after time has passed.
+ */
+async function replayOf(
+  stored: unknown,
+  sealer: Sealer,
+  env: { tenant: ResolvedTenant; deps: PublicDeps; now: () => Date },
+): Promise<TurnResult> {
   const r = stored as Partial<TurnResult> | null;
   if (!r || typeof r.reply !== "string") {
     return { status: "error", errorCode: "REPLAY", reply: UNAVAILABLE, blocks: [], replayed: true };
   }
+  const opened = Array.isArray(r.blocks)
+    ? await Promise.all(r.blocks.map((b) => openBlock(b, sealer)))
+    : [];
+  const refreshed: string[] = [];
+  const blocks: AssistantBlock[] = [];
+  for (const b of opened) {
+    if (b.type === "booking" && b.quoteRef) {
+      const current = await currentBooking(env, {
+        tokenHash: b.quoteRef,
+        quoteNumber: b.quoteNumber,
+      });
+      blocks.push(...current.blocks);
+      const message = current.result.message;
+      if (typeof message === "string") refreshed.push(message);
+    } else {
+      blocks.push(b);
+    }
+  }
   return {
     status: r.status === "ok" ? "ok" : "error",
-    reply: r.reply,
-    // A lost response is replayed with a working quote link (unsealed for this same session).
-    blocks: Array.isArray(r.blocks)
-      ? await Promise.all(r.blocks.map((b) => openBlock(b, sealer)))
-      : [],
+    reply: refreshed.length
+      ? `Here is where your request stands now. ${refreshed.join(" ")}`
+      : r.reply,
+    blocks,
     ...(r.errorCode ? { errorCode: r.errorCode } : {}),
     replayed: true,
   };
@@ -266,7 +293,13 @@ async function turn(
     "begin",
   );
   const sealer = sessionSealer(input.sessionToken, org);
-  if (claim.outcome === "replay") return replayOf(claim.response, sealer);
+  if (claim.outcome === "replay") {
+    return replayOf(claim.response, sealer, {
+      tenant: input.tenant,
+      deps: deps.publicDeps,
+      now,
+    });
+  }
   if (claim.outcome === "in_progress" || claim.outcome === "busy" || !claim.turnId) {
     return {
       status: "error",

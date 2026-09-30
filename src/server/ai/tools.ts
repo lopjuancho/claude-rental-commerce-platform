@@ -1178,6 +1178,79 @@ function clockText(ctx: ToolContext, iso: string) {
   }).format(new Date(iso));
 }
 
+/**
+ * The booking's CURRENT state, from the database (ADR 0017 §14): used whenever a booking outcome
+ * is shown again — a replayed reply, a replayed journal entry, a recovered request. The request's
+ * identity is durable; its hold is time-sensitive, so its status and hold are always re-read:
+ * a live hold is shown with its real end time, never an old "held for N minutes".
+ */
+export async function currentBooking(
+  env: { tenant: ToolContext["tenant"]; deps: ToolContext["deps"]; now: () => Date },
+  target: { tokenHash: string; quoteNumber: string },
+): Promise<ToolOutcome> {
+  const view = await getPublicQuote(env.tenant, { tokenHash: target.tokenHash }, env.deps);
+  const b = view?.booking ?? null;
+  const qn = target.quoteNumber;
+  const at = env.now().toISOString();
+  const outcome = (
+    status: "holding" | "awaiting_review" | "confirmed" | "declined" | "cancelled" | "none",
+    message: string,
+    holdExpiresAt: string | null,
+    evidenceStatus: "holding" | "confirmed" | "refused",
+  ): ToolOutcome => ({
+    status: status === "holding" || status === "confirmed" ? "ok" : "rejected_policy",
+    result: { booking: status, quoteNumber: qn, holdExpiresAt, message, current: true },
+    blocks: [
+      {
+        type: "booking",
+        status,
+        quoteNumber: qn,
+        holdExpiresAt,
+        message,
+        quoteRef: target.tokenHash,
+      },
+    ],
+    evidence: [
+      { kind: "booking", at, quoteNumber: qn, status: evidenceStatus, holdExpiresAt, message },
+    ],
+  });
+  if (!b) {
+    return outcome(
+      "none",
+      `There is no booking request for quote ${qn} right now.`,
+      null,
+      "refused",
+    );
+  }
+  if (b.status === "confirmed")
+    return outcome("confirmed", BOOKING_TEXT.confirmed, null, "confirmed");
+  if (b.status === "declined") {
+    return outcome("declined", "The team declined this booking request.", null, "refused");
+  }
+  if (b.status === "cancelled") {
+    return outcome("cancelled", "This booking request was cancelled.", null, "refused");
+  }
+  if (b.holdActive && b.holdExpiresAt && Date.parse(b.holdExpiresAt) > env.now().getTime()) {
+    const clock = new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: env.tenant.timezone,
+    }).format(new Date(b.holdExpiresAt));
+    return outcome(
+      "holding",
+      `Your booking request for quote ${qn} is pending; the items are held until ${clock}.`,
+      b.holdExpiresAt,
+      "holding",
+    );
+  }
+  return outcome(
+    "awaiting_review",
+    `Your booking request for quote ${qn} was received; the hold has ended, and the team will review the request.`,
+    null,
+    "refused",
+  );
+}
+
 function committedBooking(
   ctx: ToolContext,
   quote: { tokenHash: string; quoteNumber: string },
@@ -1251,6 +1324,7 @@ function committedBooking(
           quoteNumber: quote.quoteNumber,
           holdExpiresAt,
           message,
+          quoteRef: quote.tokenHash,
         },
       ],
       evidence: [
@@ -1321,7 +1395,14 @@ async function requestBookingTool(
     errorCode: status.toUpperCase(),
     result: { booking: status, quoteNumber, message: BOOKING_TEXT[status], ...extra },
     blocks: [
-      { type: "booking", status, quoteNumber, holdExpiresAt: null, message: BOOKING_TEXT[status] },
+      {
+        type: "booking",
+        status,
+        quoteNumber,
+        holdExpiresAt: null,
+        message: BOOKING_TEXT[status],
+        quoteRef: quote.tokenHash,
+      },
     ],
     evidence: [
       {
@@ -1340,7 +1421,16 @@ async function requestBookingTool(
       status: "rejected_policy",
       errorCode: "HOLDING",
       result: { booking: "holding", quoteNumber, holdExpiresAt: until, message },
-      blocks: [{ type: "booking", status: "holding", quoteNumber, holdExpiresAt: until, message }],
+      blocks: [
+        {
+          type: "booking",
+          status: "holding",
+          quoteNumber,
+          holdExpiresAt: until,
+          message,
+          quoteRef: quote.tokenHash,
+        },
+      ],
       evidence: [
         {
           kind: "booking",
@@ -1375,9 +1465,18 @@ async function requestBookingTool(
           "booking",
         );
         if (!existing) return null;
-        const now = await viewOf(ctx, target.tokenHash);
-        return now ? committedBooking(ctx, target, now, existing.holdExpiresAt) : null;
+        // Recovered identity; CURRENT state (status and hold as they are now, not as stored).
+        return {
+          ref: {
+            type: "booking",
+            tokenHash: target.tokenHash,
+            quoteNumber: target.quoteNumber,
+            holdExpiresAt: existing.holdExpiresAt ?? "",
+          },
+          outcome: await currentBooking(ctx, target),
+        };
       },
+      refresh: (raw) => currentBooking(ctx, recordedTarget(raw)),
       perform: async (raw, businessKey) => {
         const target = recordedTarget(raw);
         const view = await viewOf(ctx, target.tokenHash);

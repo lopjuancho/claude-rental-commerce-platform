@@ -34,23 +34,23 @@ const db = new pg.Client({ connectionString: env.AI_SMOKE_DATABASE_URL });
 const cookies = new Map();
 const results = [];
 
-function remember(res) {
+function remember(res, jar = cookies) {
   for (const line of res.headers.getSetCookie?.() ?? []) {
     const [pair] = line.split(";");
     const i = pair.indexOf("=");
-    cookies.set(pair.slice(0, i), pair.slice(i + 1));
+    jar.set(pair.slice(0, i), pair.slice(i + 1));
   }
 }
-const cookieHeader = () => [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+const cookieHeader = (jar = cookies) => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
 const newId = () => randomUUID().replace(/-/g, "");
 
-async function turn(message, { requestId = newId(), page } = {}) {
+async function turn(message, { requestId = newId(), page, jar = cookies } = {}) {
   const res = await fetch(new URL("/api/assistant", base), {
     method: "POST",
-    headers: { "content-type": "application/json", cookie: cookieHeader() },
+    headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
     body: JSON.stringify({ message, requestId, ...(page ? { page } : {}) }),
   });
-  remember(res);
+  remember(res, jar);
   const body = await res.json().catch(() => ({}));
   return { http: res.status, requestId, blocks: [], ...body };
 }
@@ -179,6 +179,40 @@ async function main() {
     q3 !== null && q3.quoteNumber !== q2?.quoteNumber,
   );
 
+  // 8. Explicit quote selection with a GENUINELY different quote: quote B is made in a separate
+  //    browser session, so this chat's active quote stays A (q3). Viewing B and asking to book
+  //    must not book either until the customer says which.
+  const jarB = new Map();
+  remember(await fetch(base), jarB);
+  await turn(
+    `My name is Other Session, email ai-smoke-b-${randomUUID().slice(0, 8)}@example.test.`,
+    { jar: jarB },
+  );
+  const bQuote = await turn(
+    `Please create a quote for one ${name} on ${saturday(11)} from 12:00 to 16:00, pickup.`,
+    { jar: jarB },
+  );
+  const qB = one(bQuote, "quote");
+  const distinct =
+    Boolean(q3?.quoteNumber && qB?.quoteNumber && qB?.url && q3?.url) &&
+    qB.quoteNumber !== q3.quoteNumber &&
+    qB.url !== q3.url;
+  check("two distinct quotes: A active in this chat, B from another session", distinct);
+  if (distinct) {
+    const ambiguous = await turn("Please request the booking.", {
+      page: { kind: "quote", token: qB.url.replace("/q/", "") },
+    });
+    const both = await db.query(
+      "select count(*)::int n from public.booking_requests b join public.quotes q on q.id = b.quote_id where q.quote_number = any($1) and q.source = 'assistant'",
+      [[q3.quoteNumber, qB.quoteNumber]],
+    );
+    check(
+      "viewing B while A is active: no booking for either until the customer chooses",
+      blocks(ambiguous, "booking").every((x) => x.status !== "hold_placed") && both.rows[0].n === 0,
+      `bookings: ${String(both.rows[0].n)}`,
+    );
+  }
+
   // 9. booking request → pending hold, never confirmed.
   const booking = await turn(`Please request the booking for quote ${q3?.quoteNumber ?? ""}.`);
   const b = one(booking, "booking");
@@ -188,23 +222,6 @@ async function main() {
     b?.status ?? booking.errorCode ?? "",
   );
   check("the booking reply never claims confirmed/paid", !FALSE_CLAIM.test(booking.reply ?? ""));
-
-  // 8. explicit quote selection: viewing a different quote than the chat's.
-  const other = await turn(
-    `Please create a separate quote for one ${name} on ${saturday(11)} from 12:00 to 16:00, pickup.`,
-  );
-  const qOther = one(other, "quote");
-  if (qOther?.url) {
-    const ambiguous = await turn("Please request the booking.", {
-      page: { kind: "quote", token: qOther.url.replace("/q/", "") },
-    });
-    check(
-      "viewing another quote: the assistant asks which quote (nothing booked silently)",
-      blocks(ambiguous, "booking").every((x) => x.status !== "hold_placed"),
-    );
-  } else {
-    check("second quote for explicit selection", false, "no quote card");
-  }
 
   // 10. expired and stale quotes (made so in the database) are re-quoted, not requested.
   const expiredQuote = await turn(
@@ -274,8 +291,8 @@ async function main() {
     email,
     "select count(*)::int n from public.quotes q join public.customers c on c.id = q.customer_id where c.email = $1",
   );
-  // q, q2 (add item), q3 (new date), other, expired, stale = 6 quotes, no duplicates.
-  check("database: exactly one quote per request (6)", quotes === 6, String(quotes));
+  // q, q2 (add item), q3 (new date), expired, stale = 5 quotes for this customer, no duplicates.
+  check("database: exactly one quote per request (5)", quotes === 5, String(quotes));
   const holds = await countFor(
     email,
     "select count(*)::int n from public.booking_requests b join public.quotes q on q.id = b.quote_id join public.customers c on c.id = q.customer_id where c.email = $1",

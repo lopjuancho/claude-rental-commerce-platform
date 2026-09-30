@@ -165,6 +165,11 @@ export interface MutationSpec {
    * under the business key (authoritatively, from the database), or null if nothing does.
    */
   recover: (pending: Record<string, unknown>, businessKey: string) => Promise<Committed | null>;
+  /**
+   * For time-sensitive outcomes (a booking hold): the CURRENT outcome to show when a committed
+   * entry is replayed, instead of the stored one.
+   */
+  refresh?: (pending: Record<string, unknown>) => Promise<ToolOutcome>;
   /** Performs the business write with the recorded input, under the business idempotency key. */
   perform: (pending: Record<string, unknown>, businessKey: string) => Promise<Committed>;
 }

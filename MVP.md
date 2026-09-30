@@ -229,3 +229,7 @@ Still open:
   links on replay, no false "saved". ADR 0017 §13. The live smoke script now fails on any missing
   tool/card/result and verifies tool calls and duplicates in the database
   (`AI_SMOKE_DATABASE_URL`); it has not been run.
+- **Review round 3 (Codex, efb4fca):** per-subject grounding (fillers, quote-scoped server
+  messages, multi-quote claims, written quantities); booking state re-read on every replay and
+  recovery; New Chat as a confirmed session replacement; the smoke script's different-quote case
+  now uses a quote from a separate session and checks both have no booking. ADR 0017 §14.

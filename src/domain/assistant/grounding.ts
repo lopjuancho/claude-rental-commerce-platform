@@ -340,6 +340,17 @@ function clauseAt(sentence: string, index: number): { text: string; offset: numb
  * claim, or a condition opening its clause. A leading "No worries" or "No problem" several words
  * earlier negates nothing.
  */
+/**
+ * Conversational fillers that contain a negator but negate nothing ("No worries, your booking is
+ * confirmed"). They are blanked out (same length, so positions stay valid) before any claim is
+ * evaluated, so they can never make a following claim look negated.
+ */
+const FILLER =
+  /\b(?:no worries|no worry|not to worry|no need to worry|nothing to worry about|no problem|no problems|not a problem|no probs?|no prob|no stress|no rush|no doubt|no sweat|never mind|no matter)\b/gi;
+export function blankFillers(text: string): string {
+  return text.replace(FILLER, (m) => " ".repeat(m.length));
+}
+
 function negated(sentence: string, index: number): boolean {
   const { text, offset } = clauseAt(sentence, index);
   const before = text.slice(0, offset);
@@ -385,10 +396,21 @@ function withinWindow(t: number, start: number, end: number): boolean {
 /** Quantities of the item itself ("500 units", "3 of them", "quantity 2"), not guest counts. */
 function quantityMentions(text: string): number[] {
   const out: number[] = [];
+  // Written numbers too ("five hundred units", "twenty-five of them", "a dozen").
   for (const m of text.matchAll(
-    /\b(\d{1,6})\s*(?:units?|of them|pieces?|pcs|items?|sets?|copies|×|x)(?![a-z])/gi,
+    new RegExp(
+      `\\b(${NUMBER_WORD}(?:[\\s-]+${NUMBER_WORD})*)\\s+(?:units?|of them|pieces?|items?|sets?|copies)(?![a-z])`,
+      "gi",
+    ),
   )) {
-    out.push(Number(m[1]));
+    const n = wordsToNumber(m[1] ?? "");
+    if (n !== null && n > 0) out.push(n);
+  }
+  for (let n = (text.match(/\b(?:a|one) dozen\b/gi) ?? []).length; n > 0; n--) out.push(12);
+  for (const m of text.matchAll(
+    /\b(\d{1,3}(?:,\d{3})+|\d{1,6})\s*(?:units?|of them|pieces?|pcs|items?|sets?|copies|×|x)(?![a-z])/gi,
+  )) {
+    out.push(Number((m[1] ?? "").replace(/,/g, "")));
   }
   for (const m of text.matchAll(/\b(?:quantity|qty)\s*(?:of\s*)?:?\s*(\d{1,6})\b/gi)) {
     out.push(Number(m[1]));
@@ -409,7 +431,7 @@ const CATALOG_AVAILABLE =
 const GUARANTEE_CLAIM =
   /\b(?:guarantee[ds]?|guaranteeing|promise[ds]?|100% (?:available|sure)|definitely yours)\b/gi;
 const BOOKED_CLAIM =
-  /\b(?:(?:is|are|'s|'re|been|be|now|all|got|get)\s+(?:now\s+|officially\s+|fully\s+|already\s+)?(?:booked|confirmed|reserved|secured|locked in|finali[sz]ed|all set)|you(?:'re| are) (?:all )?set|(?:i|we)(?:'ve| have)?\s+(?:booked|reserved|secured|locked in|locked)|(?:i|we)(?:'ve| have)? confirmed (?:your|the) (?:booking|reservation|date|event|rental|order)|(?:booking|reservation|order|rental) (?:is |has been )?(?:complete|completed|done|confirmed|finali[sz]ed|secured|locked)|(?:date|slot|spot|event) (?:is |has been )(?:reserved|secured|saved|locked|booked|confirmed)|reserved for you|it'?s (?:all )?yours|(?:booked|reserved|secured) (?:for|on|it|them|everything))\b/gi;
+  /\b(?:(?:is|are|'s|'re|been|be|now|all|got|get)\s+(?:(?:now|officially|fully|already|both|all|each|also|definitely)\s+){0,2}(?:booked|confirmed|reserved|secured|locked in|finali[sz]ed|all set)|you(?:'re| are) (?:all )?set|(?:i|we)(?:'ve| have)?\s+(?:booked|reserved|secured|locked in|locked)|(?:i|we)(?:'ve| have)? confirmed (?:your|the) (?:booking|reservation|date|event|rental|order)|(?:booking|reservation|order|rental) (?:is |has been )?(?:complete|completed|done|confirmed|finali[sz]ed|secured|locked)|(?:date|slot|spot|event) (?:is |has been )(?:reserved|secured|saved|locked|booked|confirmed)|reserved for you|it'?s (?:all )?yours|(?:booked|reserved|secured) (?:for|on|it|them|everything))\b/gi;
 const HOLD_CLAIM =
   /\b(?:(?:is|are|being|been|now|temporarily)\s+(?:temporarily\s+)?(?:held|on hold)|holding (?:it|them|the items|your|everything|the inventory)|placed (?:a|the) hold|hold (?:is|has been|was) placed|held for (?:you|\d+)|held until)\b/gi;
 const DELIVERY_CLAIM =
@@ -511,20 +533,43 @@ function liveHold(b: EvidenceOf<"booking">, now: Date): boolean {
 export function checkGrounding(input: GroundingInput): GroundingResult {
   // Exempt verbatim: the fixed manual-review sentence, and typed booking messages whose state is
   // still true now (a refusal/confirmation as recorded; a hold only while it is actually live).
-  const exempt = [
-    ...(input.exemptSentences ?? []),
-    ...fresh(input, "booking")
-      .filter((b) => b.status === "refused" || b.status === "confirmed" || liveHold(b, input.now))
-      .map((b) => b.message),
-  ].filter((s) => s.length > 0);
-  // Typographic apostrophes and quotes behave like plain ones ("you’re booked").
-  let text = input.reply.replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
-  for (const s of exempt.sort((a, b) => b.length - a.length)) text = text.split(s).join(" ");
-
   const violations = new Set<GroundingCode>();
   const flag = (code: GroundingCode) => {
     violations.add(code);
   };
+  // Typographic apostrophes and quotes behave like plain ones ("you’re booked"); conversational
+  // fillers ("No worries") are neutralised before anything is evaluated.
+  let text = blankFillers(input.reply.replace(/[‘’]/g, "'").replace(/[“”]/g, '"'));
+
+  // Exempt verbatim: the fixed manual-review sentence, and typed booking messages whose state is
+  // still true now. A booking message is about ONE quote: it stays exempt only where the quote it
+  // is attributed to in the reply (the nearest quote number before it, or any in its sentence) is
+  // that message's own quote. Otherwise it is evaluated like any other prose.
+  const exemptFixed = (input.exemptSentences ?? []).filter((s) => s.length > 0);
+  for (const s of exemptFixed) text = text.split(s).join(" ".repeat(s.length));
+  const scoped = fresh(input, "booking")
+    .filter((b) => b.status === "refused" || b.status === "confirmed" || liveHold(b, input.now))
+    .filter((b) => b.message.length > 0)
+    .sort((a, b) => b.message.length - a.message.length);
+  for (const b of scoped) {
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(b.message, from);
+      if (at < 0) break;
+      from = at + b.message.length;
+      const before = [...text.slice(0, at).matchAll(QUOTE_NUMBER)].at(-1)?.[0];
+      const sentenceEnd = text.slice(from).search(/[.!?](?:\s|$)|\n/);
+      const after = [
+        ...text
+          .slice(from, sentenceEnd < 0 ? undefined : from + sentenceEnd)
+          .matchAll(QUOTE_NUMBER),
+      ].map((m) => m[0]);
+      const attributed = [...(before ? [before] : []), ...after];
+      if (attributed.every((n) => n === b.quoteNumber)) {
+        text = text.slice(0, at) + " ".repeat(b.message.length) + text.slice(from);
+      }
+    }
+  }
   const knownQuotes = new Set(
     fresh(input, "quote")
       .map((q) => q.quoteNumber)
@@ -636,16 +681,19 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     }
 
     // Booking and hold claims are about ONE quote: the one named, or the latest one.
-    const bookingFor = () =>
-      latest(
-        input,
-        "booking",
-        (b) => quoteNumbers.length === 0 || quoteNumbers.includes(b.quoteNumber),
-      );
+    // Booking and hold claims: EVERY quote the sentence names must itself have the claimed state
+    // (one confirmed quote never authorises "Q-1 and Q-2 are confirmed"); with no number named,
+    // the latest booking is the subject.
+    const subjectsOf = (): (EvidenceOf<"booking"> | null)[] =>
+      quoteNumbers.length
+        ? [...new Set(quoteNumbers)].map((n) =>
+            latest(input, "booking", (b) => b.quoteNumber === n),
+          )
+        : [latest(input, "booking")];
 
     for (const m of sentence.matchAll(BOOKED_CLAIM)) {
       if (negated(sentence, m.index)) continue;
-      if (bookingFor()?.status !== "confirmed") {
+      if (!subjectsOf().every((b) => b?.status === "confirmed")) {
         flag("GROUNDING_BOOKING_STATUS_UNSUPPORTED");
         break;
       }
@@ -653,14 +701,16 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
 
     for (const m of sentence.matchAll(HOLD_CLAIM)) {
       if (negated(sentence, m.index)) continue;
-      const b = bookingFor();
       const minutes = /\bfor (\d+) minutes?\b/i.exec(sentence);
-      const remaining = b?.holdExpiresAt
-        ? (Date.parse(b.holdExpiresAt) - input.now.getTime()) / 60_000
-        : 0;
-      const live =
-        b !== null && (b.status === "hold_placed" || b.status === "holding") && remaining > 0;
-      if (!live || (minutes && Number(minutes[1]) > Math.ceil(remaining) + 1)) {
+      const ok = subjectsOf().every((b) => {
+        const remaining = b?.holdExpiresAt
+          ? (Date.parse(b.holdExpiresAt) - input.now.getTime()) / 60_000
+          : 0;
+        const live =
+          b !== null && (b.status === "hold_placed" || b.status === "holding") && remaining > 0;
+        return live && !(minutes && Number(minutes[1]) > Math.ceil(remaining) + 1);
+      });
+      if (!ok) {
         flag("GROUNDING_HOLD_UNSUPPORTED");
         break;
       }

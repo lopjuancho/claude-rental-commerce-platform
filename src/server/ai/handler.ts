@@ -10,6 +10,7 @@ import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 import { systemAiStore, systemGateway } from "@/server/trusted/gateway";
 import { readVisitorToken } from "@/server/visitor";
 import { runTurn } from "./assistant";
+import { publicBlock } from "./journal";
 import { AI_LIMITS, getAiConfig } from "./config";
 import { createProvider } from "./providers";
 import {
@@ -188,7 +189,10 @@ export async function handleAssistantPost(request: Request): Promise<Response> {
     );
   }
   const status = result.errorCode === "IN_PROGRESS" || result.errorCode === "BUSY" ? 409 : 200;
-  return NextResponse.json({ ...result, correlationId }, { status, headers: noStore });
+  return NextResponse.json(
+    { ...result, blocks: result.blocks.map(publicBlock), correlationId },
+    { status, headers: noStore },
+  );
 }
 
 /**

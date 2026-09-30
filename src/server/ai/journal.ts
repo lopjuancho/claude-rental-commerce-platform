@@ -70,6 +70,19 @@ export async function sealBlock(b: AssistantBlock, sealer: Sealer): Promise<Assi
   return { ...b, url: null, sealedLink: await sealer.seal(b.url) };
 }
 
+/** What the browser may see of a block: no server-side references or sealed values. */
+export function publicBlock(b: AssistantBlock): AssistantBlock {
+  if (b.type === "quote" && b.sealedLink !== undefined) {
+    const { sealedLink: _s, ...rest } = b;
+    return rest;
+  }
+  if (b.type === "booking" && b.quoteRef !== undefined) {
+    const { quoteRef: _r, ...rest } = b;
+    return rest;
+  }
+  return b;
+}
+
 export async function openBlock(b: AssistantBlock, sealer: Sealer): Promise<AssistantBlock> {
   if (b.type !== "quote" || !b.sealedLink) return b;
   const url = await sealer.open(b.sealedLink);
@@ -144,7 +157,13 @@ export function durableJournal(o: DurableJournalOptions): MutationJournal {
         // Reconciling an already committed mutation is allowed after the deadline.
         const ref = mutationRefSchema.safeParse(claim.ref);
         if (ref.success) apply(ref.data);
-        return { replayed: true, outcome: await replayedOutcome(claim.result, o.state, spec) };
+        const pendingRecord = (claim.pending ?? spec.pending) as Record<string, unknown>;
+        return {
+          replayed: true,
+          outcome: spec.refresh
+            ? await spec.refresh(pendingRecord)
+            : await replayedOutcome(claim.result, o.state, spec),
+        };
       }
       if (claim.outcome === "in_progress") {
         throw new ToolError("IN_PROGRESS", "That change is already being made.");

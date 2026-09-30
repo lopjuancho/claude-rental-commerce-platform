@@ -67,7 +67,7 @@ const booking = (
   status: "hold_placed" | "confirmed" | "refused",
   expiresInMin: number | null = 15,
   message = HOLD_MESSAGE,
-): Evidence => ({
+): EvidenceOf<"booking"> => ({
   kind: "booking",
   at: at(),
   quoteNumber: "Q-1001",
@@ -419,5 +419,90 @@ describe("violations carry codes only (N4)", () => {
     for (const pii of ["Jane", "jane.doe", "Elm", "42", "999"]) {
       expect(serialized).not.toContain(pii);
     }
+  });
+});
+
+describe("Codex round-3 bypasses: every assertion matches its OWN subject", () => {
+  const JAN2 = "2027-01-02";
+  const partySlide: Evidence = {
+    kind: "availability",
+    at: at(),
+    productSlug: "party-slide",
+    productName: "Party Slide",
+    variantId: "v-party",
+    start: `${JAN2}T18:00:00Z`,
+    end: `${JAN2}T22:00:00Z`,
+    dates: [JAN2],
+    startLocal: "12:00",
+    endLocal: "16:00",
+    quantity: 1,
+    result: "available",
+  };
+  const q1: Evidence = {
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: "Q-1",
+  };
+  const q2: Evidence = {
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: "Q-2",
+  };
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: ["Party Slide"],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    });
+
+  it("1. “No worries your booking is confirmed.” — fillers negate nothing", () => {
+    expect(run("No worries your booking is confirmed.", []).ok).toBe(false);
+    expect(run("No problem your reservation is confirmed.", []).ok).toBe(false);
+    expect(run("Not a problem, you're all set.", []).ok).toBe(false);
+    expect(run("No worries, nothing has been paid yet.", []).ok).toBe(true);
+    expect(run("Your booking is not confirmed yet.", []).ok).toBe(true);
+  });
+
+  it("2. a server sentence attributed to ANOTHER quote is not exempt", () => {
+    expect(run("Quote Q-2: This booking is confirmed by the team.", [q1, q2]).ok).toBe(false);
+    expect(run("For quote Q-2 — This booking is confirmed by the team.", [q1, q2]).ok).toBe(false);
+    expect(run("Quote Q-1: This booking is confirmed by the team.", [q1, q2]).ok).toBe(true);
+    expect(run("This booking is confirmed by the team.", [q1]).ok).toBe(true);
+  });
+
+  it("3. multi-quote claims need evidence for EACH quote", () => {
+    expect(run("Quotes Q-2 and Q-1 are confirmed.", [q1, q2]).ok).toBe(false);
+    expect(run("Quotes Q-1 and Q-2 are both booked.", [q1, q2]).ok).toBe(false);
+    expect(run("Quote Q-1 is confirmed.", [q1, q2]).ok).toBe(true);
+    const q3: Evidence = { ...q1, quoteNumber: "Q-3" };
+    expect(run("Quotes Q-1 and Q-3 are confirmed.", [q1, q3]).ok).toBe(true);
+  });
+
+  it("4. written quantities are quantities", () => {
+    expect(
+      run("Party Slide is available for five hundred units on 2027-01-02.", [partySlide]).ok,
+    ).toBe(false);
+    expect(
+      run("Party Slide is available for twenty-five of them on 2027-01-02.", [partySlide]).ok,
+    ).toBe(false);
+    expect(run("Party Slide is available for 1,000 units on 2027-01-02.", [partySlide]).ok).toBe(
+      false,
+    );
+    expect(run("Party Slide is available for a dozen on 2027-01-02.", [partySlide]).ok).toBe(false);
+    expect(run("Party Slide is available for one unit on 2027-01-02.", [partySlide]).ok).toBe(true);
+  });
+
+  it("multiple products: each must have its own current result", () => {
+    expect(
+      checkGrounding({
+        reply: "Party Slide and Bounce Castle are available on 2027-01-02.",
+        evidence: [partySlide],
+        now: NOW,
+        knownProducts: ["Party Slide", "Bounce Castle"],
+        businessName: "Acme Party Rentals",
+        currency: "USD",
+      }).ok,
+    ).toBe(false);
   });
 });

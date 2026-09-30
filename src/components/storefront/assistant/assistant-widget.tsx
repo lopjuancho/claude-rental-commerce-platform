@@ -119,11 +119,22 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
   // Chat generation: "New chat" starts a new one. A reply that arrives for an earlier generation
   // (sent before New chat) is dropped — it can neither append to the new chat nor mark it failed.
   const generationRef = useRef(0);
+  // The session this chat talks to. "New chat" replaces it on the server; until that is
+  // CONFIRMED nothing can be sent (a message would otherwise reach the old conversation while the
+  // new, empty transcript shows it). A failed replacement is shown and retried, never ignored.
+  const [session, setSession] = useState<"ready" | "resetting" | "reset_failed">("ready");
+  const sessionRef = useRef<"ready" | "resetting" | "reset_failed">("ready");
+  // Read through a function: the ref changes across awaits.
+  const sessionReady = () => sessionRef.current === "ready";
+  const setSessionState = (next: "ready" | "resetting" | "reset_failed") => {
+    sessionRef.current = next;
+    setSession(next);
+  };
 
   const send = useCallback(
     async (text: string, retryOf?: string) => {
       const message = text.trim().slice(0, MAX_CHARS);
-      if (!message || busy) return;
+      if (!message || busy || !sessionReady()) return;
       const generation = generationRef.current;
       const current = () => generation === generationRef.current;
       const requestId = retryOf ?? newRequestId();
@@ -149,8 +160,10 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
         } | null;
         let data = (await res.json().catch(() => null)) as Reply;
         if (data?.errorCode === "SESSION_REQUIRED" && current()) {
-          // No session yet (e.g. it expired): bootstrap one (runs nothing), then send once more.
+          // No session yet (e.g. it expired): bootstrap one (runs nothing), then send once more —
+          // unless the chat changed meanwhile (New chat): an old continuation never posts.
           await fetch("/api/assistant", { method: "GET" });
+          if (!current() || !sessionReady()) return;
           res = await post();
           data = (await res.json().catch(() => null)) as Reply;
         }
@@ -188,14 +201,25 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
   );
 
   const newChat = useCallback(async () => {
-    generationRef.current += 1;
+    // One replacement at a time: repeated clicks while one is in flight do nothing.
+    if (sessionRef.current === "resetting") return;
+    setSessionState("resetting");
+    const generation = ++generationRef.current;
     setMessages([]);
     setLastFailed(null);
     setBusy(false);
     // The server replaces this browser's session; the old conversation is left behind.
-    await fetch("/api/assistant", { method: "DELETE" }).catch(() => undefined);
-    inputRef.current?.focus();
+    let ok = false;
+    try {
+      ok = (await fetch("/api/assistant", { method: "DELETE" })).ok;
+    } catch {
+      ok = false;
+    }
+    if (generation !== generationRef.current) return; // a later New chat owns the state now
+    setSessionState(ok ? "ready" : "reset_failed");
+    if (ok) inputRef.current?.focus();
   }, []);
+  const canSend = session === "ready" && !busy;
 
   return (
     <>
@@ -229,10 +253,11 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
             <h2 className="flex-1 text-base font-bold">Rental assistant</h2>
             <button
               type="button"
+              disabled={session === "resetting"}
               onClick={() => {
                 void newChat();
               }}
-              className="min-h-10 rounded-full px-3 text-sm font-semibold hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/40"
+              className="min-h-10 disabled:opacity-50 rounded-full px-3 text-sm font-semibold hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/40"
             >
               New chat
             </button>
@@ -261,6 +286,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
                     <li key={s}>
                       <button
                         type="button"
+                        disabled={!canSend}
                         onClick={() => {
                           void send(s);
                         }}
@@ -276,12 +302,33 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
             {messages.map((m) => (
               <MessageView key={m.id} message={m} />
             ))}
+            {session === "resetting" ? (
+              <p className="text-sm text-muted-foreground" role="status">
+                Starting a new chat…
+              </p>
+            ) : null}
+            {session === "reset_failed" ? (
+              <div className="grid gap-2" role="alert">
+                <p className="text-sm">
+                  We couldn&apos;t start a new chat. Nothing was sent. Please try again.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void newChat();
+                  }}
+                  className="min-h-10 rounded-full border px-4 text-sm font-semibold hover:border-primary"
+                >
+                  Retry new chat
+                </button>
+              </div>
+            ) : null}
             {busy ? (
               <p className="text-sm text-muted-foreground" role="status">
                 Checking…
               </p>
             ) : null}
-            {lastFailed && !busy ? (
+            {lastFailed && canSend ? (
               <button
                 type="button"
                 onClick={() => {
@@ -325,7 +372,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
               />
               <button
                 type="submit"
-                disabled={busy || draft.trim() === ""}
+                disabled={!canSend || draft.trim() === ""}
                 className="min-h-11 rounded-full bg-primary px-4 font-bold text-primary-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/40"
               >
                 Send

@@ -483,3 +483,157 @@ test("a chunked body without Content-Length is cut off at the limit (413)", asyn
   });
   expect(status === 413 || status === "closed").toBe(true);
 });
+
+// R3-M2: nothing is sent until the session replacement (New Chat) or bootstrap is confirmed for
+// the same chat generation.
+function recordPosts(page: Page) {
+  const posts: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/assistant") && r.method() === "POST") posts.push(r.postData() ?? "");
+  });
+  return posts;
+}
+function holdMethod(page: Page, method: "DELETE" | "GET", fail = false) {
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const seen: number[] = [];
+  const ready = page.route("**/api/assistant", async (route) => {
+    if (route.request().method() !== method) return route.continue();
+    seen.push(Date.now());
+    await held;
+    if (fail) return route.fulfill({ status: 500, body: "" });
+    return route.continue();
+  });
+  return { release, seen, ready };
+}
+
+test("New Chat with a slow DELETE: nothing can be sent until the new session is confirmed", async ({
+  page,
+}) => {
+  await page.goto(`${ACME}/`);
+  await openAssistant(page);
+  const posts = recordPosts(page);
+  const del = holdMethod(page, "DELETE");
+  await del.ready;
+  await panel(page).getByRole("button", { name: "New chat" }).click();
+  await expect(panel(page).getByText("Starting a new chat…")).toBeVisible();
+  await panel(page).getByLabel("Message the assistant").fill("Do you have a castle?");
+  await expect(panel(page).getByRole("button", { name: "Send" })).toBeDisabled();
+  await panel(page).getByLabel("Message the assistant").press("Enter");
+  await page.waitForTimeout(300);
+  expect(posts).toHaveLength(0);
+  del.release();
+  await expect(panel(page).getByText("Starting a new chat…")).toHaveCount(0);
+  await page.unroute("**/api/assistant");
+  await ask(page, "Do you have a castle?");
+  expect(posts).toHaveLength(1);
+});
+
+test("New Chat whose DELETE fails: an explicit error, and nothing goes to the old session", async ({
+  page,
+  context,
+}) => {
+  await page.goto(`${ACME}/`);
+  const before = (await context.cookies()).find((c) => c.name === "rc_ai")?.value;
+  await openAssistant(page);
+  const posts = recordPosts(page);
+  const del = holdMethod(page, "DELETE", true);
+  await del.ready;
+  del.release();
+  await panel(page).getByRole("button", { name: "New chat" }).click();
+  await expect(panel(page).getByRole("alert")).toContainText("couldn't start a new chat");
+  await panel(page).getByLabel("Message the assistant").fill("Do you have a castle?");
+  await expect(panel(page).getByRole("button", { name: "Send" })).toBeDisabled();
+  await panel(page).getByLabel("Message the assistant").press("Enter");
+  await page.waitForTimeout(300);
+  expect(posts).toHaveLength(0);
+  expect((await context.cookies()).find((c) => c.name === "rc_ai")?.value).toBe(before);
+  // Retrying succeeds: a new session, then messages go there.
+  await page.unroute("**/api/assistant");
+  await panel(page).getByRole("button", { name: "Retry new chat" }).click();
+  await expect(panel(page).getByRole("alert")).toHaveCount(0);
+  await expect(panel(page).getByText("Starting a new chat…")).toHaveCount(0);
+  await expect
+    .poll(async () => (await context.cookies()).find((c) => c.name === "rc_ai")?.value)
+    .not.toBe(before);
+  await ask(page, "Do you have a castle?");
+  expect(posts).toHaveLength(1);
+});
+
+test("New Chat during a delayed session bootstrap: the old continuation never posts", async ({
+  page,
+}) => {
+  await page.goto(`${ACME}/`);
+  await openAssistant(page);
+  const posts = recordPosts(page);
+  // The session has expired: the first POST is refused (SESSION_REQUIRED) and the widget
+  // bootstraps one with a GET — which is slow. (Answered by the route so no page-view prefetch can
+  // re-issue the cookie first.)
+  let refused = false;
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const gets: number[] = [];
+  await page.route("**/api/assistant", async (route) => {
+    const method = route.request().method();
+    if (method === "POST" && !refused) {
+      refused = true;
+      return route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "error",
+          errorCode: "SESSION_REQUIRED",
+          reply: "Please reload the page to start the assistant.",
+          blocks: [],
+        }),
+      });
+    }
+    if (method === "GET") {
+      gets.push(1);
+      await held;
+    }
+    return route.continue();
+  });
+  await panel(page).getByLabel("Message the assistant").fill("Do you have a water slide?");
+  await panel(page).getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => gets.length).toBe(1); // bootstrap GET in flight
+  await panel(page).getByRole("button", { name: "New chat" }).click();
+  await expect(panel(page).getByText("Starting a new chat…")).toHaveCount(0);
+  release();
+  await page.waitForTimeout(500);
+  // Only the first (refused) POST ever happened for that message; the new chat is empty.
+  expect(posts.filter((p) => p.includes("water slide"))).toHaveLength(1);
+  await expect(panel(page).getByText("Do you have a water slide?")).toHaveCount(0);
+  await page.unroute("**/api/assistant");
+  await ask(page, "Do you have a castle?");
+});
+
+test("rapid New Chat clicks: one replacement at a time, then a working new chat", async ({
+  page,
+}) => {
+  await page.goto(`${ACME}/`);
+  await openAssistant(page);
+  const deletes: number[] = [];
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/assistant") && r.method() === "DELETE") deletes.push(1);
+  });
+  const del = holdMethod(page, "DELETE");
+  await del.ready;
+  const newChat = panel(page).getByRole("button", { name: "New chat" });
+  await newChat.click();
+  await expect(newChat).toBeDisabled();
+  for (let i = 0; i < 3; i++) await newChat.dispatchEvent("click");
+  await page.waitForTimeout(200);
+  expect(deletes).toHaveLength(1);
+  del.release();
+  await expect(newChat).toBeEnabled();
+  await page.unroute("**/api/assistant");
+  await newChat.click();
+  await expect(newChat).toBeEnabled();
+  expect(deletes).toHaveLength(2);
+  await ask(page, "Do you have a castle?");
+});

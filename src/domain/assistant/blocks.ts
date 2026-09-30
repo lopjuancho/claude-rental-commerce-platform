@@ -68,8 +68,16 @@ export type AssistantBlock =
         | "unavailable"
         | "hold_limit"
         | "needs_page_reload"
-        | "closed";
+        | "closed"
+        | "declined"
+        | "cancelled"
+        | "none";
       quoteNumber: string;
       holdExpiresAt: string | null;
       message: string;
+      /**
+       * Server-side only (stored replies): the quote's token HASH, to refresh the booking's CURRENT
+       * state when the reply is replayed. Never sent to the browser.
+       */
+      quoteRef?: string;
     };

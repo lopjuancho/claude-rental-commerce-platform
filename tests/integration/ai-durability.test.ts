@@ -10,7 +10,7 @@ import { generateSessionToken, hashSessionToken } from "@/server/ai/session";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import type { AiConversationStore } from "@/server/trusted/gateway";
 import { generateVisitorToken } from "@/server/visitor";
-import { makeProduct } from "./support/availability";
+import { makeProduct, rpc } from "./support/availability";
 import { pgAiStore } from "./support/ai";
 import { admin, createOrg, type TestOrg } from "./support/db";
 import { fakeProvider, pgGateway } from "./support/pricing";
@@ -483,7 +483,7 @@ describeRest("failed and repeated turns never repeat a mutation (H2)", () => {
     );
     expect(retried.status).toBe("ok");
     expect(retried.blocks.find((b) => b.type === "booking")).toMatchObject({
-      status: "hold_placed",
+      status: "holding" /* replayed: the CURRENT hold, with its real end */,
     });
     expect(await bookingsFor(c.email)).toBe(1);
   });
@@ -1074,5 +1074,239 @@ describeRest("a failed save never claims staging was saved (N3)", () => {
     expect(row.active_turn_id).toBeNull(); // released for the retry
     expect(JSON.stringify(row.state)).not.toContain("n3@example.test");
     expect(JSON.stringify(row.state)).not.toContain("2028-09-02");
+  });
+});
+
+// ── round 3 (Codex review of efb4fca) ───────────────────────────────────────
+
+/** A conversation whose quote has a booking request made by a completed turn `key`. */
+async function booked(storeForBooking?: AiConversationStore) {
+  const c = conversation();
+  await c.turn(
+    "quote",
+    deps(
+      model([
+        ...c.setup,
+        tool("create_quote", { items: [{ productSlug: "bounce-castle", quantity: 1 }] }),
+        { say: "Quote ready." },
+      ]),
+    ),
+  );
+  const key = randomUUID();
+  const first = await c.turn(
+    "request the booking",
+    deps(
+      model([
+        tool("request_booking"),
+        storeForBooking ? { fail: true } : { say: "Your request is in." },
+      ]),
+      storeForBooking ? { store: storeForBooking } : {},
+    ),
+    key,
+  );
+  const row = await admin<{ id: string; token_hash: string; reservation_id: string }>(
+    `select b.id, q.token_hash, b.reservation_id from public.booking_requests b join public.quotes q on q.id = b.quote_id
+     join public.customers cu on cu.id = q.customer_id where cu.email = $1`,
+    [c.email],
+  );
+  return { c, key, first, booking: row.rows[0]! };
+}
+
+type Change = "expire" | "cancel" | "decline" | "confirm";
+async function change(what: Change, b: { id: string; token_hash: string; reservation_id: string }) {
+  if (what === "expire") {
+    // The clock passes the hold's end (the sweeper has not run).
+    await admin(
+      `begin; set local session_replication_role = replica;
+       update public.reservations set hold_expires_at = now() - interval '1 minute' where id = '${b.reservation_id}';
+       commit;`,
+    );
+  } else if (what === "cancel") {
+    await pgGateway().cancelBookingByToken(org.id, b.token_hash);
+  } else if (what === "decline") {
+    await rpc(org.users.office, "select public.close_booking_request($1, 'declined', 'no staff')", [
+      b.id,
+    ]);
+  } else {
+    await rpc(org.users.office, "select public.confirm_booking_request($1, true)", [b.id]);
+  }
+}
+const expected: Record<Change, string> = {
+  expire: "awaiting_review",
+  cancel: "cancelled",
+  decline: "declined",
+  confirm: "confirmed",
+};
+
+describeRest("replayed and recovered bookings show the CURRENT state (R3-M1)", () => {
+  it.each(["expire", "cancel", "decline", "confirm"] as const)(
+    "a completed turn replayed after the booking was changed (%s)",
+    async (what) => {
+      const { c, key, first, booking } = await booked();
+      expect(first.blocks.find((b) => b.type === "booking")).toMatchObject({
+        status: "hold_placed",
+      });
+      await change(what, booking);
+      const replay = await c.turn("request the booking", deps(model([{ fail: true }])), key);
+      expect(replay.replayed).toBe(true);
+      const block = replay.blocks.find((b) => b.type === "booking") as
+        { status: string; quoteRef?: string } | undefined;
+      expect(block?.status).toBe(expected[what]);
+      // Never the old countdown, never "held" when it is not.
+      expect(replay.reply).not.toMatch(/held for \d+ minutes/);
+      if (what !== "confirm") expect(replay.reply).not.toMatch(/confirmed/);
+      expect(await bookingsFor(c.email)).toBe(1);
+    },
+  );
+
+  it("a live hold replays with its real end time, not the stored countdown", async () => {
+    const { c, key } = await booked();
+    const replay = await c.turn("request the booking", deps(model([{ fail: true }])), key);
+    expect(replay.blocks.find((b) => b.type === "booking")).toMatchObject({ status: "holding" });
+    expect(replay.reply).toMatch(/held until/);
+    expect(replay.reply).not.toMatch(/for 15 minutes/);
+  });
+
+  it.each(["expire", "cancel", "decline", "confirm"] as const)(
+    "an unrecorded booking recovered after it changed (%s): authoritative state wins",
+    async (what) => {
+      // Crash after the booking request was written: nothing recorded, nothing saved.
+      const { c, key, booking } = await booked(
+        failing(["commitMutation", "finishTurn", "failTurn"]),
+      );
+      await change(what, booking);
+      await expireLease(c.session);
+      const retry = await c.turn(
+        "request the booking",
+        deps(model([tool("request_booking"), { say: "Here is the status." }])),
+        key,
+      );
+      const block = retry.blocks.find((b) => b.type === "booking") as
+        { status: string } | undefined;
+      expect(block?.status).toBe(expected[what]);
+      expect(retry.reply).not.toMatch(/held for \d+ minutes/);
+      expect(await bookingsFor(c.email)).toBe(1);
+    },
+  );
+
+  it("an old worker still inside the BOOKING write after a lease takeover resolves to one request", async () => {
+    const c = conversation();
+    await c.turn(
+      "quote",
+      deps(
+        model([
+          ...c.setup,
+          tool("create_quote", { items: [{ productSlug: "bounce-castle", quantity: 1 }] }),
+          { say: "Quote ready." },
+        ]),
+      ),
+    );
+    const key = randomUUID();
+    const g = gate();
+    const stalled = {
+      gateway: pgGateway(),
+      rateLimit: (policy: string) => (policy === "publicWrite" ? g.p : Promise.resolve()),
+      provider: fakeProvider(3),
+    };
+    const oldP = c.turn(
+      "request the booking",
+      deps(model([tool("request_booking"), { say: "old worker done" }]), { publicDeps: stalled }),
+      key,
+    );
+    for (let i = 0; i < 100; i++) {
+      const n = await count(
+        "select 1 from public.ai_mutations m join public.ai_conversations c on c.id = m.conversation_id where c.session_hash = $1 and m.tool_name = 'request_booking'",
+        [await hashSessionToken(c.session)],
+      );
+      if (n > 0) break;
+      await sleep(20);
+    }
+    await expireLease(c.session);
+    const takeover = await c.turn(
+      "request the booking",
+      deps(model([tool("request_booking"), { say: "Your request is in." }])),
+      key,
+    );
+    expect(takeover.blocks.find((b) => b.type === "booking")).toMatchObject({
+      status: "hold_placed",
+    });
+    g.open();
+    await oldP;
+    expect(await bookingsFor(c.email)).toBe(1);
+  });
+
+  it("contact change on retry: recovery restores the ORIGINAL contact the quote was made with", async () => {
+    const c = conversation();
+    await c.turn(
+      "quote",
+      deps(
+        model([
+          ...c.setup,
+          tool("create_quote", { items: [{ productSlug: "bounce-castle", quantity: 1 }] }),
+          { say: "Quote ready." },
+        ]),
+      ),
+    );
+    const key = randomUUID();
+    await c.turn(
+      "add a snow cone",
+      deps(
+        model([tool("add_quote_item", { productSlug: "snow-cone", quantity: 1 }), { fail: true }]),
+        {
+          store: failing(["commitMutation", "finishTurn", "failTurn"]),
+        },
+      ),
+      key,
+    );
+    await expireLease(c.session);
+    const other = `other-${randomUUID().slice(0, 6)}@example.test`;
+    const retry = await c.turn(
+      "add a snow cone",
+      deps(
+        model([
+          tool("create_customer", { firstName: "Changed", email: other }),
+          tool("add_quote_item", { productSlug: "snow-cone", quantity: 1 }),
+          { say: "Added." },
+        ]),
+      ),
+      key,
+    );
+    expect(retry.status).toBe("ok");
+    const state = (await conversationRow(c.session)).state as {
+      contact?: { email?: string };
+      quote?: { quoteNumber: string };
+    };
+    expect(state.contact?.email).toBe(c.email);
+    const owner = await admin<{ email: string }>(
+      "select cu.email::text email from public.quotes q join public.customers cu on cu.id = q.customer_id where q.organization_id = $1 and q.quote_number = $2",
+      [org.id, state.quote!.quoteNumber],
+    );
+    expect(owner.rows[0]!.email).toBe(c.email);
+    expect(await count("select 1 from public.customers where email = $1", [other])).toBe(0);
+  });
+
+  it("a tampered sealed link replays without a link (never a wrong or broken one)", async () => {
+    const c = conversation();
+    const key = randomUUID();
+    await c.turn(
+      "Please create my quote",
+      deps(
+        model([
+          ...c.setup,
+          tool("create_quote", { items: [{ productSlug: "bounce-castle", quantity: 1 }] }),
+          { say: "Your quote is ready." },
+        ]),
+      ),
+      key,
+    );
+    await admin(
+      `update public.ai_turns t set response = jsonb_set(response, '{blocks,0,sealedLink}', to_jsonb('s1.' || repeat('A', 60)))
+       from public.ai_conversations c where c.id = t.conversation_id and c.session_hash = $1`,
+      [await hashSessionToken(c.session)],
+    );
+    const replay = await c.turn("Please create my quote", deps(model([{ fail: true }])), key);
+    expect(replay.replayed).toBe(true);
+    expect(linkOf(replay)).toBeNull();
+    expect(await quotesFor(c.email)).toBe(1);
   });
 });
