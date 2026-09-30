@@ -20,9 +20,12 @@ import {
   TOOL_NAMES,
 } from "@/server/ai/schemas";
 import {
+  currentSession,
   generateSessionToken,
   hashSessionToken,
   isWellFormedSessionToken,
+  nextGeneration,
+  sessionCookieName,
 } from "@/server/ai/session";
 import { forbiddenKeys, mergeItems } from "@/server/ai/tools";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
@@ -695,5 +698,41 @@ describe("quote links sealed to the session (N2)", () => {
       await sessionSealer(session, "20000000-0000-4000-8000-000000000002").open(sealed),
     ).toBeNull();
     expect(await sessionSealer(session, org).open(`${sealed.slice(0, -2)}xx`)).toBeNull();
+  });
+});
+
+describe("session generations: a late, older cookie never replaces a newer session (R3-M2)", () => {
+  const t = (c: string) => c.repeat(43);
+  it("the session in effect is the highest generation present, whatever was written last", () => {
+    expect(currentSession([{ name: "rc_ai", value: t("a") }])?.token).toBe(t("a"));
+    // N (generation 3) was set by New Chat; the late bootstrap wrote generation 2 afterwards.
+    const jar = [
+      { name: "rc_ai_3", value: t("n") },
+      { name: "rc_ai_2", value: t("b") },
+      { name: "rc_ai", value: t("p") },
+    ];
+    expect(currentSession(jar)).toMatchObject({ generation: 3, token: t("n") });
+    // Malformed values and unrelated names are ignored.
+    expect(
+      currentSession([
+        { name: "rc_ai_9", value: "short" },
+        { name: "rc_ai_transcript", value: t("x") },
+        { name: "rc_ai_01", value: t("x") },
+        { name: "rc_ai_1", value: t("k") },
+      ])?.token,
+    ).toBe(t("k"));
+    expect(currentSession([])).toBeNull();
+  });
+
+  it("a bootstrap/reset issues above everything present and at least what the client asked", () => {
+    expect(nextGeneration([], null)).toBe(1);
+    expect(nextGeneration([], "2")).toBe(2);
+    expect(nextGeneration([], "3")).toBe(3); // sent later from the same (empty) jar → higher
+    expect(nextGeneration([{ name: "rc_ai_7", value: t("a") }], "2")).toBe(8);
+    expect(nextGeneration([{ name: "rc_ai", value: t("a") }], null)).toBe(1);
+    expect(nextGeneration([], "junk")).toBe(1);
+    expect(nextGeneration([{ name: "rc_ai_999999999", value: t("a") }], null)).toBe(999_999_999);
+    expect(sessionCookieName(0)).toBe("rc_ai");
+    expect(sessionCookieName(4)).toBe("rc_ai_4");
   });
 });

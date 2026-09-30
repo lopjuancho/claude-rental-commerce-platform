@@ -9,10 +9,10 @@ export function POST(request: Request) {
   return handleAssistantPost(request);
 }
 
-export function GET() {
-  return handleAssistantGet();
+export function GET(request: Request) {
+  return handleAssistantGet(request);
 }
 
-export function DELETE() {
-  return handleAssistantDelete();
+export function DELETE(request: Request) {
+  return handleAssistantDelete(request);
 }

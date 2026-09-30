@@ -1,4 +1,5 @@
 import "server-only";
+import { z } from "zod";
 import type { Evidence } from "@/domain/assistant/evidence";
 import { formatCents } from "@/domain/money";
 import { humanize } from "@/domain/storefront/catalog";
@@ -38,6 +39,7 @@ import {
   redactArguments,
   SAFE_FALLBACK,
   systemPrompt,
+  timeSensitiveClaims,
 } from "./policy";
 import type { LlmMessage, LlmProvider, LlmToolSpec } from "./provider";
 import { strictToolJsonSchema, TOOL_DESCRIPTIONS, TOOL_NAMES } from "./schemas";
@@ -194,54 +196,111 @@ function fallbackReply(evidence: Evidence[], currency: string): string {
     : SAFE_FALLBACK;
 }
 
-/** What is stored for replay: quote links only sealed to this session (never in clear). */
-async function storable(result: TurnResult, sealer: Sealer): Promise<Json> {
+/** Server-side references a replay needs to re-read time-sensitive facts (never sent out). */
+interface ReplayRefs {
+  bookings: { quoteRef: string; quoteNumber: string }[];
+}
+
+const BOOKING_RECHECK =
+  "The booking status needs to be checked again. Ask me for the latest status and I'll look it up.";
+const AVAILABILITY_RECHECK =
+  "Availability can change, so it needs to be checked again. Ask me and I'll check it now.";
+
+/**
+ * What is stored for replay: quote links only sealed to this session (never in clear), and — when
+ * the reply states a booking/hold status (with or without a card) — the server-side references of
+ * the bookings it can be about, so a replay re-reads their CURRENT state instead of repeating it.
+ */
+async function storable(result: TurnResult, sealer: Sealer, state: AssistantState): Promise<Json> {
+  const claims = timeSensitiveClaims(result.reply);
+  const bookings = claims.booking
+    ? state.evidence.flatMap((e) =>
+        e.kind === "booking" && e.quoteRef
+          ? [{ quoteRef: e.quoteRef, quoteNumber: e.quoteNumber }]
+          : [],
+      )
+    : [];
+  const refs: ReplayRefs = { bookings };
   return {
+    v: 2,
     status: result.status,
     reply: result.reply,
     ...(result.errorCode ? { errorCode: result.errorCode } : {}),
     blocks: await Promise.all(result.blocks.map((b) => sealBlock(b, sealer))),
+    refs,
   } as unknown as Json;
 }
 
+const replayRefsSchema = z.object({
+  bookings: z
+    .array(
+      z.object({
+        quoteRef: z.string().regex(/^[0-9a-f]{64}$/),
+        quoteNumber: z.string().max(40),
+      }),
+    )
+    .max(40),
+});
+
 /**
- * A completed turn replayed for the same request (lost response). Its quote links are reopened
- * for this session; its booking outcomes are time-sensitive, so they are re-read from the database
- * (current status, real hold end) and the reply is rebuilt from them — an old "held for 15
- * minutes" is never repeated after time has passed.
+ * A completed turn replayed for the same request (lost response). Stored prose is NOT an
+ * authority: it was grounded when written, not now (ADR 0017 §14). So:
+ * - quote links are reopened for this session;
+ * - every booking the reply or its cards are about is re-read from the database (current status,
+ *   real hold end) and the reply is rebuilt from that — never an old "held for 15 minutes";
+ * - a reply stating a booking status WITHOUT a reference to re-read (stored before references
+ *   existed) is replaced by a neutral line, and its stale booking cards are dropped;
+ * - availability wording is never repeated as current: it gets a neutral re-check line.
  */
 async function replayOf(
   stored: unknown,
   sealer: Sealer,
   env: { tenant: ResolvedTenant; deps: PublicDeps; now: () => Date },
 ): Promise<TurnResult> {
-  const r = stored as Partial<TurnResult> | null;
+  const r = stored as (Partial<TurnResult> & { refs?: unknown }) | null;
   if (!r || typeof r.reply !== "string") {
     return { status: "error", errorCode: "REPLAY", reply: UNAVAILABLE, blocks: [], replayed: true };
+  }
+  const claims = timeSensitiveClaims(r.reply);
+  const parsedRefs = replayRefsSchema.safeParse(r.refs);
+  const targets = new Map<string, { tokenHash: string; quoteNumber: string }>();
+  if (parsedRefs.success) {
+    for (const b of parsedRefs.data.bookings) {
+      targets.set(b.quoteRef, { tokenHash: b.quoteRef, quoteNumber: b.quoteNumber });
+    }
   }
   const opened = Array.isArray(r.blocks)
     ? await Promise.all(r.blocks.map((b) => openBlock(b, sealer)))
     : [];
-  const refreshed: string[] = [];
   const blocks: AssistantBlock[] = [];
+  let staleBookingCard = false;
   for (const b of opened) {
-    if (b.type === "booking" && b.quoteRef) {
-      const current = await currentBooking(env, {
-        tokenHash: b.quoteRef,
-        quoteNumber: b.quoteNumber,
-      });
-      blocks.push(...current.blocks);
-      const message = current.result.message;
-      if (typeof message === "string") refreshed.push(message);
-    } else {
-      blocks.push(b);
-    }
+    if (b.type !== "booking") blocks.push(b);
+    else if (b.quoteRef)
+      targets.set(b.quoteRef, { tokenHash: b.quoteRef, quoteNumber: b.quoteNumber });
+    else staleBookingCard = true; // no reference to re-read: never shown as current
+  }
+  const refreshed: string[] = [];
+  for (const target of targets.values()) {
+    const current = await currentBooking(env, target);
+    blocks.push(...current.blocks);
+    const message = current.result.message;
+    if (typeof message === "string") refreshed.push(message);
+  }
+  let reply = r.reply;
+  if (refreshed.length) {
+    reply = [
+      `Here is where your request stands now. ${refreshed.join(" ")}`,
+      ...(claims.availability ? [AVAILABILITY_RECHECK] : []),
+    ].join(" ");
+  } else if (claims.booking || staleBookingCard) {
+    reply = [BOOKING_RECHECK, ...(claims.availability ? [AVAILABILITY_RECHECK] : [])].join(" ");
+  } else if (claims.availability) {
+    reply = AVAILABILITY_RECHECK;
   }
   return {
     status: r.status === "ok" ? "ok" : "error",
-    reply: refreshed.length
-      ? `Here is where your request stands now. ${refreshed.join(" ")}`
-      : r.reply,
+    reply,
     blocks,
     ...(r.errorCode ? { errorCode: r.errorCode } : {}),
     replayed: true,
@@ -572,7 +631,7 @@ async function turn(
         tokens,
         promptVersion: PROMPT_VERSION,
         appliedSeq,
-        response: await storable(result, sealer),
+        response: await storable(result, sealer, state),
       }),
       "finish",
     );

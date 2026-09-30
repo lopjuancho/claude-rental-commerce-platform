@@ -130,6 +130,12 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
     sessionRef.current = next;
     setSession(next);
   };
+  // Every session this tab asks for (bootstrap or New chat) is numbered in SEND order; the server
+  // names the cookie after a generation at least this high and always uses the highest one. So a
+  // slow bootstrap response arriving after New chat writes a LOWER generation and cannot switch
+  // the chat back to another session (ADR 0017 §15).
+  const issueRef = useRef(0);
+  const sessionUrl = () => `/api/assistant?g=${String(++issueRef.current + 1)}`;
 
   const send = useCallback(
     async (text: string, retryOf?: string) => {
@@ -162,7 +168,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
         if (data?.errorCode === "SESSION_REQUIRED" && current()) {
           // No session yet (e.g. it expired): bootstrap one (runs nothing), then send once more —
           // unless the chat changed meanwhile (New chat): an old continuation never posts.
-          await fetch("/api/assistant", { method: "GET" });
+          await fetch(sessionUrl(), { method: "GET" });
           if (!current() || !sessionReady()) return;
           res = await post();
           data = (await res.json().catch(() => null)) as Reply;
@@ -211,7 +217,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
     // The server replaces this browser's session; the old conversation is left behind.
     let ok = false;
     try {
-      ok = (await fetch("/api/assistant", { method: "DELETE" })).ok;
+      ok = (await fetch(sessionUrl(), { method: "DELETE" })).ok;
     } catch {
       ok = false;
     }

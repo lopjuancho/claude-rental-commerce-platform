@@ -196,6 +196,41 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       nothing while one replacement is in flight; every await (bootstrap GET, POST, response)
       re-checks the chat generation before it continues.
 
+15. **Round 4 of the review (Codex, bc328e3).**
+    - **Every asserted subject resolved (H1):** a booking/hold claim's subjects are the quotes
+      its sentence names, else those of the nearest earlier sentence naming any. Plural wording
+      ("both quotes", "the bookings", "all three quotes", "they") with nothing named means EVERY
+      quote of the conversation, and a stated count must match it; a plural claim that cannot be
+      resolved exactly (one quote known, a count mismatch) is rejected — it never falls back to
+      the latest single booking. A server booking message is exempt only when the WHOLE quote set
+      its sentence (or the nearest earlier sentence naming quotes) is about is that message's own
+      quote, and never under plural wording: "Quotes Q-2 and Q-1: This booking is confirmed by the
+      team." is about Q-2 too. One canonical quantity parser (`parseQuantity`) serves every syntax
+      — "1000", "1,000", "one thousand", "twenty five", "twenty-five", "a dozen", after
+      "quantity"/"qty" or before "units" — so "quantity 1,000" is 1000, not 1.
+    - **Stored prose is never an authority on replay (R3-M1):** a reply is grounded when written,
+      not when replayed. Whenever a stored reply states a booking/hold status — with or without a
+      card, in either polarity — the stored turn response carries server-side references (the
+      booking evidence's `quoteRef`, a token hash) to every booking of the conversation, and a
+      replay re-reads each one's CURRENT state and rebuilds the reply from it. A reply stored
+      without references (before this change) that states a status is replaced by "The booking
+      status needs to be checked again…", and its unreferenced booking cards are dropped;
+      availability wording is never repeated as current ("Availability can change…"). References
+      and token hashes are stripped from every HTTP response.
+    - **Session generations (R3-M2):** a browser applies Set-Cookie in ARRIVAL order, so a
+      bootstrap GET answered before New Chat but delivered after it could overwrite the new
+      session. Session cookies are therefore named after a generation (`rc_ai` = 0 from page
+      views, `rc_ai_<n>` from the bootstrap GET and New Chat), and the session in effect is always
+      the highest generation present. Bootstrap/New Chat issue max(highest present + 1, the
+      client's requested `?g=`), and the widget numbers those requests in send order — so two
+      requests sent from the same cookie state are ordered as sent. A late, older response only
+      ever writes a lower name: arrival order cannot roll N back to B. Superseded generations are
+      expired by the next bootstrap/New Chat response.
+    - **Smoke assertions are tenant-scoped (R4-L1):** every database check in `pnpm ai:smoke`
+      uses the organization resolved from the staging host and the exact quote id resolved from
+      its private link (`scripts/ai-smoke-db.mjs`), regression-tested against two tenants sharing
+      a quote number.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

@@ -14,11 +14,13 @@ import { publicBlock } from "./journal";
 import { AI_LIMITS, getAiConfig } from "./config";
 import { createProvider } from "./providers";
 import {
-  AI_SESSION_COOKIE,
+  currentSession,
   generateSessionToken,
   hashSessionToken,
-  isWellFormedSessionToken,
+  nextGeneration,
+  sessionCookieName,
   sessionCookieOptions,
+  sessionCookies,
 } from "./session";
 import { logAssistantError } from "./telemetry";
 
@@ -139,8 +141,10 @@ export async function handleAssistantPost(request: Request): Promise<Response> {
   // The session must exist BEFORE a message can change anything (ADR 0017 §11): it is issued by
   // storefront page views, the bootstrap GET and New Chat — never by this mutation-capable POST,
   // whose response (and Set-Cookie) could be lost after a quote was created.
-  const sessionToken = jar.get(AI_SESSION_COOKIE)?.value;
-  if (!isWellFormedSessionToken(sessionToken)) {
+  // The session in effect is the highest generation present (session.ts): a stale, older
+  // cookie written late by a slow response can never redirect this message.
+  const sessionToken = currentSession(jar.getAll())?.token;
+  if (!sessionToken) {
     return fail(409, "SESSION_REQUIRED", "Please reload the page to start the assistant.");
   }
   const perSession = await limited(
@@ -196,36 +200,50 @@ export async function handleAssistantPost(request: Request): Promise<Response> {
 }
 
 /**
- * GET /api/assistant — session bootstrap: issues the opaque session cookie if this browser has
- * none. It runs nothing, so a lost response costs nothing; the POST that follows reads it.
+ * Issues a new session generation (bootstrap or New Chat) and expires the superseded ones this
+ * request carried. The generation orders sessions independently of response arrival order.
  */
-export async function handleAssistantGet(): Promise<Response> {
+function issueSession(
+  request: Request,
+  response: NextResponse,
+  all: { name: string; value: string }[],
+) {
+  const generation = nextGeneration(all, new URL(request.url).searchParams.get("g"));
+  const secure = process.env.NODE_ENV === "production";
+  for (const old of sessionCookies(all)) {
+    if (old.generation < generation)
+      response.cookies.set(old.name, "", { ...sessionCookieOptions(secure), maxAge: 0 });
+  }
+  response.cookies.set(
+    sessionCookieName(generation),
+    generateSessionToken(),
+    sessionCookieOptions(secure),
+  );
+}
+
+/**
+ * GET /api/assistant — session bootstrap: issues a session if this browser has none. It runs
+ * nothing, so a lost response costs nothing; the POST that follows reads it. Its cookie carries a
+ * generation (session.ts), so if it arrives AFTER a New Chat it cannot replace that newer session.
+ */
+export async function handleAssistantGet(request: Request): Promise<Response> {
   const config = getAiConfig();
   const tenant = await getRequestTenant();
   if (!config || !tenant) return fail(404, "NOT_FOUND", "Not found.");
-  const existing = (await cookies()).get(AI_SESSION_COOKIE)?.value;
+  const all = (await cookies()).getAll();
   const response = new NextResponse(null, { status: 204, headers: noStore });
-  if (!isWellFormedSessionToken(existing)) {
-    response.cookies.set(
-      AI_SESSION_COOKIE,
-      generateSessionToken(),
-      sessionCookieOptions(process.env.NODE_ENV === "production"),
-    );
-  }
+  if (!currentSession(all)) issueSession(request, response, all);
   return response;
 }
 
 /**
- * DELETE /api/assistant — "New chat": replaces this browser's session with a fresh one. The old
- * conversation is not reachable from the browser any more; a reply still in flight for it cannot
- * bring it back (POST responses never set the session cookie).
+ * DELETE /api/assistant — "New chat": replaces this browser's session with a fresh one of a
+ * HIGHER generation. The old conversation is not reachable from the browser any more; neither a
+ * reply still in flight for it (POST responses never set the session cookie) nor a late bootstrap
+ * or page response (a lower generation) can bring an older session back.
  */
-export function handleAssistantDelete(): Response {
+export async function handleAssistantDelete(request: Request): Promise<Response> {
   const response = new NextResponse(null, { status: 204, headers: noStore });
-  response.cookies.set(
-    AI_SESSION_COOKIE,
-    generateSessionToken(),
-    sessionCookieOptions(process.env.NODE_ENV === "production"),
-  );
+  issueSession(request, response, (await cookies()).getAll());
   return response;
 }

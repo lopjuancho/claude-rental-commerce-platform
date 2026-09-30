@@ -43,7 +43,7 @@ export function systemPrompt(ctx: PromptContext): string {
 
 // ── grounding (typed evidence, see src/domain/assistant/grounding.ts) ─────
 
-export { checkGrounding, factSentences } from "@/domain/assistant/grounding";
+export { checkGrounding, factSentences, timeSensitiveClaims } from "@/domain/assistant/grounding";
 
 export const SAFE_FALLBACK =
   "I want to make sure I only share confirmed details. Please check the details shown below, or ask me to check again.";

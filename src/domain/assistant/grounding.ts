@@ -393,32 +393,109 @@ function withinWindow(t: number, start: number, end: number): boolean {
   return end > start ? t >= start && t <= end : t >= start || t <= end;
 }
 
-/** Quantities of the item itself ("500 units", "3 of them", "quantity 2"), not guest counts. */
+/**
+ * ONE canonical quantity parser (all syntaxes yield the same integer): digits with or without
+ * thousands separators ("1000", "1,000"), written numbers ("one thousand", "twenty five",
+ * "twenty-five", "five hundred") and dozens ("a dozen", "two dozen").
+ */
+const QTY_WORD = `(?:${NUMBER_WORD.slice(3, -1)}|dozens?)`;
+const QTY_NUMBER = `(?:\\d{1,3}(?:,\\d{3})+(?!\\d)|\\d+(?!\\d)|${QTY_WORD}(?:[\\s-]+${QTY_WORD})*)`;
+
+export function parseQuantity(raw: string): number | null {
+  const t = raw
+    .trim()
+    .toLowerCase()
+    .replace(/\bhalf a dozen\b/g, "six");
+  if (/^\d{1,3}(?:,\d{3})+$/.test(t) || /^\d+$/.test(t)) {
+    const n = Number(t.replace(/,/g, ""));
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  let total = 0;
+  let current = 0;
+  let seen = false;
+  for (const w of t.split(/[\s-]+/)) {
+    if (w === "and") continue;
+    if (w === "a") current = Math.max(current, 1);
+    else if (w === "dozen" || w === "dozens") current = Math.max(current, 1) * 12;
+    else if (w in UNITS) current += UNITS[w] ?? 0;
+    else if (w === "hundred") current = Math.max(current, 1) * 100;
+    else if (w in SCALES) {
+      total += Math.max(current, 1) * (SCALES[w] ?? 1);
+      current = 0;
+    } else return null;
+    if (w !== "a") seen = true;
+  }
+  return seen ? total + current : null;
+}
+
+const QTY_PREFIX = new RegExp(
+  `\\b(?:quantity|qty|quantities)\\.?\\s*(?:of\\s+|:\\s*|=\\s*|is\\s+|was\\s+)?(${QTY_NUMBER})(?![a-z])`,
+  "gi",
+);
+const QTY_SUFFIX = new RegExp(
+  `(?<![\\w,])(${QTY_NUMBER})\\s*(?:units?|of them|of those|pieces?|pcs|items?|sets?|copies|×|x)(?![a-z])`,
+  "gi",
+);
+const QTY_DOZEN = new RegExp(
+  `\\b(?:half a|${QTY_WORD}(?:[\\s-]+${QTY_WORD})*)\\s+dozens?\\b`,
+  "gi",
+);
+
+/**
+ * Quantities of the item itself ("500 units", "quantity 1,000", "qty twenty-five", "a dozen"),
+ * not guest counts. Every mention goes through parseQuantity; overlapping syntaxes count once.
+ */
 function quantityMentions(text: string): number[] {
   const out: number[] = [];
-  // Written numbers too ("five hundred units", "twenty-five of them", "a dozen").
-  for (const m of text.matchAll(
-    new RegExp(
-      `\\b(${NUMBER_WORD}(?:[\\s-]+${NUMBER_WORD})*)\\s+(?:units?|of them|pieces?|items?|sets?|copies)(?![a-z])`,
-      "gi",
-    ),
-  )) {
-    const n = wordsToNumber(m[1] ?? "");
-    if (n !== null && n > 0) out.push(n);
-  }
-  for (let n = (text.match(/\b(?:a|one) dozen\b/gi) ?? []).length; n > 0; n--) out.push(12);
-  for (const m of text.matchAll(
-    /\b(\d{1,3}(?:,\d{3})+|\d{1,6})\s*(?:units?|of them|pieces?|pcs|items?|sets?|copies|×|x)(?![a-z])/gi,
-  )) {
-    out.push(Number((m[1] ?? "").replace(/,/g, "")));
-  }
-  for (const m of text.matchAll(/\b(?:quantity|qty)\s*(?:of\s*)?:?\s*(\d{1,6})\b/gi)) {
-    out.push(Number(m[1]));
-  }
+  const taken: [number, number][] = [];
+  const add = (index: number, length: number, raw: string) => {
+    if (taken.some(([s, e]) => index < e && index + length > s)) return;
+    const n = parseQuantity(raw);
+    if (n === null || n <= 0) return;
+    taken.push([index, index + length]);
+    out.push(n);
+  };
+  for (const m of text.matchAll(QTY_PREFIX)) add(m.index, m[0].length, m[1] ?? "");
+  for (const m of text.matchAll(QTY_SUFFIX)) add(m.index, m[0].length, m[1] ?? "");
+  for (const m of text.matchAll(QTY_DOZEN)) add(m.index, m[0].length, m[0]);
   return out;
 }
 
 const QUOTE_NUMBER = /\b[A-Z][A-Z0-9]{0,7}-\d{1,9}\b/g;
+
+/** Nouns that make a claim about SEVERAL quotes/bookings at once ("both quotes", "the bookings"). */
+const PLURAL_QUOTE_NOUN = /\b(?:quotes|bookings|reservations|booking requests|holds)\b/i;
+/** Other plural wording ("both", "all of them", "they"): several subjects, which must be resolved. */
+const PLURAL_WORD =
+  /\b(?:both|each of (?:them|these|those|the)|all of (?:them|these|those|the)|every one|each one|all (?!set\b)(?:\w+ )?(?:are|were|have|is)|are all|they|they're|them|these|those)\b/i;
+const COUNT_WORDS: Record<string, number> = {
+  both: 2,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+/** How many quotes the wording says it is about ("both", "all three quotes", "2 bookings"). */
+function statedCount(text: string): number | null {
+  const m =
+    /\b(both|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\s+(?:of\s+(?:the|your|my|our|these|those)\s+)?(?:quotes|bookings|reservations|booking requests|holds)\b/i.exec(
+      text,
+    ) ??
+    /\ball\s+(two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\b/i.exec(text) ??
+    /\b(both)\b/i.exec(text);
+  if (!m) return null;
+  const w = (m[1] ?? "").toLowerCase();
+  return COUNT_WORDS[w] ?? (Number.isFinite(Number(w)) ? Number(w) : null);
+}
+function pluralSubject(text: string): { plural: boolean; noun: boolean; count: number | null } {
+  const noun = PLURAL_QUOTE_NOUN.test(text);
+  return { noun, plural: noun || PLURAL_WORD.test(text), count: statedCount(text) };
+}
 
 // ── claim patterns ───────────────────────────────────────────────────────────
 
@@ -551,21 +628,38 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     .filter((b) => b.status === "refused" || b.status === "confirmed" || liveHold(b, input.now))
     .filter((b) => b.message.length > 0)
     .sort((a, b) => b.message.length - a.message.length);
+  // The quote SET a stretch of the reply is about: the numbers named in its own sentence, or else
+  // all numbers of the nearest earlier sentence that names any.
+  const sentenceBounds = (at: number, end: number) => {
+    const before = text.slice(0, at);
+    const starts = [...before.matchAll(/[.!?](?:\s|$)|\n/g)];
+    const start = starts.length
+      ? (starts.at(-1)?.index ?? 0) + (starts.at(-1)?.[0].length ?? 0)
+      : 0;
+    const rest = text.slice(end).search(/[.!?](?:\s|$)|\n/);
+    return { start, stop: rest < 0 ? text.length : end + rest };
+  };
+  const carriedNumbers = (upTo: number): string[] => {
+    for (const earlier of sentencesOf(text.slice(0, upTo)).reverse()) {
+      const named = [...earlier.matchAll(QUOTE_NUMBER)].map((m) => m[0]);
+      if (named.length) return named;
+    }
+    return [];
+  };
   for (const b of scoped) {
     let from = 0;
     for (;;) {
       const at = text.indexOf(b.message, from);
       if (at < 0) break;
       from = at + b.message.length;
-      const before = [...text.slice(0, at).matchAll(QUOTE_NUMBER)].at(-1)?.[0];
-      const sentenceEnd = text.slice(from).search(/[.!?](?:\s|$)|\n/);
-      const after = [
-        ...text
-          .slice(from, sentenceEnd < 0 ? undefined : from + sentenceEnd)
-          .matchAll(QUOTE_NUMBER),
-      ].map((m) => m[0]);
-      const attributed = [...(before ? [before] : []), ...after];
-      if (attributed.every((n) => n === b.quoteNumber)) {
+      // The whole subject set this message is attributed to must be the message's own quote: an
+      // exemption never erases the other subjects ("Quotes Q-2 and Q-1: This booking is
+      // confirmed" is about Q-2 as well) and never covers plural wording ("Both quotes: …").
+      const { start, stop } = sentenceBounds(at, from);
+      const around = `${text.slice(start, at)} ${text.slice(from, stop)}`;
+      const inSentence = [...around.matchAll(QUOTE_NUMBER)].map((m) => m[0]);
+      const attributed = inSentence.length ? inSentence : carriedNumbers(start);
+      if (!pluralSubject(around).plural && attributed.every((n) => n === b.quoteNumber)) {
         text = text.slice(0, at) + " ".repeat(b.message.length) + text.slice(from);
       }
     }
@@ -576,6 +670,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       .concat(fresh(input, "booking").map((b) => b.quoteNumber)),
   );
 
+  let carried: string[] = [];
   for (const sentence of sentencesOf(text)) {
     const question = sentence.endsWith("?");
     const products = productsNamed(sentence, input.knownProducts);
@@ -583,6 +678,10 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     const times = timeMentions(sentence);
     const quantities = quantityMentions(sentence);
     const quoteNumbers = [...sentence.matchAll(QUOTE_NUMBER)].map((m) => m[0]);
+    // Quote numbers of the nearest earlier sentence naming any (the subject an unnumbered claim
+    // continues).
+    const earlier = carried;
+    if (quoteNumbers.length) carried = quoteNumbers;
     const unknown = unknownSubjects(sentence, input.knownProducts, input.businessName);
 
     // A quote number the conversation never had is an invented reference.
@@ -680,16 +779,29 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       }
     }
 
-    // Booking and hold claims are about ONE quote: the one named, or the latest one.
-    // Booking and hold claims: EVERY quote the sentence names must itself have the claimed state
-    // (one confirmed quote never authorises "Q-1 and Q-2 are confirmed"); with no number named,
-    // the latest booking is the subject.
-    const subjectsOf = (): (EvidenceOf<"booking"> | null)[] =>
-      quoteNumbers.length
-        ? [...new Set(quoteNumbers)].map((n) =>
-            latest(input, "booking", (b) => b.quoteNumber === n),
-          )
-        : [latest(input, "booking")];
+    // Booking and hold claims: EVERY asserted subject must be resolved and itself have the
+    // claimed state. Subjects are the quotes named in the sentence; with none named, those of the
+    // nearest earlier sentence naming any; plural wording ("both quotes", "all three bookings",
+    // "they") with nothing named means every quote of this conversation — and must match any
+    // stated count. One confirmed quote never authorises a claim about several; a plural claim
+    // that cannot be resolved exactly is rejected (null subject).
+    const subjectsOf = (): (EvidenceOf<"booking"> | null)[] => {
+      const shape = pluralSubject(sentence);
+      const bookingOf = (n: string) => latest(input, "booking", (b) => b.quoteNumber === n);
+      const named = [...new Set(quoteNumbers.length ? quoteNumbers : earlier)];
+      if (named.length) {
+        if (shape.count !== null && shape.count !== named.length) return [null];
+        if (shape.noun && named.length < 2) return [null];
+        return named.map(bookingOf);
+      }
+      if (!shape.plural) return [latest(input, "booking")];
+      const all = [...knownQuotes];
+      if (all.length < 2) {
+        return shape.noun || (shape.count ?? 0) >= 2 ? [null] : [latest(input, "booking")];
+      }
+      if (shape.count !== null && shape.count !== all.length) return [null];
+      return all.map(bookingOf);
+    };
 
     for (const m of sentence.matchAll(BOOKED_CLAIM)) {
       if (negated(sentence, m.index)) continue;
@@ -745,6 +857,28 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     }
   }
   return { ok: violations.size === 0, violations: [...violations] };
+}
+
+// ── time-sensitive prose (replay) ────────────────────────────────────────────
+
+/** Any mention of a booking's status, in either polarity ("not confirmed yet" can become false). */
+const BOOKING_STATUS_MENTION =
+  /\b(?:book(?:ed|ing)|confirm(?:ed|ation)|reserv(?:ed|ation)|held|holds?|holding|on hold|declined|cancel(?:l)?ed|awaiting|pending|locked in|secured|all set)\b/i;
+
+/**
+ * Whether a stored reply states something TIME-SENSITIVE: a booking/hold status or availability.
+ * Such prose was true when it passed grounding, not necessarily now, so it is never replayed as
+ * stored (ADR 0017 §14): the server re-reads the current state or replaces it with a neutral line.
+ */
+export function timeSensitiveClaims(reply: string): { booking: boolean; availability: boolean } {
+  const text = blankFillers(reply.replace(/[‘’]/g, "'"));
+  return {
+    booking:
+      BOOKING_STATUS_MENTION.test(text) ||
+      new RegExp(BOOKED_CLAIM.source, "i").test(text) ||
+      new RegExp(HOLD_CLAIM.source, "i").test(text),
+    availability: new RegExp(AVAILABLE_CLAIM.source, "i").test(text),
+  };
 }
 
 // ── server-written facts (used when the model's prose cannot be trusted) ─────

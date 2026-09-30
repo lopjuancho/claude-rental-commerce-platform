@@ -17,10 +17,22 @@
  *
  * Every check FAILS when the expected tool call, card or result is missing: an empty result is
  * never a pass. Tool calls are verified in the database (ai_actions for this conversation), and so
- * is the absence of duplicate quotes, events and booking requests.
+ * is the absence of duplicate quotes, events and booking requests. Every database check is scoped
+ * to the staging tenant's organization (resolved from the host) and the EXACT quote (resolved from
+ * its private link) — quote numbers are unique only inside an organization (scripts/ai-smoke-db.mjs).
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
+import {
+  bookingRequestsFor,
+  countForCustomer,
+  currentSessionToken,
+  expireQuote,
+  makeQuoteStale,
+  quoteByLink,
+  resolveOrganization,
+  toolsRun,
+} from "./ai-smoke-db.mjs";
 
 const env = process.env;
 if (env.AI_SMOKE_CONFIRM !== "live" || !env.AI_SMOKE_BASE_URL || !env.AI_SMOKE_DATABASE_URL) {
@@ -70,25 +82,15 @@ const saturday = (weeksAhead) => {
   return d.toISOString().slice(0, 10);
 };
 
-async function sessionRows() {
-  const hash = createHash("sha256")
-    .update(`ai:${cookies.get("rc_ai") ?? ""}`)
-    .digest("hex");
-  const tools = await db.query(
-    "select distinct a.tool_name from public.ai_actions a join public.ai_conversations c on c.id = a.conversation_id where c.session_hash = $1 and a.status in ('ok','manual_review')",
-    [hash],
-  );
-  return new Set(tools.rows.map((r) => r.tool_name));
-}
-const countFor = async (email, sql) => Number((await db.query(sql, [email])).rows[0]?.n ?? -1);
-
 async function main() {
   await db.connect();
+  const org = await resolveOrganization(db, base.hostname);
+  if (!org) throw new Error("the base URL's host does not resolve to an organization");
   // 0. The storefront page view issues the visitor and assistant session cookies.
   remember(await fetch(base, { headers: { cookie: cookieHeader() } }));
   check(
-    "storefront issues rc_visitor and rc_ai",
-    cookies.has("rc_visitor") && cookies.has("rc_ai"),
+    "storefront issues rc_visitor and an assistant session",
+    cookies.has("rc_visitor") && currentSessionToken(cookies) !== null,
   );
 
   // 1–2. A plain turn (every model call sends all ten strict tool schemas: a rejected schema
@@ -198,18 +200,19 @@ async function main() {
     qB.quoteNumber !== q3.quoteNumber &&
     qB.url !== q3.url;
   check("two distinct quotes: A active in this chat, B from another session", distinct);
-  if (distinct) {
+  // The exact quotes of THIS tenant (primary keys), never a quote number alone.
+  const quoteA = await quoteByLink(db, org, q3?.url);
+  const quoteB = await quoteByLink(db, org, qB?.url);
+  check("both quotes resolve to this tenant's exact quotes", quoteA !== null && quoteB !== null);
+  if (distinct && quoteA && quoteB) {
     const ambiguous = await turn("Please request the booking.", {
       page: { kind: "quote", token: qB.url.replace("/q/", "") },
     });
-    const both = await db.query(
-      "select count(*)::int n from public.booking_requests b join public.quotes q on q.id = b.quote_id where q.quote_number = any($1) and q.source = 'assistant'",
-      [[q3.quoteNumber, qB.quoteNumber]],
-    );
+    const both = await bookingRequestsFor(db, org, [quoteA.id, quoteB.id]);
     check(
       "viewing B while A is active: no booking for either until the customer chooses",
-      blocks(ambiguous, "booking").every((x) => x.status !== "hold_placed") && both.rows[0].n === 0,
-      `bookings: ${String(both.rows[0].n)}`,
+      blocks(ambiguous, "booking").every((x) => x.status !== "hold_placed") && both === 0,
+      `bookings: ${String(both)}`,
     );
   }
 
@@ -227,12 +230,8 @@ async function main() {
   const expiredQuote = await turn(
     `Please create a quote for one ${name} on ${saturday(12)} from 10:00 to 12:00, pickup.`,
   );
-  const qe = one(expiredQuote, "quote");
-  if (qe?.quoteNumber) {
-    await db.query(
-      "update public.quotes set status = 'sent', expires_at = now() - interval '1 minute' where quote_number = $1 and source = 'assistant'",
-      [qe.quoteNumber],
-    );
+  const qe = await quoteByLink(db, org, one(expiredQuote, "quote")?.url);
+  if (qe && (await expireQuote(db, org, qe.id)) === 1) {
     const r = await turn("Please request the booking for this quote.");
     check(
       "expired quote → refused",
@@ -242,12 +241,8 @@ async function main() {
   const staleQuote = await turn(
     `Please create a quote for one ${name} on ${saturday(13)} from 10:00 to 12:00, pickup.`,
   );
-  const qs = one(staleQuote, "quote");
-  if (qs?.quoteNumber) {
-    await db.query(
-      "update public.events set end_time = '13:00' where id = (select event_id from public.quotes where quote_number = $1 and source = 'assistant')",
-      [qs.quoteNumber],
-    );
+  const qs = await quoteByLink(db, org, one(staleQuote, "quote")?.url);
+  if (qs && (await makeQuoteStale(db, org, qs.id)) === 1) {
     const r = await turn("Please request the booking for this quote.");
     check(
       "stale quote → refused",
@@ -272,7 +267,7 @@ async function main() {
   }
 
   // 3/12–13. Every tool actually ran (database), and nothing was created twice.
-  const ran = await sessionRows();
+  const ran = await toolsRun(db, org, currentSessionToken(cookies));
   for (const t of [
     "search_products",
     "get_product_details",
@@ -287,16 +282,10 @@ async function main() {
   ]) {
     check(`tool actually called: ${t}`, ran.has(t));
   }
-  const quotes = await countFor(
-    email,
-    "select count(*)::int n from public.quotes q join public.customers c on c.id = q.customer_id where c.email = $1",
-  );
+  const quotes = await countForCustomer(db, org, email, "quotes");
   // q, q2 (add item), q3 (new date), expired, stale = 5 quotes for this customer, no duplicates.
   check("database: exactly one quote per request (5)", quotes === 5, String(quotes));
-  const holds = await countFor(
-    email,
-    "select count(*)::int n from public.booking_requests b join public.quotes q on q.id = b.quote_id join public.customers c on c.id = q.customer_id where c.email = $1",
-  );
+  const holds = await countForCustomer(db, org, email, "bookings");
   check("database: exactly one booking request", holds === 1, String(holds));
 
   const failed = results.filter((r) => !r.ok);

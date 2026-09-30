@@ -3,8 +3,8 @@ import { type NextRequest, NextResponse } from "next/server";
 import { buildContentSecurityPolicy, STATIC_SECURITY_HEADERS } from "@/server/security/headers";
 import {
   AI_SESSION_COOKIE,
+  currentSession,
   generateSessionToken,
-  isWellFormedSessionToken,
   sessionCookieOptions,
 } from "@/server/ai/session";
 import {
@@ -76,10 +76,12 @@ export async function middleware(request: NextRequest) {
   }
 
   // The assistant session exists before any assistant message can change anything (ADR 0017 §11):
-  // issued with the storefront page, not by the mutation-capable POST.
+  // issued with the storefront page, not by the mutation-capable POST. Page views issue only
+  // generation 0 (`rc_ai`), the lowest: a late page or prefetch response can never displace a
+  // session the widget established (ADR 0017 §15).
   if (
     shouldIssueVisitorCookie(request.method, request.nextUrl.pathname, undefined) &&
-    !isWellFormedSessionToken(request.cookies.get(AI_SESSION_COOKIE)?.value)
+    !currentSession(request.cookies.getAll())
   ) {
     response.cookies.set(
       AI_SESSION_COOKIE,

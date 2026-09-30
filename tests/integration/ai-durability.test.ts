@@ -3,7 +3,7 @@ import { beforeAll, expect, it } from "vitest";
 import { runTurn, type TurnDeps, type TurnInput } from "@/server/ai/assistant";
 import { emptyState } from "@/server/ai/context";
 import { Deadline } from "@/server/ai/deadline";
-import { durableJournal } from "@/server/ai/journal";
+import { durableJournal, publicBlock } from "@/server/ai/journal";
 import { sessionSealer } from "@/server/ai/seal";
 import type { LlmProvider, LlmRequest, LlmResponse } from "@/server/ai/provider";
 import { generateSessionToken, hashSessionToken } from "@/server/ai/session";
@@ -1112,13 +1112,20 @@ async function booked(storeForBooking?: AiConversationStore) {
   return { c, key, first, booking: row.rows[0]! };
 }
 
-type Change = "expire" | "cancel" | "decline" | "confirm";
+type Change = "expire" | "cancel" | "decline" | "confirm" | "release";
 async function change(what: Change, b: { id: string; token_hash: string; reservation_id: string }) {
   if (what === "expire") {
     // The clock passes the hold's end (the sweeper has not run).
     await admin(
       `begin; set local session_replication_role = replica;
        update public.reservations set hold_expires_at = now() - interval '1 minute' where id = '${b.reservation_id}';
+       commit;`,
+    );
+  } else if (what === "release") {
+    // The hold is no longer active although its end time is still in the future.
+    await admin(
+      `begin; set local session_replication_role = replica;
+       update public.reservations set status = 'released', hold_expires_at = now() + interval '10 minutes' where id = '${b.reservation_id}';
        commit;`,
     );
   } else if (what === "cancel") {
@@ -1136,6 +1143,7 @@ const expected: Record<Change, string> = {
   cancel: "cancelled",
   decline: "declined",
   confirm: "confirmed",
+  release: "awaiting_review",
 };
 
 describeRest("replayed and recovered bookings show the CURRENT state (R3-M1)", () => {
@@ -1309,4 +1317,151 @@ describeRest("replayed and recovered bookings show the CURRENT state (R3-M1)", (
     expect(linkOf(replay)).toBeNull();
     expect(await quotesFor(c.email)).toBe(1);
   });
+});
+
+// ── round 4 (Codex review of bc328e3) ───────────────────────────────────────
+
+const HEX64 = /\b[0-9a-f]{64}\b/;
+/** Exactly what POST /api/assistant sends to the browser for a turn result. */
+const httpBody = (r: Awaited<ReturnType<typeof runTurn>>) =>
+  JSON.stringify({ ...r, blocks: r.blocks.map(publicBlock), correlationId: "c" });
+const turnResponse = async (session: string, key: string) =>
+  (
+    await admin<{ response: Record<string, unknown> }>(
+      `select t.response from public.ai_turns t join public.ai_conversations c on c.id = t.conversation_id
+       where c.session_hash = $1 and t.request_key = $2`,
+      [await hashSessionToken(session), key],
+    )
+  ).rows[0]!.response;
+const PROSE_HOLD = "Your items are being held right now while the team reviews the request.";
+
+describeRest("time-sensitive prose is revalidated on replay (R3-M1, round 4)", () => {
+  /** A booking, then a LATER prose-only turn (no tool call, no card) that states the hold. */
+  async function proseHold() {
+    const b = await booked();
+    const key = randomUUID();
+    const said = await b.c.turn("is it still held?", deps(model([{ say: PROSE_HOLD }])), key);
+    expect(said.reply).toBe(PROSE_HOLD); // grounded while the hold is live
+    expect(said.blocks).toEqual([]);
+    return { ...b, proseKey: key };
+  }
+
+  it.each(["expire", "cancel", "decline", "confirm", "release"] as const)(
+    "a prose-only hold reply replayed after the booking changed (%s): current state, never the old prose",
+    async (what) => {
+      const { c, proseKey, booking } = await proseHold();
+      await change(what, booking);
+      const replay = await c.turn("is it still held?", deps(model([{ fail: true }])), proseKey);
+      expect(replay.replayed).toBe(true);
+      expect(replay.reply).not.toContain(PROSE_HOLD);
+      expect(replay.reply).toMatch(/^Here is where your request stands now\./);
+      expect(replay.reply).not.toMatch(/held until|being held/);
+      if (what !== "confirm") expect(replay.reply).not.toMatch(/is confirmed/);
+      const block = replay.blocks.find((x) => x.type === "booking") as
+        { status: string } | undefined;
+      expect(block?.status).toBe(expected[what]);
+      expect(httpBody(replay)).not.toContain(booking.token_hash);
+      expect(httpBody(replay)).not.toMatch(HEX64);
+    },
+  );
+
+  it("a prose-only hold reply replayed while the hold is live shows the CURRENT end time", async () => {
+    const { c, proseKey, booking } = await proseHold();
+    const replay = await c.turn("is it still held?", deps(model([{ fail: true }])), proseKey);
+    expect(replay.reply).not.toContain(PROSE_HOLD);
+    expect(replay.reply).toMatch(/held until \d{1,2}:\d{2}\s?[AP]M/);
+    expect(replay.blocks.find((x) => x.type === "booking")).toMatchObject({ status: "holding" });
+    expect(httpBody(replay)).not.toContain(booking.token_hash);
+  });
+
+  it("the stored response carries the server-side booking reference (never sent out)", async () => {
+    const { c, proseKey, booking } = await proseHold();
+    const stored = await turnResponse(c.session, proseKey);
+    expect(stored).toMatchObject({
+      v: 2,
+      refs: { bookings: [{ quoteRef: booking.token_hash }] },
+    });
+    const replay = await c.turn("is it still held?", deps(model([{ fail: true }])), proseKey);
+    expect(JSON.stringify(replay)).not.toContain('"refs"');
+    expect(httpBody(replay)).not.toMatch(HEX64);
+  });
+
+  it("a legacy stored reply without any reference is never replayed as a status: neutral line", async () => {
+    const { c, proseKey } = await proseHold();
+    // As stored before references existed: prose only, no refs, no version.
+    await admin(
+      `update public.ai_turns t set response = jsonb_build_object('status','ok','reply',$3::text,'blocks','[]'::jsonb)
+       from public.ai_conversations c where c.id = t.conversation_id and c.session_hash = $1 and t.request_key = $2`,
+      [await hashSessionToken(c.session), proseKey, PROSE_HOLD],
+    );
+    const replay = await c.turn("is it still held?", deps(model([{ fail: true }])), proseKey);
+    expect(replay.reply).toBe(
+      "The booking status needs to be checked again. Ask me for the latest status and I'll look it up.",
+    );
+    expect(replay.blocks).toEqual([]);
+  });
+
+  it("a legacy booking card without quoteRef is dropped, not shown as current", async () => {
+    const { c, key } = await booked();
+    await admin(
+      `update public.ai_turns t set response = jsonb_build_object('status','ok','reply',
+         'Your booking request has been submitted and the inventory is being held for 15 minutes.',
+         'blocks', jsonb_build_array(jsonb_build_object('type','booking','status','hold_placed','quoteNumber','Q-9',
+           'holdExpiresAt', now()::text, 'message','held')))
+       from public.ai_conversations c where c.id = t.conversation_id and c.session_hash = $1 and t.request_key = $2`,
+      [await hashSessionToken(c.session), key],
+    );
+    const replay = await c.turn("request the booking", deps(model([{ fail: true }])), key);
+    expect(replay.reply).toMatch(/^The booking status needs to be checked again\./);
+    expect(replay.blocks.find((x) => x.type === "booking")).toBeUndefined();
+  });
+
+  it("a legacy availability reply is not repeated as current", async () => {
+    const c = conversation();
+    const key = randomUUID();
+    await c.turn("hi", deps(model([{ say: "Hello! How can I help?" }])), key);
+    await admin(
+      `update public.ai_turns t set response = jsonb_build_object('status','ok','reply',
+         'Bounce Castle is available on that date.','blocks','[]'::jsonb)
+       from public.ai_conversations c where c.id = t.conversation_id and c.session_hash = $1 and t.request_key = $2`,
+      [await hashSessionToken(c.session), key],
+    );
+    const replay = await c.turn("hi", deps(model([{ fail: true }])), key);
+    expect(replay.reply).toMatch(/^Availability can change/);
+    // A reply with nothing time-sensitive replays as it was.
+    const other = randomUUID();
+    await c.turn("thanks", deps(model([{ say: "You're welcome!" }])), other);
+    expect((await c.turn("thanks", deps(model([{ fail: true }])), other)).reply).toBe(
+      "You're welcome!",
+    );
+  });
+
+  it.each([
+    ["live (holdActive true)", null, "holding"],
+    ["release (holdActive false, future expiry)", "release", "awaiting_review"],
+    ["expire", "expire", "awaiting_review"],
+    ["cancel", "cancel", "cancelled"],
+    ["decline", "decline", "declined"],
+    ["confirm", "confirm", "confirmed"],
+  ] as const)(
+    "a COMMITTED journal entry replayed after the booking changed: %s",
+    async (_label, what, status) => {
+      // The booking request committed; the turn then failed (provider down) and is retried.
+      const { c, key, booking } = await booked(failing([]));
+      expect(await bookingsFor(c.email)).toBe(1);
+      if (what) await change(what, booking);
+      const retry = await c.turn(
+        "request the booking",
+        deps(model([tool("request_booking"), { say: "Here is the status." }])),
+        key,
+      );
+      const block = retry.blocks.find((x) => x.type === "booking") as
+        { status: string; message: string } | undefined;
+      expect(block?.status).toBe(status);
+      expect(retry.reply).not.toMatch(/held for \d+ minutes/);
+      if (status === "holding") expect(block?.message).toMatch(/held until/);
+      expect(httpBody(retry)).not.toContain(booking.token_hash);
+      expect(await bookingsFor(c.email)).toBe(1);
+    },
+  );
 });

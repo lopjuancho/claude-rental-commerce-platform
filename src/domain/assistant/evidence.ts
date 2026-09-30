@@ -97,6 +97,15 @@ export const evidenceSchema = z.discriminatedUnion("kind", [
     holdExpiresAt: z.string().max(40).nullable(),
     /** The exact server-written message for this state (the only prose that bypasses checks). */
     message: z.string().max(400),
+    /**
+     * Server-side reference (the quote's token hash) used to re-read the booking's CURRENT state
+     * when a reply about it is replayed. Stored with the conversation; never sent to the browser
+     * or the model.
+     */
+    quoteRef: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   }),
 ]);
 export type Evidence = z.infer<typeof evidenceSchema>;

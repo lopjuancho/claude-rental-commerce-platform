@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { addEvidence, type Evidence, type EvidenceOf } from "@/domain/assistant/evidence";
-import { checkGrounding, factSentences, type GroundingInput } from "@/domain/assistant/grounding";
+import {
+  checkGrounding,
+  factSentences,
+  type GroundingInput,
+  parseQuantity,
+} from "@/domain/assistant/grounding";
 
 /**
  * H1 (Codex review of 88d1f29): the model's prose is not an authority for transactional facts.
@@ -504,5 +509,152 @@ describe("Codex round-3 bypasses: every assertion matches its OWN subject", () =
         currency: "USD",
       }).ok,
     ).toBe(false);
+  });
+});
+
+describe("Codex round-4 bypasses: every asserted subject is resolved and supported", () => {
+  const JAN2 = "2027-01-02";
+  const partySlide: Evidence = {
+    kind: "availability",
+    at: at(),
+    productSlug: "party-slide",
+    productName: "Party Slide",
+    variantId: "v-party",
+    start: `${JAN2}T18:00:00Z`,
+    end: `${JAN2}T22:00:00Z`,
+    dates: [JAN2],
+    startLocal: "12:00",
+    endLocal: "16:00",
+    quantity: 1,
+    result: "available",
+  };
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const refusedQ = (n: string): Evidence => ({
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const q1 = confirmedQ("Q-1");
+  const q2 = refusedQ("Q-2");
+  const ORDERS: [string, Evidence[]][] = [
+    ["Q-1 first, Q-2 second", [q1, q2]],
+    ["Q-2 first, Q-1 second", [q2, q1]],
+  ];
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: ["Party Slide"],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    });
+
+  describe.each(ORDERS)("evidence order: %s", (_label, evidence) => {
+    it("1. “Both quotes are booked.” never resolves to the latest single booking", () => {
+      expect(run("Both quotes are booked.", evidence).ok).toBe(false);
+      expect(run("Both bookings are confirmed.", evidence).ok).toBe(false);
+      expect(run("All the quotes are booked.", evidence).ok).toBe(false);
+      expect(run("The bookings are confirmed.", evidence).ok).toBe(false);
+      expect(run("They are both confirmed.", evidence).ok).toBe(false);
+      expect(run("All three quotes are booked.", evidence).ok).toBe(false);
+      expect(run("Quotes Q-1, Q-2 and Q-3 are held.", evidence).ok).toBe(false);
+    });
+
+    it("2. “Quotes Q-2 and Q-1: This booking is confirmed by the team.” keeps the whole subject set", () => {
+      expect(run("Quotes Q-2 and Q-1: This booking is confirmed by the team.", evidence).ok).toBe(
+        false,
+      );
+      expect(run("Quotes Q-1 and Q-2: This booking is confirmed by the team.", evidence).ok).toBe(
+        false,
+      );
+      expect(
+        run("I checked Q-2 and Q-1. This booking is confirmed by the team.", evidence).ok,
+      ).toBe(false);
+      expect(run("Both quotes: This booking is confirmed by the team.", evidence).ok).toBe(false);
+      // The message about its own quote alone stays exempt.
+      expect(run("Quote Q-1: This booking is confirmed by the team.", evidence).ok).toBe(true);
+    });
+  });
+
+  it("plural claims pass only when EXACTLY the referenced set is known and all have the state", () => {
+    const q3 = confirmedQ("Q-3");
+    expect(run("Both quotes are booked.", [q1, q3]).ok).toBe(true);
+    expect(run("Both quotes are booked.", [q3, q1]).ok).toBe(true);
+    expect(run("Both bookings are confirmed.", [q1]).ok).toBe(false); // only one known
+    expect(run("All three quotes are booked.", [q1, q3]).ok).toBe(false); // count mismatch
+    expect(run("All three quotes are booked.", [q1, q3, confirmedQ("Q-4")]).ok).toBe(true);
+    expect(run("Quotes Q-1, Q-2 and Q-3 are held.", [heldQ("Q-1"), heldQ("Q-2")]).ok).toBe(false);
+    expect(
+      run("Quotes Q-1, Q-2 and Q-3 are held.", [heldQ("Q-1"), heldQ("Q-2"), heldQ("Q-3")]).ok,
+    ).toBe(true);
+    expect(run("Both quotes are held.", [heldQ("Q-1"), refusedQ("Q-2")]).ok).toBe(false);
+  });
+
+  it("3. “quantity 1,000” is one thousand, not one", () => {
+    expect(run("Party Slide is available on 2027-01-02, quantity 1,000.", [partySlide]).ok).toBe(
+      false,
+    );
+    expect(run("Party Slide is available on 2027-01-02, qty 1,000.", [partySlide]).ok).toBe(false);
+    expect(run("Party Slide is available on 2027-01-02, quantity 1000.", [partySlide]).ok).toBe(
+      false,
+    );
+  });
+
+  it("4. “quantity twenty-five” and every written quantity are parsed", () => {
+    for (const q of [
+      "quantity twenty-five",
+      "quantity twenty five",
+      "quantity one thousand",
+      "quantity a dozen",
+      "qty 1,000",
+      "twenty-five units",
+      "a dozen",
+    ]) {
+      expect(run(`Party Slide is available on 2027-01-02, ${q}.`, [partySlide]).ok, q).toBe(false);
+    }
+    expect(run("Party Slide is available on 2027-01-02, quantity one.", [partySlide]).ok).toBe(
+      true,
+    );
+    expect(run("Party Slide is available on 2027-01-02, quantity 1.", [partySlide]).ok).toBe(true);
+  });
+
+  it("one canonical quantity parser: every syntax yields the same integer", () => {
+    expect(parseQuantity("1000")).toBe(1000);
+    expect(parseQuantity("1,000")).toBe(1000);
+    expect(parseQuantity("one thousand")).toBe(1000);
+    expect(parseQuantity("twenty-five")).toBe(25);
+    expect(parseQuantity("twenty five")).toBe(25);
+    expect(parseQuantity("five hundred")).toBe(500);
+    expect(parseQuantity("a dozen")).toBe(12);
+    expect(parseQuantity("two dozen")).toBe(24);
+    expect(parseQuantity("half a dozen")).toBe(6);
+    expect(parseQuantity("banana")).toBeNull();
+    const same = (reply: string) =>
+      run(`Party Slide is available on 2027-01-02, ${reply}.`, [{ ...partySlide, quantity: 1000 }])
+        .ok;
+    for (const form of [
+      "1000 units",
+      "1,000 units",
+      "quantity 1000",
+      "quantity 1,000",
+      "qty 1000",
+      "quantity one thousand",
+    ]) {
+      expect(same(form), form).toBe(true);
+    }
+    const dozen = (form: string) =>
+      run(`Party Slide is available on 2027-01-02, ${form}.`, [{ ...partySlide, quantity: 12 }]).ok;
+    expect(dozen("a dozen")).toBe(true);
+    expect(dozen("quantity a dozen")).toBe(true);
+    expect(dozen("quantity twenty-five")).toBe(false);
+    const twentyFive = (form: string) =>
+      run(`Party Slide is available on 2027-01-02, ${form}.`, [{ ...partySlide, quantity: 25 }]).ok;
+    for (const form of ["quantity twenty-five", "quantity twenty five", "twenty-five units"]) {
+      expect(twentyFive(form), form).toBe(true);
+    }
   });
 });

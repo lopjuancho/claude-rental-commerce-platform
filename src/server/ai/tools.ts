@@ -1211,7 +1211,15 @@ export async function currentBooking(
       },
     ],
     evidence: [
-      { kind: "booking", at, quoteNumber: qn, status: evidenceStatus, holdExpiresAt, message },
+      {
+        kind: "booking",
+        at,
+        quoteNumber: qn,
+        status: evidenceStatus,
+        holdExpiresAt,
+        message,
+        quoteRef: target.tokenHash,
+      },
     ],
   });
   if (!b) {
@@ -1277,6 +1285,7 @@ function committedBooking(
             quoteNumber: quote.quoteNumber,
             holdExpiresAt,
             message,
+            quoteRef: quote.tokenHash,
           },
         ],
         evidence: [
@@ -1287,6 +1296,7 @@ function committedBooking(
             status: "refused",
             holdExpiresAt,
             message,
+            quoteRef: quote.tokenHash,
           },
         ],
       },
@@ -1335,6 +1345,7 @@ function committedBooking(
           status: "hold_placed",
           holdExpiresAt,
           message,
+          quoteRef: quote.tokenHash,
         },
       ],
     },
@@ -1412,6 +1423,7 @@ async function requestBookingTool(
         status: status === "confirmed" ? "confirmed" : "refused",
         holdExpiresAt: null,
         message: BOOKING_TEXT[status],
+        quoteRef: quote.tokenHash,
       },
     ],
   });
@@ -1439,6 +1451,7 @@ async function requestBookingTool(
           status: "holding",
           holdExpiresAt: until,
           message,
+          quoteRef: quote.tokenHash,
         },
       ],
     };
