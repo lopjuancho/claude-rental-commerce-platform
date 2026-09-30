@@ -327,6 +327,13 @@ export type Database = {
             referencedRelation: "public_catalog_categories";
             referencedColumns: ["organization_id", "id"];
           },
+          {
+            foreignKeyName: "categories_organization_id_parent_id_fkey";
+            columns: ["organization_id", "parent_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
+          },
         ];
       };
       customers: {
@@ -1226,6 +1233,13 @@ export type Database = {
             referencedColumns: ["organization_id", "id"];
           },
           {
+            foreignKeyName: "pricing_rules_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
+          },
+          {
             foreignKeyName: "pricing_rules_organization_id_fkey";
             columns: ["organization_id"];
             isOneToOne: false;
@@ -1292,6 +1306,13 @@ export type Database = {
             isOneToOne: false;
             referencedRelation: "public_catalog_categories";
             referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "product_categories_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
           },
           {
             foreignKeyName: "product_categories_organization_id_product_id_fkey";
@@ -1684,6 +1705,13 @@ export type Database = {
             isOneToOne: false;
             referencedRelation: "public_catalog_categories";
             referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "products_organization_id_primary_category_id_fkey";
+            columns: ["organization_id", "primary_category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
           },
         ];
       };
@@ -2489,6 +2517,13 @@ export type Database = {
             referencedColumns: ["organization_id", "id"];
           },
           {
+            foreignKeyName: "weather_block_targets_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
+          },
+          {
             foreignKeyName: "weather_block_targets_organization_id_product_id_fkey";
             columns: ["organization_id", "product_id"];
             isOneToOne: false;
@@ -2635,6 +2670,13 @@ export type Database = {
             referencedColumns: ["organization_id", "id"];
           },
           {
+            foreignKeyName: "weather_hazard_rules_organization_id_category_id_fkey";
+            columns: ["organization_id", "category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
+          },
+          {
             foreignKeyName: "weather_hazard_rules_organization_id_fkey";
             columns: ["organization_id"];
             isOneToOne: false;
@@ -2690,6 +2732,49 @@ export type Database = {
             isOneToOne: false;
             referencedRelation: "public_catalog_categories";
             referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "categories_organization_id_parent_id_fkey";
+            columns: ["organization_id", "parent_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
+          },
+        ];
+      };
+      public_catalog_category_summaries: {
+        Row: {
+          category_id: string | null;
+          cover_alt_text: string | null;
+          cover_height: number | null;
+          cover_media_id: string | null;
+          cover_width: number | null;
+          organization_id: string | null;
+          product_count: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "categories_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      public_catalog_event_types: {
+        Row: {
+          event_type: string | null;
+          organization_id: string | null;
+          product_count: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "products_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
           },
         ];
       };
@@ -2785,10 +2870,18 @@ export type Database = {
             referencedRelation: "public_catalog_categories";
             referencedColumns: ["organization_id", "id"];
           },
+          {
+            foreignKeyName: "products_organization_id_primary_category_id_fkey";
+            columns: ["organization_id", "primary_category_id"];
+            isOneToOne: false;
+            referencedRelation: "public_catalog_category_summaries";
+            referencedColumns: ["organization_id", "category_id"];
+          },
         ];
       };
       public_catalog_variants: {
         Row: {
+          effective_base_price_cents: number | null;
           id: string | null;
           is_default: boolean | null;
           name: string | null;
@@ -2822,6 +2915,22 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "service_areas_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      public_storefront_domains: {
+        Row: {
+          hostname: string | null;
+          is_primary: boolean | null;
+          organization_id: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "organization_domains_organization_id_fkey";
             columns: ["organization_id"];
             isOneToOne: false;
             referencedRelation: "organizations";

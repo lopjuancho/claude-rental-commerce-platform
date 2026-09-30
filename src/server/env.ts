@@ -16,6 +16,11 @@ export const serverEnvSchema = z
     APP_ORIGIN: z.url().optional(),
     /** Google Maps Platform key (Routes API). Server-only secret; restrict it to the Routes API. */
     GOOGLE_MAPS_API_KEY: z.string().min(20).optional(),
+    /**
+     * Storefront image derivatives via Supabase Storage image transformations (ADR 0016 §13).
+     * "on" only where the project has transformations enabled; otherwise originals are served.
+     */
+    STOREFRONT_IMAGE_TRANSFORMS: z.enum(["on", "off"]).default("off"),
   })
   .superRefine((env, ctx) => {
     if (env.APP_ENV === "production" && env.DEV_TENANT_SLUG) {

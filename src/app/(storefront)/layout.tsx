@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import type * as React from "react";
 import { SiteFooter, SiteHeader, type SiteBrand } from "@/components/storefront/site-chrome";
 import { TenantTheme } from "@/components/tenant-theme";
-import { brandAssetUrl, getStorefront } from "@/server/public/storefront";
+import { brandAssetUrl, getShell } from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 
 /**
@@ -12,7 +12,7 @@ import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 export default async function StorefrontLayout({ children }: { children: React.ReactNode }) {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
-  const store = await getStorefront(tenant);
+  const store = await getShell(tenant);
   const brand: SiteBrand = {
     name: tenant.name,
     logoUrl: brandAssetUrl(tenant.branding.logoPath),

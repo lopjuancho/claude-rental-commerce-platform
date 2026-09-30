@@ -5,6 +5,7 @@ import { FormMessage, idleState } from "@/components/form-message";
 import { MessageField } from "@/components/quote-fields";
 import { Button } from "@/components/ui/button";
 import { cancelBookingAction, renewHoldAction, requestBookingAction } from "../../quote/actions";
+import { useFollowRedirect } from "../../quote/follow-redirect";
 
 function Countdown({ until }: { until: string }) {
   const [now, setNow] = useState(() => Date.now());
@@ -28,6 +29,7 @@ function Countdown({ until }: { until: string }) {
 
 export function RequestBooking({ token }: { token: string }) {
   const [state, action, pending] = useActionState(requestBookingAction, idleState);
+  useFollowRedirect(state);
   return (
     <form action={action} className="grid gap-3">
       <input type="hidden" name="token" value={token} />
@@ -47,6 +49,8 @@ export function RequestBooking({ token }: { token: string }) {
 export function HoldStatus({ token, until }: { token: string; until: string }) {
   const [renewState, renew, renewing] = useActionState(renewHoldAction, idleState);
   const [cancelState, cancel, cancelling] = useActionState(cancelBookingAction, idleState);
+  useFollowRedirect(renewState);
+  useFollowRedirect(cancelState);
   return (
     <div className="grid gap-3 rounded-lg border p-4">
       <p>

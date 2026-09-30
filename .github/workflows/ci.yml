@@ -71,6 +71,7 @@ jobs:
         env:
           E2E_START_SERVER: "1"
           E2E_TENANTS: "1"
+          E2E_STORAGE: "1"
           APP_ENV: development
 
       - name: Cloudflare Workers bundle builds

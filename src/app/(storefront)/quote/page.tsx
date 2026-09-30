@@ -2,30 +2,30 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Container, CtaLink } from "@/components/storefront/ui";
 import { STALE_MESSAGE } from "@/domain/storefront/quote-step";
-import {
-  localToday,
-  normalizeItems,
-  prefillFromQuote,
-  type QuotePrefill,
-} from "@/domain/storefront/quote-prefill";
-import { listQuoteOptions } from "@/server/public/catalog";
-import { getPublicQuote } from "@/server/public/quotes";
+import { localToday } from "@/domain/storefront/quote-prefill";
+import { loadQuoteForm } from "@/server/public/quote-form";
 import { storefrontMetadata } from "@/server/public/site";
-import { getStorefront } from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 import { QuoteRequestForm } from "./quote-request-form";
 
 type Search = Promise<{ item?: string | string[]; from?: string | string[] }>;
 
-export async function generateMetadata(): Promise<Metadata> {
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Search;
+}): Promise<Metadata> {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
+  const query = await searchParams;
   return storefrontMetadata({
     tenant,
-    store: await getStorefront(tenant),
+    // Never canonicalize a token or a preselection: the canonical form is the blank one.
     path: "/quote",
     title: `Get a quote | ${tenant.name}`,
     description: `Check availability and get an itemized quote from ${tenant.name}.`,
+    // A form prefilled from a customer's quote link is customer-specific, whatever the token.
+    private: "from" in query,
   });
 }
 
@@ -37,33 +37,11 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function QuoteRequestPage({ searchParams }: { searchParams: Search }) {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
-  const [options, store, query] = await Promise.all([
-    listQuoteOptions(tenant),
-    getStorefront(tenant),
-    searchParams,
-  ]);
-  const offered = new Set(options.map((o) => o.variantId));
-
-  let prefill: QuotePrefill = { items: [], event: null };
-  let from: "stale" | "earlier" | null = null;
-  if (typeof query.from === "string") {
-    const earlier = await getPublicQuote(tenant, query.from).catch(() => null);
-    if (earlier) {
-      prefill = prefillFromQuote(earlier, tenant.timezone, offered);
-      from = earlier.stale ? "stale" : "earlier";
-    }
-  }
-  const item =
-    typeof query.item === "string" ? store.products.find((p) => p.slug === query.item) : null;
-  if (item?.defaultVariantId) {
-    prefill = {
-      ...prefill,
-      items: normalizeItems(
-        [...prefill.items, { variantId: item.defaultVariantId, quantity: 1 }],
-        offered,
-      ),
-    };
-  }
+  const query = await searchParams;
+  const { options, prefill, from } = await loadQuoteForm(tenant, {
+    item: typeof query.item === "string" ? query.item : null,
+    from: typeof query.from === "string" ? query.from : null,
+  });
 
   return (
     <Container className="grid max-w-2xl gap-6 py-8 sm:py-12">

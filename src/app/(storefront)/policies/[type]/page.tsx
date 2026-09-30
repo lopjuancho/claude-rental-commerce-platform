@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { Breadcrumbs, Container } from "@/components/storefront/ui";
 import { metaDescription } from "@/domain/storefront/seo";
 import { storefrontMetadata } from "@/server/public/site";
-import { getStorefront } from "@/server/public/storefront";
+import { getShell } from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 
 type Params = Promise<{ type: string }>;
@@ -12,18 +12,17 @@ type Params = Promise<{ type: string }>;
 async function context(params: Params) {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
-  const store = await getStorefront(tenant);
+  const store = await getShell(tenant);
   const { type } = await params;
   const policy = store.profile.policies.find((p) => p.type === type);
   if (!policy) notFound();
-  return { tenant, store, policy };
+  return { tenant, policy };
 }
 
 export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
-  const { tenant, store, policy } = await context(params);
+  const { tenant, policy } = await context(params);
   return storefrontMetadata({
     tenant,
-    store,
     path: `/policies/${policy.type}`,
     title: `${policy.title} | ${tenant.name}`,
     description: metaDescription(policy.body),

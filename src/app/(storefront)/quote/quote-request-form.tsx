@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { QuotePrefill } from "@/domain/storefront/quote-prefill";
 import { submitQuoteAction } from "./actions";
+import { useFollowRedirect } from "./follow-redirect";
 import { ItemPicker } from "./item-picker";
 
 function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
@@ -42,13 +43,20 @@ export function QuoteRequestForm({
   minDate: string;
 }) {
   const [state, action, pending] = useActionState(submitQuoteAction, idleState);
+  useFollowRedirect(state);
+  const busy = pending || Boolean(state.redirectTo);
   return (
-    <form action={action} className="grid gap-5" aria-busy={pending}>
+    <form action={action} className="grid gap-5" aria-busy={busy}>
       <Step n={1} title="What would you like to rent?">
         <ItemPicker options={options} initial={prefill.items} />
       </Step>
       <Step n={2} title="When and where is your event?">
-        <EventFields timeZone={timeZone} defaults={prefill.event} minDate={minDate} />
+        <EventFields
+          timeZone={timeZone}
+          defaults={prefill.event}
+          minDate={minDate}
+          {...(prefill.delivery ? { delivery: prefill.delivery } : {})}
+        />
       </Step>
       <Step n={3} title="How can we reach you?">
         <p className="-mt-2 text-sm text-muted-foreground">An email or phone number is required.</p>
@@ -62,10 +70,10 @@ export function QuoteRequestForm({
       <Button
         type="submit"
         size="lg"
-        disabled={pending}
+        disabled={busy}
         className="h-12 w-full rounded-full text-base font-bold"
       >
-        {pending ? "Checking availability & pricing…" : "Get my quote"}
+        {busy ? "Checking availability & pricing…" : "Get my quote"}
       </Button>
       <p className="text-center text-xs text-muted-foreground">
         Getting a quote does not reserve anything. You can request a booking on the next page; that

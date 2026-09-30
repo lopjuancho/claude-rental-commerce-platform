@@ -269,8 +269,13 @@ Delivery is priced before the engine runs (`src/domain/delivery/quote.ts`, ADR 0
   `public_storefront_settings`, `public_storefront_policies`, `public_service_areas`), loaded once
   per request (`server/public/storefront.ts`) and assembled by the pure `domain/storefront/*`
   modules (catalog model, price/spec presentation, JSON-LD, quote next step, quote prefill).
-- Only configured facts are shown or put in structured data; prices are base rates with the
-  quote qualifier. Canonical origin = verified primary domain; only production hosts are indexable.
+- Only configured facts are shown or put in structured data; prices are "From" the bookable
+  variants' engine starting price. Indexing and canonical URLs follow the verified request host
+  (`seoDecision`); token-prefilled forms are private.
+- Pages query exactly what they show (slug lookups, one page of products); anything that must be
+  complete is read with deterministic range pagination (`collectPages`), never one capped list.
+- Storefront server actions return `redirectTo` for the browser to follow instead of calling
+  `redirect()` (ADR 0016 §14).
 - Quote pages reuse the M5 services; a stale quote (event changed after pricing) asks to
   recalculate instead of offering a booking request.
 

@@ -149,7 +149,9 @@ Still open:
 - **System-context runtime tests:** there are no public write paths yet; the `ResolvedTenant` branded type and the ESLint allow-list guard them now. Runtime tests that system-context repositories reject mismatched tenants land with the first public write path (M5/M7).
 - **Auth flows against a real Supabase Auth server** (sign-in, sign-up, invitation acceptance, org switching end-to-end) run only in CI; the build sandbox could not pull Supabase images.
 - **MFA enforcement UI** for owner/admin (D9) — M8.
-- **Accessibility linting** (jsx-a11y is not ESLint-10 compatible). M6 Playwright checks cover one h1 per page, alt text, labelled form controls, skip link, touch-target size and no horizontal scroll on mobile; a full axe-core audit is still to be added.
+- **Accessibility linting** (jsx-a11y is not ESLint-10 compatible). M6 Playwright checks cover one h1 per page, alt text, labelled form controls, skip link and keyboard focus, keyboard-operable quote items, touch-target size and no horizontal scroll on mobile; a full axe-core audit is still to be added.
+- **Storefront image derivatives** (ADR 0016 §13): width-bounded images via Supabase image transformations behind `STOREFRONT_IMAGE_TRANSFORMS` (off by default); upload-time derivatives are planned for the media milestone. Until then originals (≤ 10 MB) are served.
+- **Sitemaps beyond 50,000 URLs** need a sitemap index (`generateSitemaps`); a single sitemap is generated today.
 - **Organization self-service onboarding** is intentionally absent; organizations are created by platform tooling (`create_organization`, service role).
 
 ## 8. M2 follow-ups (carried forward)

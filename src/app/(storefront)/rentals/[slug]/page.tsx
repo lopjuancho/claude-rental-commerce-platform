@@ -1,6 +1,7 @@
 import type { Metadata, Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { cache } from "react";
 import { JsonLd } from "@/components/storefront/json-ld";
 import {
   Breadcrumbs,
@@ -12,7 +13,7 @@ import {
   Section,
   StickyMobileCta,
 } from "@/components/storefront/ui";
-import { humanize, relatedProducts } from "@/domain/storefront/catalog";
+import { humanize } from "@/domain/storefront/catalog";
 import {
   priceSummary,
   PRICE_QUALIFIER,
@@ -20,28 +21,37 @@ import {
   weatherNotes,
 } from "@/domain/storefront/present";
 import { breadcrumbJsonLd, metaDescription, productJsonLd } from "@/domain/storefront/seo";
-import { siteOrigin, storefrontMetadata } from "@/server/public/site";
-import { brandAssetUrl, getStorefront } from "@/server/public/storefront";
+import { getSeo, storefrontMetadata } from "@/server/public/site";
+import {
+  brandAssetUrl,
+  getShell,
+  loadProductBySlug,
+  loadRelatedProducts,
+} from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 
 type Params = Promise<{ slug: string }>;
 
-/** The product must be published by the host's tenant; any other slug (incl. another tenant's) 404s. */
-async function context(params: Params) {
+/**
+ * Direct lookup of a published product of the host's tenant by slug (never a search inside a capped
+ * list); any other slug, including another tenant's, is a 404. Cached per request.
+ */
+const findProduct = cache(async (slug: string) => {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
-  const store = await getStorefront(tenant);
-  const { slug } = await params;
-  const product = store.products.find((p) => p.slug === slug);
+  const [store, product] = await Promise.all([getShell(tenant), loadProductBySlug(tenant, slug)]);
   if (!product) notFound();
   return { tenant, store, product };
-}
+});
+const context = async (params: Params) => findProduct((await params).slug);
+
+/** Thumbnails shown under the main photo (the rest stay on the product's media list). */
+const GALLERY_THUMBNAILS = 11;
 
 export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
-  const { tenant, store, product } = await context(params);
+  const { tenant, product } = await context(params);
   return storefrontMetadata({
     tenant,
-    store,
     path: `/rentals/${product.slug}`,
     title: `${product.name} rental | ${tenant.name}`,
     description:
@@ -54,7 +64,10 @@ export async function generateMetadata({ params }: { params: Params }): Promise<
 export default async function ProductPage({ params }: { params: Params }) {
   const { tenant, store, product } = await context(params);
   const path = `/rentals/${product.slug}`;
-  const origin = await siteOrigin(tenant);
+  const [{ canonicalOrigin: origin }, related] = await Promise.all([
+    getSeo(tenant),
+    loadRelatedProducts(tenant, product),
+  ]);
   const category =
     store.categories.find((c) => c.id === product.primaryCategoryId) ??
     store.categories.find((c) => product.categoryIds.includes(c.id));
@@ -64,33 +77,35 @@ export default async function ProductPage({ params }: { params: Params }) {
     ...(category ? [{ name: category.name, path: `/categories/${category.slug}` }] : []),
     { name: product.name, path },
   ];
-  const [main, ...more] = product.images;
+  const [main, ...rest] = product.images;
+  const more = rest.slice(0, GALLERY_THUMBNAILS);
   const specs = specGroups(product);
   const weather = weatherNotes(product);
   const price = priceSummary(product, tenant.currency);
-  const related = relatedProducts(store.products, product);
   const quoteHref = `/quote?item=${encodeURIComponent(product.slug)}`;
   const safetyPolicy = store.profile.policies.find((p) => /weather|safety/.test(p.type));
 
   return (
     <>
-      <JsonLd
-        data={[
-          productJsonLd(
-            origin,
-            {
-              name: tenant.name,
-              currency: tenant.currency,
-              phone: tenant.contact.phone,
-              email: tenant.contact.email,
-              logoUrl: brandAssetUrl(tenant.branding.logoPath),
-            },
-            product,
-            path,
-          ),
-          breadcrumbJsonLd(origin, crumbs),
-        ]}
-      />
+      {origin ? (
+        <JsonLd
+          data={[
+            productJsonLd(
+              origin,
+              {
+                name: tenant.name,
+                currency: tenant.currency,
+                phone: tenant.contact.phone,
+                email: tenant.contact.email,
+                logoUrl: brandAssetUrl(tenant.branding.logoPath),
+              },
+              product,
+              path,
+            ),
+            breadcrumbJsonLd(origin, crumbs),
+          ]}
+        />
+      ) : null}
       <Container className="grid gap-8 py-8 sm:py-12">
         <Breadcrumbs crumbs={crumbs} />
         <div className="grid gap-10 lg:grid-cols-[3fr_2fr] lg:items-start">
@@ -241,7 +256,7 @@ export default async function ProductPage({ params }: { params: Params }) {
       <StickyMobileCta
         href={quoteHref}
         label="Get a quote"
-        sub={price ? `${price.amount} ${price.unit}` : product.name}
+        sub={price ? `${price.prefix} ${price.amount} ${price.unit}` : product.name}
       />
     </>
   );

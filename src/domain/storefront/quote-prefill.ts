@@ -21,6 +21,8 @@ export interface EventPrefill {
 export interface QuotePrefill {
   items: ItemPrefill[];
   event: EventPrefill | null;
+  /** The earlier quote's fulfilment (no event address = customer pickup). */
+  delivery?: "delivery" | "pickup";
 }
 
 /** An instant as the organization's local calendar date (YYYY-MM-DD) and 24-hour time (HH:MM). */
@@ -73,7 +75,7 @@ export function normalizeItems(items: ItemPrefill[], offered: ReadonlySet<string
 export function prefillFromQuote(
   view: {
     items: { variantId?: string | null; quantity: number }[];
-    event: { startsAt: string | null; endsAt: string | null } | null;
+    event: { startsAt: string | null; endsAt: string | null; address?: string | null } | null;
   },
   timeZone: string,
   offered: ReadonlySet<string>,
@@ -95,5 +97,9 @@ export function prefillFromQuote(
           ...(end.date !== start.date ? { endDate: end.date } : {}),
         }
       : null;
-  return { items, event };
+  return {
+    items,
+    event,
+    ...(view.event ? { delivery: view.event.address ? "delivery" : "pickup" } : {}),
+  };
 }

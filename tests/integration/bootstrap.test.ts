@@ -55,10 +55,10 @@ async function assertSeeded(query: Query) {
     acme_color: "#2563eb",
     funtime_color: "#db2777",
     acme_categories: 4, // incl. one unpublished storefront fixture
-    acme_products: 4, // incl. one unpublished storefront fixture
+    acme_products: 5, // incl. storefront fixtures (one unpublished, one multi-price)
     acme_pooled: 1,
     acme_rules: 3,
-    domains: 2,
+    domains: 4, // primaries + a verified alias and an unverified host (SEO fixtures)
   });
   expect(r.rows[0]!.acme_units).toBeGreaterThan(0);
   expect(r.rows[0]!.funtime_members).toBeGreaterThan(0);

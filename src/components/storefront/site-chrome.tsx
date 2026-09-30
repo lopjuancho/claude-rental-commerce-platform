@@ -1,6 +1,6 @@
 import type { Route } from "next";
 import Link from "next/link";
-import type { Storefront } from "@/domain/storefront/catalog";
+import type { StorefrontShell } from "@/domain/storefront/catalog";
 import { Container, CtaLink } from "./ui";
 
 /** What the header/footer need to know about the tenant (from server-side resolution only). */
@@ -13,7 +13,7 @@ export interface SiteBrand {
 
 const telHref = (phone: string) => `tel:${phone.replace(/[^\d+]/g, "")}`;
 
-export function SiteHeader({ brand, store }: { brand: SiteBrand; store: Storefront }) {
+export function SiteHeader({ brand, store }: { brand: SiteBrand; store: StorefrontShell }) {
   const nav = store.categories.filter((c) => c.productCount > 0).slice(0, 4);
   return (
     <header className="sticky top-0 z-40 border-b bg-background/90 backdrop-blur">
@@ -89,7 +89,7 @@ export function SiteHeader({ brand, store }: { brand: SiteBrand; store: Storefro
   );
 }
 
-export function SiteFooter({ brand, store }: { brand: SiteBrand; store: Storefront }) {
+export function SiteFooter({ brand, store }: { brand: SiteBrand; store: StorefrontShell }) {
   const a = store.profile.address;
   const cityLine = [a.city, [a.state, a.postalCode].filter(Boolean).join(" ")]
     .filter(Boolean)

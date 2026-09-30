@@ -145,10 +145,13 @@ export const USER_TABLES = ["user_profiles"] as const;
 /** Views deliberately readable by anonymous visitors (published catalog data only). */
 export const PUBLIC_VIEWS = [
   "public_catalog_categories",
+  "public_catalog_category_summaries",
+  "public_catalog_event_types",
   "public_catalog_product_media",
   "public_catalog_products",
   "public_catalog_variants",
   "public_service_areas",
+  "public_storefront_domains",
   "public_storefront_policies",
   "public_storefront_settings",
 ] as const;

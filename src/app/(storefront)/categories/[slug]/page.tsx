@@ -7,33 +7,46 @@ import {
   Container,
   CtaLink,
   EmptyState,
+  Pagination,
+  pageParam,
   ProductGrid,
 } from "@/components/storefront/ui";
 import { breadcrumbJsonLd } from "@/domain/storefront/seo";
-import { siteOrigin, storefrontMetadata } from "@/server/public/site";
-import { getStorefront } from "@/server/public/storefront";
+import { getSeo, storefrontMetadata } from "@/server/public/site";
+import { getShell, loadProductPage } from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 
 type Params = Promise<{ slug: string }>;
+type Search = Promise<{ page?: string | string[] }>;
 
-/** The category must be a published category of the host's tenant; anything else is a 404. */
-async function context(params: Params) {
+/**
+ * The category must be a published category of the host's tenant (the tenant's complete category
+ * list, read with pagination); anything else is a 404.
+ */
+async function context(params: Params, searchParams: Search) {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
-  const store = await getStorefront(tenant);
-  const { slug } = await params;
+  const [store, { slug }, query] = await Promise.all([getShell(tenant), params, searchParams]);
   const category = store.categories.find((c) => c.slug === slug);
   if (!category) notFound();
-  return { tenant, store, category };
+  return { tenant, store, category, page: pageParam(query.page) };
 }
 
-export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
-  const { tenant, store, category } = await context(params);
+const pageHref = (slug: string, page: number) =>
+  page > 1 ? `/categories/${slug}?page=${String(page)}` : `/categories/${slug}`;
+
+export async function generateMetadata({
+  params,
+  searchParams,
+}: {
+  params: Params;
+  searchParams: Search;
+}): Promise<Metadata> {
+  const { tenant, category, page } = await context(params, searchParams);
   return storefrontMetadata({
     tenant,
-    store,
-    path: `/categories/${category.slug}`,
-    title: `${category.name} rentals | ${tenant.name}`,
+    path: pageHref(category.slug, page),
+    title: `${category.name} rentals${page > 1 ? ` — page ${String(page)}` : ""} | ${tenant.name}`,
     description:
       category.description ??
       `${category.name} rentals from ${tenant.name}. Get an itemized quote online.`,
@@ -41,19 +54,27 @@ export async function generateMetadata({ params }: { params: Params }): Promise<
   });
 }
 
-export default async function CategoryPage({ params }: { params: Params }) {
-  const { tenant, store, category } = await context(params);
-  const products = store.products.filter((p) => p.categoryIds.includes(category.id));
+export default async function CategoryPage({
+  params,
+  searchParams,
+}: {
+  params: Params;
+  searchParams: Search;
+}) {
+  const { tenant, store, category, page } = await context(params, searchParams);
+  const { products, pageCount } = await loadProductPage(tenant, { page, categoryId: category.id });
+  if (page > pageCount) notFound();
   const others = store.categories.filter((c) => c.id !== category.id && c.productCount > 0);
   const crumbs = [
     { name: "Home", path: "/" },
     { name: "Rentals", path: "/rentals" },
     { name: category.name, path: `/categories/${category.slug}` },
   ];
+  const { canonicalOrigin } = await getSeo(tenant);
 
   return (
     <Container className="grid gap-8 py-8 sm:py-12">
-      <JsonLd data={breadcrumbJsonLd(await siteOrigin(tenant), crumbs)} />
+      {canonicalOrigin ? <JsonLd data={breadcrumbJsonLd(canonicalOrigin, crumbs)} /> : null}
       <Breadcrumbs crumbs={crumbs} />
       <header className="grid max-w-3xl gap-3">
         <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">{category.name}</h1>
@@ -63,7 +84,10 @@ export default async function CategoryPage({ params }: { params: Params }) {
       </header>
 
       {products.length ? (
-        <ProductGrid products={products} currency={tenant.currency} eager={3} />
+        <>
+          <ProductGrid products={products} currency={tenant.currency} eager={3} />
+          <Pagination page={page} pageCount={pageCount} href={(p) => pageHref(category.slug, p)} />
+        </>
       ) : (
         <EmptyState title="Nothing here yet">
           <p>Tell us about your event and we&apos;ll put together a quote.</p>

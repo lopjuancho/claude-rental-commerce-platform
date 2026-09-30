@@ -27,12 +27,13 @@ export function quoteNextStep(q: QuoteViewFacts): QuoteStep {
   if (q.booking?.status === "confirmed" || q.status === "accepted") return { kind: "confirmed" };
   if (q.status === "declined" || q.status === "cancelled")
     return { kind: "closed", status: q.status };
-  // A request already with our team keeps its hold controls; staff re-quote if needed.
+  // An expired or stale quote cannot be confirmed (the database refuses both: QUOTE_EXPIRED /
+  // STALE_BOOKING_REQUEST), so it must be re-quoted even if a request is still pending.
+  if (q.expired || q.status === "expired") return { kind: "expired" };
+  if (q.stale) return { kind: "stale" };
   if (q.booking?.status === "pending" && q.booking.holdActive && q.booking.holdExpiresAt)
     return { kind: "holding", until: q.booking.holdExpiresAt };
   if (q.booking?.status === "pending") return { kind: "awaiting_review" };
-  if (q.stale) return { kind: "stale" };
-  if (q.expired || q.status === "expired") return { kind: "expired" };
   if (q.canRequestBooking) return { kind: "request" };
   return { kind: "none" };
 }

@@ -6,12 +6,16 @@ import { humanize, type Product } from "./catalog";
  */
 
 export interface PriceSummary {
+  /** Always "From": the quote adds delivery, tax and options to the starting price. */
+  prefix: "From";
   /** e.g. "$175" */
   amount: string;
   /** e.g. "per event", "per hour", "per day", "each" */
   unit: string;
   /** e.g. "up to 4 hours" (from the configured included duration) */
   detail: string | null;
+  /** Bookable variants start from different prices. */
+  varies: boolean;
   /** Always shown next to the price: the quote is the only final price. */
   qualifier: string;
 }
@@ -23,25 +27,30 @@ const UNIT: Record<string, string> = {
   per_unit: "each",
 };
 
-export const PRICE_QUALIFIER = "Base rate. Delivery, tax and options are calculated in your quote.";
+export const PRICE_QUALIFIER =
+  "Starting price. Delivery, tax and options are calculated in your quote.";
 
 function duration(minutes: number): string {
   if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? "" : "s"}`;
   return `${minutes} minutes`;
 }
 
-/** The configured base rate, or null when there is none to show (never a guess). */
+/**
+ * The price the storefront may advertise: the lowest starting price of the product's bookable
+ * variants as the pricing engine uses it, or null when there is none to state (never a guess).
+ */
 export function priceSummary(product: Product, currency: string): PriceSummary | null {
-  if (product.basePriceCents === null || product.basePriceCents <= 0 || !product.pricingType)
-    return null;
+  if (product.startingPriceCents === null || !product.pricingType) return null;
   const included =
     product.pricingType === "per_event" && product.includedDurationMinutes
       ? `up to ${duration(product.includedDurationMinutes)}`
       : null;
   return {
-    amount: formatCents(product.basePriceCents, currency).replace(/\.00$/, ""),
+    prefix: "From",
+    amount: formatCents(product.startingPriceCents, currency).replace(/\.00$/, ""),
     unit: UNIT[product.pricingType] ?? "",
     detail: included,
+    varies: product.priceVaries,
     qualifier: PRICE_QUALIFIER,
   };
 }

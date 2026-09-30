@@ -104,10 +104,15 @@ const form = (token: string) => {
   fd.set("token", token);
   return fd;
 };
-/** Runs the real action; a redirect (success) is reported as "ok". */
+/** Runs the real action; success (the browser is sent back to the quote) is reported as "ok". */
 const act = (token: string) =>
   requestBookingAction({ status: "idle" }, form(token)).then(
-    (s) => (s.status === "error" ? `error:${s.message ?? ""}` : s.status),
+    (s) =>
+      s.status === "error"
+        ? `error:${s.message ?? ""}`
+        : s.status === "success" && s.redirectTo === `/q/${token}`
+          ? "ok"
+          : s.status,
     (e: unknown) =>
       (e as Error).message === "NEXT_REDIRECT" ? "ok" : `throw:${(e as Error).message}`,
   );

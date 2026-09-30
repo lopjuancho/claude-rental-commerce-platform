@@ -763,6 +763,10 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
   objects listed in `public_catalog_product_media`.
 - `public_quote_view` adds `stale` (open quote whose event no longer matches its pricing) and item
   `variantId`/`productId`; `canRequestBooking` is false for a stale quote.
+- Review round (`20261001000200`): `public_catalog_variants.effective_base_price_cents`
+  (= the engine's `coalesce(override, base)`), `public_storefront_domains` (verified hostnames
+  only), `public_catalog_category_summaries` (published product count + cover per category),
+  `public_catalog_event_types`. All read-only; no rule changes.
 
 **RLS:**
 

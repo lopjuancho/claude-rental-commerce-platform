@@ -16,6 +16,16 @@ export interface CategoryRow {
   sort_order: number | null;
 }
 
+export interface CategorySummaryRow {
+  category_id: string | null;
+  organization_id: string | null;
+  product_count: number | null;
+  cover_media_id: string | null;
+  cover_alt_text: string | null;
+  cover_width: number | null;
+  cover_height: number | null;
+}
+
 export interface ProductRow {
   id: string | null;
   organization_id: string | null;
@@ -75,6 +85,8 @@ export interface VariantRow {
   product_id: string | null;
   name: string | null;
   is_default: boolean | null;
+  /** coalesce(variant override, product base): what the pricing engine starts from. */
+  effective_base_price_cents: number | null;
 }
 
 export interface SettingsRow {
@@ -86,6 +98,12 @@ export interface SettingsRow {
   free_delivery_miles: number | null;
   maximum_delivery_miles: number | null;
   primary_hostname: string | null;
+}
+
+export interface DomainRow {
+  organization_id: string | null;
+  hostname: string | null;
+  is_primary: boolean | null;
 }
 
 export interface PolicyRow {
@@ -103,13 +121,27 @@ export interface ServiceAreaRow {
   priority: number | null;
 }
 
+export interface EventTypeRow {
+  organization_id: string | null;
+  event_type: string | null;
+  product_count: number | null;
+}
+
 export interface Image {
   id: string;
   url: string;
+  /** Width-bounded variants for responsive loading, when image derivatives are enabled. */
+  srcSet: string | null;
   alt: string;
   width: number | null;
   height: number | null;
 }
+
+/** Builds the tenant-scoped URLs for a media id (the storefront's /media route, never the bucket). */
+export type ImageUrls = (mediaId: string) => { url: string; srcSet: string | null };
+
+export const mediaUrl = (mediaId: string) => `/media/${mediaId}`;
+export const plainImageUrls: ImageUrls = (id) => ({ url: mediaUrl(id), srcSet: null });
 
 export interface Category {
   id: string;
@@ -128,7 +160,13 @@ export interface Product {
   description: string | null;
   featured: boolean;
   pricingType: PricingType | null;
-  basePriceCents: number | null;
+  /**
+   * Lowest price the pricing engine starts from across the product's bookable variants, or null
+   * when it cannot be stated truthfully (no bookable variant, or any variant without a price).
+   */
+  startingPriceCents: number | null;
+  /** Bookable variants start from different prices ("From …"; no single structured Offer). */
+  priceVaries: boolean;
   includedDurationMinutes: number | null;
   minimumRentalMinutes: number | null;
   primaryCategoryId: string | null;
@@ -146,6 +184,11 @@ export interface Policy {
   updatedAt: string | null;
 }
 
+export interface VerifiedDomain {
+  hostname: string;
+  isPrimary: boolean;
+}
+
 export interface StorefrontProfile {
   address: {
     line1: string | null;
@@ -155,116 +198,159 @@ export interface StorefrontProfile {
   };
   freeDeliveryMiles: number | null;
   maximumDeliveryMiles: number | null;
-  primaryHostname: string | null;
+  /** Verified hostnames only (unverified domains never drive SEO). */
+  domains: VerifiedDomain[];
   serviceAreas: string[];
   policies: Policy[];
 }
 
-export interface Storefront {
+/** Tenant-wide storefront data that does not grow with the catalog. */
+export interface StorefrontShell {
   profile: StorefrontProfile;
   categories: Category[];
-  products: Product[];
+  eventTypes: string[];
 }
 
 const PRICING_TYPES = new Set<string>(["per_event", "hourly", "daily", "per_unit"]);
 const present = <T>(v: T | null | undefined): v is T => v !== null && v !== undefined;
 const byOrder = (a: { sort_order: number | null; name: string | null }, b: typeof a) =>
   (a.sort_order ?? 0) - (b.sort_order ?? 0) || (a.name ?? "").localeCompare(b.name ?? "");
-
-/** Stable, tenant-scoped image URL (served by the storefront's /media route, never the bucket). */
-export const mediaUrl = (mediaId: string) => `/media/${mediaId}`;
-
-export function assembleStorefront(
-  organizationId: string,
-  raw: {
-    settings: SettingsRow | null;
-    policies: PolicyRow[];
-    serviceAreas: ServiceAreaRow[];
-    categories: CategoryRow[];
-    products: ProductRow[];
-    media: MediaRow[];
-    variants: VariantRow[];
-  },
-): Storefront {
-  // Defence in depth: the source is already filtered by organization; rows of any other are dropped.
-  const mine = <T extends { organization_id: string | null }>(rows: T[]) =>
+const mine =
+  (organizationId: string) =>
+  <T extends { organization_id: string | null }>(rows: T[]) =>
     rows.filter((r) => r.organization_id === organizationId);
 
+function image(
+  urls: ImageUrls,
+  id: string,
+  alt: string | null,
+  width: number | null,
+  height: number | null,
+): Image {
+  return { id, ...urls(id), alt: alt?.trim() ?? "", width, height };
+}
+
+/**
+ * What the product can truthfully be advertised from: the engine's starting price of each
+ * bookable variant. Unknown when there is no bookable variant or any of them has no price.
+ */
+export function variantPricing(variants: VariantRow[]): {
+  startingPriceCents: number | null;
+  priceVaries: boolean;
+} {
+  const prices = variants.map((v) => v.effective_base_price_cents);
+  if (prices.length === 0 || prices.some((p) => p === null || p <= 0)) {
+    return { startingPriceCents: null, priceVaries: false };
+  }
+  const known = prices as number[];
+  return { startingPriceCents: Math.min(...known), priceVaries: new Set(known).size > 1 };
+}
+
+/** Products (one page of them, or one) with their images and bookable-variant pricing. */
+export function assembleProducts(
+  organizationId: string,
+  raw: { products: ProductRow[]; media: MediaRow[]; variants: VariantRow[] },
+  urls: ImageUrls = plainImageUrls,
+): Product[] {
+  // Defence in depth: the queries are already filtered by organization; others are dropped.
+  const own = mine(organizationId);
   const imagesByProduct = new Map<string, Image[]>();
-  const images = mine(raw.media)
+  const images = own(raw.media)
     .filter((m) => m.kind === "image")
     .sort(
       (a, b) =>
-        Number(b.is_primary) - Number(a.is_primary) || (a.sort_order ?? 0) - (b.sort_order ?? 0),
+        Number(b.is_primary) - Number(a.is_primary) ||
+        (a.sort_order ?? 0) - (b.sort_order ?? 0) ||
+        (a.id ?? "").localeCompare(b.id ?? ""),
     );
   for (const m of images) {
     const { id, product_id: productId } = m;
     if (!id || !productId) continue;
     const list = imagesByProduct.get(productId) ?? [];
-    list.push({
-      id,
-      url: mediaUrl(id),
-      alt: m.alt_text?.trim() ?? "",
-      width: m.width,
-      height: m.height,
-    });
+    list.push(image(urls, id, m.alt_text, m.width, m.height));
     imagesByProduct.set(productId, list);
   }
-  const defaultVariant = new Map<string, string>();
-  for (const v of mine(raw.variants)) {
+  const variantsByProduct = new Map<string, VariantRow[]>();
+  for (const v of own(raw.variants)) {
     if (!v.id || !v.product_id) continue;
-    if (v.is_default || !defaultVariant.has(v.product_id)) defaultVariant.set(v.product_id, v.id);
+    const list = variantsByProduct.get(v.product_id) ?? [];
+    list.push(v);
+    variantsByProduct.set(v.product_id, list);
   }
 
-  const products: Product[] = mine(raw.products)
+  return own(raw.products)
     .filter((p): p is ProductRow & { id: string; name: string; slug: string } =>
       Boolean(p.id && p.name && p.slug),
     )
-    .sort(byOrder)
-    .map((p) => ({
-      id: p.id,
-      name: p.name,
-      slug: p.slug,
-      shortDescription: p.short_description?.trim() || null,
-      description: p.description?.trim() || null,
-      featured: p.is_featured === true,
-      pricingType:
-        p.pricing_type && PRICING_TYPES.has(p.pricing_type)
-          ? (p.pricing_type as PricingType)
-          : null,
-      basePriceCents: p.base_price_cents,
-      includedDurationMinutes: p.included_duration_minutes,
-      minimumRentalMinutes: p.minimum_rental_minutes,
-      primaryCategoryId: p.primary_category_id,
-      categoryIds: (p.category_ids ?? []).filter(present),
-      eventTypes: (p.ideal_event_types ?? []).filter((t) => t.trim() !== ""),
-      images: imagesByProduct.get(p.id) ?? [],
-      defaultVariantId: defaultVariant.get(p.id) ?? null,
-      row: p,
-    }));
+    .map((p) => {
+      const variants = variantsByProduct.get(p.id) ?? [];
+      const defaultVariant = variants.find((v) => v.is_default) ?? variants[0];
+      return {
+        id: p.id,
+        name: p.name,
+        slug: p.slug,
+        shortDescription: p.short_description?.trim() || null,
+        description: p.description?.trim() || null,
+        featured: p.is_featured === true,
+        pricingType:
+          p.pricing_type && PRICING_TYPES.has(p.pricing_type)
+            ? (p.pricing_type as PricingType)
+            : null,
+        ...variantPricing(variants),
+        includedDurationMinutes: p.included_duration_minutes,
+        minimumRentalMinutes: p.minimum_rental_minutes,
+        primaryCategoryId: p.primary_category_id,
+        // The view lists published categories only.
+        categoryIds: (p.category_ids ?? []).filter(present),
+        eventTypes: (p.ideal_event_types ?? []).filter((t) => t.trim() !== ""),
+        images: imagesByProduct.get(p.id) ?? [],
+        defaultVariantId: defaultVariant?.id ?? null,
+        row: p,
+      };
+    });
+}
 
-  const publishedCategoryIds = new Set(mine(raw.categories).map((c) => c.id));
-  const categories: Category[] = mine(raw.categories)
+/** Profile, categories and event types of one tenant. */
+export function assembleShell(
+  organizationId: string,
+  raw: {
+    settings: SettingsRow | null;
+    domains: DomainRow[];
+    policies: PolicyRow[];
+    serviceAreas: ServiceAreaRow[];
+    categories: CategoryRow[];
+    summaries: CategorySummaryRow[];
+    eventTypes: EventTypeRow[];
+  },
+  urls: ImageUrls = plainImageUrls,
+): StorefrontShell {
+  const own = mine(organizationId);
+  const summaries = new Map(
+    own(raw.summaries).flatMap((s) => (s.category_id ? [[s.category_id, s] as const] : [])),
+  );
+  const categories: Category[] = own(raw.categories)
     .filter((c): c is CategoryRow & { id: string; name: string; slug: string } =>
       Boolean(c.id && c.name && c.slug),
     )
     .sort(byOrder)
     .map((c) => {
-      const inCategory = products.filter((p) => p.categoryIds.includes(c.id));
+      const s = summaries.get(c.id);
       return {
         id: c.id,
         name: c.name,
         slug: c.slug,
         description: c.description?.trim() || null,
-        productCount: inCategory.length,
-        image: inCategory.flatMap((p) => p.images)[0] ?? null,
+        productCount: s?.product_count ?? 0,
+        image: s?.cover_media_id
+          ? image(urls, s.cover_media_id, s.cover_alt_text, s.cover_width, s.cover_height)
+          : null,
       };
     });
-  // Products only reference published categories (the view already drops the others).
-  for (const p of products)
-    p.categoryIds = p.categoryIds.filter((id) => publishedCategoryIds.has(id));
 
   const s = raw.settings && raw.settings.organization_id === organizationId ? raw.settings : null;
+  const domains = own(raw.domains).flatMap((d) =>
+    d.hostname ? [{ hostname: d.hostname.toLowerCase(), isPrimary: d.is_primary === true }] : [],
+  );
   return {
     profile: {
       address: {
@@ -275,20 +361,27 @@ export function assembleStorefront(
       },
       freeDeliveryMiles: s?.free_delivery_miles ?? null,
       maximumDeliveryMiles: s?.maximum_delivery_miles ?? null,
-      primaryHostname: s?.primary_hostname ?? null,
-      serviceAreas: mine(raw.serviceAreas)
+      domains,
+      serviceAreas: own(raw.serviceAreas)
         .sort(
           (a, b) =>
             (b.priority ?? 0) - (a.priority ?? 0) || (a.name ?? "").localeCompare(b.name ?? ""),
         )
         .map((a) => a.name?.trim() ?? "")
         .filter(Boolean),
-      policies: mine(raw.policies).flatMap(({ policy_type: type, title, body, updated_at }) =>
+      policies: own(raw.policies).flatMap(({ policy_type: type, title, body, updated_at }) =>
         type && title && body ? [{ type, title, body, updatedAt: updated_at }] : [],
       ),
     },
     categories,
-    products,
+    eventTypes: own(raw.eventTypes)
+      .filter((e): e is EventTypeRow & { event_type: string } => Boolean(e.event_type))
+      .sort(
+        (a, b) =>
+          (b.product_count ?? 0) - (a.product_count ?? 0) ||
+          a.event_type.localeCompare(b.event_type),
+      )
+      .map((e) => e.event_type),
   };
 }
 
@@ -298,15 +391,11 @@ export function humanize(value: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/** Distinct event types across products, in first-seen order (drives "Perfect for…" sections). */
-export function eventTypesOf(products: Product[]): string[] {
-  return [...new Set(products.flatMap((p) => p.eventTypes))];
-}
-
-export function relatedProducts(all: Product[], product: Product, limit = 4): Product[] {
+/** Rank candidates sharing categories with the product (primary category counts double). */
+export function relatedProducts(candidates: Product[], product: Product, limit = 4): Product[] {
   const shared = (p: Product) =>
     p.categoryIds.filter((id) => product.categoryIds.includes(id)).length;
-  return all
+  return candidates
     .filter((p) => p.id !== product.id)
     .map((p) => ({
       p,

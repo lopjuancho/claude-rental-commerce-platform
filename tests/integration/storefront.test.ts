@@ -2,17 +2,23 @@ import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { quoteNextStep } from "@/domain/storefront/quote-step";
 import { getPublicQuote, submitQuoteRequest } from "@/server/public/quotes";
-import { loadStorefront, type StorefrontSource } from "@/server/public/storefront";
+import {
+  listBookableVariants,
+  listProductSlugs,
+  loadProductBySlug,
+  loadProductPage,
+  loadShell,
+} from "@/server/public/storefront";
 import { hashQuoteToken } from "@/server/quotes/token";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { makeProduct, outcome } from "./support/availability";
-import { admin, as, createOrg, type TestOrg } from "./support/db";
+import { admin, adminGated, as, createOrg, type TestOrg } from "./support/db";
 import { fakeProvider, pgGateway } from "./support/pricing";
+import { describeRest } from "./support/rest";
 
 /**
- * M6 storefront data (ADR 0016): what an anonymous visitor's storefront can see, read exactly as
- * the app does — the anon-safe views filtered by the host-resolved tenant — through a pg-backed
- * StorefrontSource running as the `anon` role.
+ * M6 storefront data (ADR 0016). View-level guarantees are checked as the `anon` role in SQL; the
+ * loaders are checked through the real PostgREST API with the publishable key (describeRest).
  */
 const anon = { kind: "anon" } as const;
 /** Storefront loading only uses the host-resolved tenant's organization id. */
@@ -27,38 +33,6 @@ const read = (view: string) => (org: string) =>
       )
     ).rows.map((x) => x.r),
   );
-
-/** The same queries the Supabase source issues, run as `anon` against the real views. */
-const anonSource = (): StorefrontSource => ({
-  settings: async (org) => {
-    const [row] = await read("public_storefront_settings")(org);
-    return (row ?? null) as never;
-  },
-  policies: read("public_storefront_policies") as never,
-  serviceAreas: read("public_service_areas") as never,
-  categories: read("public_catalog_categories") as never,
-  products: read("public_catalog_products") as never,
-  media: read("public_catalog_product_media") as never,
-  variants: read("public_catalog_variants") as never,
-});
-/** A deliberately broken source that ignores the tenant filter (defence-in-depth check). */
-const unfilteredSource = (): StorefrontSource => {
-  const all = (view: string) => () =>
-    as(anon, async (sql) =>
-      (await sql<{ r: never }>(`select to_jsonb(v) as r from public.${view} v`)).rows.map(
-        (x) => x.r,
-      ),
-    );
-  return {
-    settings: () => Promise.resolve(null),
-    policies: all("public_storefront_policies"),
-    serviceAreas: all("public_service_areas"),
-    categories: all("public_catalog_categories"),
-    products: all("public_catalog_products"),
-    media: all("public_catalog_product_media"),
-    variants: all("public_catalog_variants"),
-  };
-};
 
 let a: TestOrg;
 let b: TestOrg;
@@ -133,77 +107,61 @@ beforeAll(async () => {
   );
   await admin(
     `insert into public.organization_domains (organization_id, hostname, is_primary, verified_at)
-     values ($1, $2, true, now()), ($3, $4, true, null)`,
-    [a.id, `${a.slug}.example.test`, b.id, `${b.slug}.example.test`],
+     values ($1, $2, true, now()), ($1, $3, false, now()), ($1, $4, false, null), ($5, $6, true, null)`,
+    [
+      a.id,
+      `${a.slug}.example.test`,
+      `www.${a.slug}.example.test`,
+      `unverified.${a.slug}.example.test`,
+      b.id,
+      `${b.slug}.example.test`,
+    ],
   );
 });
 
-describe("storefront tenant isolation", () => {
-  it("tenant A's storefront never contains tenant B's catalog, policies or areas", async () => {
-    const store = await loadStorefront(tenantOf(a.id), anonSource());
-    expect(store.products.map((p) => p.id)).toEqual([fx.aPublished]);
-    expect(store.categories.map((c) => c.slug)).toEqual(["bouncers"]);
-    expect(store.profile.policies.map((p) => p.title)).toEqual(["Safety"]);
-    expect(store.profile.serviceAreas).toEqual(["North"]);
-    const json = JSON.stringify(store);
-    expect(json).not.toContain(b.id);
-    expect(json).not.toContain(fx.bProduct);
-    expect(json).not.toContain("B town");
-  });
-
-  it("the same slug resolves to each tenant's own product only", async () => {
-    const storeB = await loadStorefront(tenantOf(b.id), anonSource());
-    expect(storeB.products.find((p) => p.slug === "castle")?.id).toBe(fx.bProduct);
-    const storeA = await loadStorefront(tenantOf(a.id), anonSource());
-    expect(storeA.products.find((p) => p.slug === "castle")?.id).toBe(fx.aPublished);
-  });
-
-  it("even a source that forgot the tenant filter cannot leak another tenant's rows", async () => {
-    const store = await loadStorefront(tenantOf(a.id), unfilteredSource());
-    expect(store.products.every((p) => p.row.organization_id === a.id)).toBe(true);
-    expect(store.categories.map((c) => c.slug)).toEqual(["bouncers"]);
-    expect(store.profile.policies.map((p) => p.title)).toEqual(["Safety"]);
-  });
-
-  it("a suspended tenant has no storefront data", async () => {
-    const c = await createOrg("store-c");
-    await product(c, "castle", true);
-    await admin("update public.organizations set status = 'suspended' where id = $1", [c.id]);
-    const store = await loadStorefront(tenantOf(c.id), anonSource());
-    expect(store.products).toEqual([]);
-    expect(store.profile.primaryHostname).toBeNull();
-  });
-});
-
-describe("published-only storefront data", () => {
-  it("unpublished products and categories are hidden (including from product links)", async () => {
-    const store = await loadStorefront(tenantOf(a.id), anonSource());
-    expect(store.products.some((p) => p.slug === "draft-slide")).toBe(false);
-    expect(store.categories.some((c) => c.slug === "secret")).toBe(false);
-    expect(store.products[0]?.categoryIds).toEqual([fx.aPublishedCategory]);
-    expect(JSON.stringify(store)).not.toContain(fx.aHiddenCategory);
-  });
-
+describe("storefront views (as anon)", () => {
   it("placeholder and unpublished policies are never shown", async () => {
     const rows = await read("public_storefront_policies")(a.id);
     expect(rows.map((r) => r.title)).toEqual(["Safety"]);
   });
 
   it("only rights-verified media of published products is listed", async () => {
-    const store = await loadStorefront(tenantOf(a.id), anonSource());
-    expect(store.products[0]?.images).toHaveLength(1);
     const rows = await read("public_catalog_product_media")(a.id);
     expect(rows.map((r) => r.storage_path)).toEqual([fx.verifiedPath]);
   });
 
-  it("the primary hostname is exposed only once verified", async () => {
-    expect((await loadStorefront(tenantOf(a.id), anonSource())).profile.primaryHostname).toBe(
-      `${a.slug}.example.test`,
-    );
-    expect((await loadStorefront(tenantOf(b.id), anonSource())).profile.primaryHostname).toBeNull();
+  it("M1: only verified domains are listed (unverified primary or alias never)", async () => {
+    const hosts = (await read("public_storefront_domains")(a.id)).map((r) => r.hostname).sort();
+    expect(hosts).toEqual([`${a.slug}.example.test`, `www.${a.slug}.example.test`].sort());
+    expect(await read("public_storefront_domains")(b.id)).toEqual([]);
   });
 
-  it("the settings view exposes no internal or pricing fields", async () => {
+  it("M2: bookable variants carry the engine's starting price (override ?? base)", async () => {
+    const { productId, variantId } = await makeProduct(a, {});
+    await adminGated(
+      a.id,
+      "update public.product_variants set price_override_cents = 30000 where id = $1",
+      [variantId],
+    );
+    const rows = await read("public_catalog_variants")(a.id);
+    const row = rows.find((r) => r.id === variantId);
+    expect(row).toMatchObject({ product_id: productId, effective_base_price_cents: 30000 });
+    // …and the pricing engine's context agrees (the same coalesce).
+    const ctx = await admin<{ price: string }>(
+      "select coalesce(v.price_override_cents, p.base_price_cents)::text as price from public.product_variants v join public.products p on p.id = v.product_id where v.id = $1",
+      [variantId],
+    );
+    expect(ctx.rows[0]?.price).toBe("30000");
+  });
+
+  it("category summaries count published products; unpublished categories have none", async () => {
+    const rows = await read("public_catalog_category_summaries")(a.id);
+    expect(rows).toEqual([
+      expect.objectContaining({ category_id: fx.aPublishedCategory, product_count: 1 }),
+    ]);
+  });
+
+  it("the settings and area views expose no internal or pricing fields", async () => {
     const [row] = await read("public_storefront_settings")(a.id);
     expect(Object.keys(row ?? {}).sort()).toEqual(
       [
@@ -219,6 +177,54 @@ describe("published-only storefront data", () => {
     );
     const [area] = await read("public_service_areas")(a.id);
     expect(Object.keys(area ?? {}).sort()).toEqual(["id", "name", "organization_id", "priority"]);
+  });
+});
+
+describeRest("storefront loaders through PostgREST", () => {
+  it("tenant A never sees tenant B's catalog, policies, areas or domains", async () => {
+    const shell = await loadShell(tenantOf(a.id));
+    const page = await loadProductPage(tenantOf(a.id), { page: 1 });
+    expect(page.products.map((p) => p.id)).not.toContain(fx.bProduct);
+    expect(page.products.some((p) => p.id === fx.aPublished)).toBe(true);
+    expect(shell.categories.map((c) => c.slug)).toEqual(["bouncers"]);
+    expect(shell.profile.policies.map((p) => p.title)).toEqual(["Safety"]);
+    expect(shell.profile.serviceAreas).toEqual(["North"]);
+    const json = JSON.stringify([shell, page]);
+    expect(json).not.toContain(b.id);
+    expect(json).not.toContain(fx.bProduct);
+    expect(json).not.toContain("B town");
+  });
+
+  it("the same slug resolves to each tenant's own product only (direct lookup)", async () => {
+    expect((await loadProductBySlug(tenantOf(b.id), "castle"))?.id).toBe(fx.bProduct);
+    expect((await loadProductBySlug(tenantOf(a.id), "castle"))?.id).toBe(fx.aPublished);
+    expect(await loadProductBySlug(tenantOf(a.id), "b-only-nothing")).toBeNull();
+  });
+
+  it("unpublished products and categories are hidden (also from product links)", async () => {
+    expect(await loadProductBySlug(tenantOf(a.id), "draft-slide")).toBeNull();
+    const shell = await loadShell(tenantOf(a.id));
+    expect(shell.categories.some((c) => c.slug === "secret")).toBe(false);
+    const castle = await loadProductBySlug(tenantOf(a.id), "castle");
+    expect(castle?.categoryIds).toEqual([fx.aPublishedCategory]);
+    expect(castle?.images).toHaveLength(1);
+    expect(await listProductSlugs(tenantOf(a.id))).not.toContain("draft-slide");
+  });
+
+  it("M1: the shell carries verified domains only", async () => {
+    const shell = await loadShell(tenantOf(a.id));
+    expect(shell.profile.domains.map((d) => d.hostname).sort()).toEqual(
+      [`${a.slug}.example.test`, `www.${a.slug}.example.test`].sort(),
+    );
+    expect((await loadShell(tenantOf(b.id))).profile.domains).toEqual([]);
+  });
+
+  it("a suspended tenant has no storefront data", async () => {
+    const c = await createOrg("store-c");
+    await product(c, "castle", true);
+    await admin("update public.organizations set status = 'suspended' where id = $1", [c.id]);
+    expect((await loadProductPage(tenantOf(c.id), { page: 1 })).total).toBe(0);
+    expect(await listBookableVariants(tenantOf(c.id))).toEqual([]);
   });
 });
 
@@ -295,10 +301,13 @@ describe("stale quote view", () => {
     expect(fresh?.stale).toBe(false);
     expect(fresh?.items).toMatchObject([{ variantId, quantity: 2 }]);
 
-    const { rows } = await admin<{ event_id: string; manual_review_required: boolean; id: string }>(
-      "select id, event_id, manual_review_required from public.quotes where token_hash = $1",
-      [await hashQuoteToken(token)],
-    );
+    const { rows } = await admin<{
+      event_id: string;
+      manual_review_required: boolean;
+      id: string;
+    }>("select id, event_id, manual_review_required from public.quotes where token_hash = $1", [
+      await hashQuoteToken(token),
+    ]);
     const q = rows[0]!;
     if (q.manual_review_required) {
       await as(

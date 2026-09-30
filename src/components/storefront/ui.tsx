@@ -112,6 +112,7 @@ export function ProductImage({
     // eslint-disable-next-line @next/next/no-img-element -- tenant media is served by /media with caching
     <img
       src={image.url}
+      {...(image.srcSet ? { srcSet: image.srcSet } : {})}
       alt={image.alt || name}
       width={image.width ?? 1200}
       height={image.height ?? 900}
@@ -137,8 +138,10 @@ export function PriceTag({
   if (!price) {
     return <p className="text-sm font-medium text-muted-foreground">Price in your quote</p>;
   }
+  // Same qualification everywhere (cards, product page): a starting price, never a final one.
   return (
     <p className={size === "lg" ? "text-lg" : "text-sm"}>
+      <span className="text-muted-foreground">{price.prefix} </span>
       <span className={cn("font-extrabold tabular-nums", size === "lg" ? "text-3xl" : "text-lg")}>
         {price.amount}
       </span>{" "}
@@ -269,4 +272,42 @@ export function EmptyState({ title, children }: { title: string; children?: Reac
       {children ? <div className="mt-2 text-muted-foreground">{children}</div> : null}
     </div>
   );
+}
+
+/** Server-rendered pager for catalog listings (works without JavaScript). */
+export function Pagination({
+  page,
+  pageCount,
+  href,
+}: {
+  page: number;
+  pageCount: number;
+  href: (page: number) => string;
+}) {
+  if (pageCount <= 1) return null;
+  const link =
+    "inline-flex min-h-11 items-center rounded-full border-2 px-5 font-semibold hover:border-primary focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/40";
+  return (
+    <nav aria-label="Pagination" className="flex flex-wrap items-center justify-center gap-3">
+      {page > 1 ? (
+        <Link href={href(page - 1) as Route} rel="prev" className={link}>
+          ← Previous
+        </Link>
+      ) : null}
+      <p className="text-sm text-muted-foreground" aria-current="page">
+        Page {page} of {pageCount}
+      </p>
+      {page < pageCount ? (
+        <Link href={href(page + 1) as Route} rel="next" className={link}>
+          Next →
+        </Link>
+      ) : null}
+    </nav>
+  );
+}
+
+/** A positive page number from a query value (anything else → 1). */
+export function pageParam(raw: string | string[] | undefined): number {
+  const n = typeof raw === "string" && /^\d{1,6}$/.test(raw) ? Number(raw) : 1;
+  return n >= 1 ? n : 1;
 }

@@ -1,6 +1,5 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import type { FormState } from "@/components/form-message";
 import { toFormError } from "@/server/actions";
 import {
@@ -18,7 +17,9 @@ import { headers } from "next/headers";
 /**
  * Storefront server actions (ADR 0001): the tenant comes from the Host header only; the browser
  * sends form fields, never an organization id. Every action is rate-limited and audited inside the
- * public services.
+ * public services. Actions return `redirectTo` for the browser to follow (useFollowRedirect) and
+ * never call redirect(): Next renders a redirect target through an internal request that does not
+ * carry the visitor's Host, so the tenant would not resolve (ADR 0016 §14).
  */
 async function context() {
   const tenant = await getRequestTenant();
@@ -56,7 +57,7 @@ export async function submitQuoteAction(_prev: FormState, fd: FormData): Promise
   } catch (error) {
     return toFormError(error);
   }
-  redirect(`/q/${token}`);
+  return { status: "success", message: "Opening your quote…", redirectTo: `/q/${token}` };
 }
 
 const tokenOf = (fd: FormData) => {
@@ -79,7 +80,7 @@ export async function requestBookingAction(_prev: FormState, fd: FormData): Prom
   } catch (error) {
     return toFormError(error);
   }
-  redirect(`/q/${tokenOf(fd)}`);
+  return { status: "success", redirectTo: `/q/${tokenOf(fd)}` };
 }
 
 export async function renewHoldAction(_prev: FormState, fd: FormData): Promise<FormState> {
@@ -89,7 +90,7 @@ export async function renewHoldAction(_prev: FormState, fd: FormData): Promise<F
   } catch (error) {
     return toFormError(error);
   }
-  redirect(`/q/${tokenOf(fd)}`);
+  return { status: "success", redirectTo: `/q/${tokenOf(fd)}` };
 }
 
 export async function cancelBookingAction(_prev: FormState, fd: FormData): Promise<FormState> {
@@ -99,5 +100,5 @@ export async function cancelBookingAction(_prev: FormState, fd: FormData): Promi
   } catch (error) {
     return toFormError(error);
   }
-  redirect(`/q/${tokenOf(fd)}`);
+  return { status: "success", redirectTo: `/q/${tokenOf(fd)}` };
 }

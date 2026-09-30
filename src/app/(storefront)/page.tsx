@@ -3,19 +3,19 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { JsonLd } from "@/components/storefront/json-ld";
 import { Container, CtaLink, ProductGrid, ProductImage, Section } from "@/components/storefront/ui";
-import { eventTypesOf, humanize } from "@/domain/storefront/catalog";
+import { humanize, type StorefrontShell } from "@/domain/storefront/catalog";
 import { localBusinessJsonLd } from "@/domain/storefront/seo";
-import { siteOrigin, storefrontMetadata } from "@/server/public/site";
-import { brandAssetUrl, getStorefront } from "@/server/public/storefront";
+import { getSeo, storefrontMetadata } from "@/server/public/site";
+import { brandAssetUrl, getShell, loadFeaturedProducts } from "@/server/public/storefront";
 import { getRequestTenant } from "@/server/tenancy/resolve-tenant";
 
 async function context() {
   const tenant = await getRequestTenant();
   if (!tenant) notFound();
-  return { tenant, store: await getStorefront(tenant) };
+  return { tenant, store: await getShell(tenant) };
 }
 
-function whereWeServe(store: Awaited<ReturnType<typeof context>>["store"]): string | null {
+function whereWeServe(store: StorefrontShell): string | null {
   const { serviceAreas, address } = store.profile;
   if (serviceAreas.length) return serviceAreas.join(" · ");
   if (address.city && address.state) return `${address.city}, ${address.state}`;
@@ -27,7 +27,6 @@ export async function generateMetadata(): Promise<Metadata> {
   const where = whereWeServe(store);
   return storefrontMetadata({
     tenant,
-    store,
     path: "/",
     title: `${tenant.name} — Event rentals`,
     description: where
@@ -39,15 +38,15 @@ export async function generateMetadata(): Promise<Metadata> {
 /** Tenant storefront home (ADR 0016): everything shown is configured, published tenant data. */
 export default async function StorefrontHome() {
   const { tenant, store } = await context();
-  const featured = store.products.filter((p) => p.featured);
+  const featured = await loadFeaturedProducts(tenant, 6);
   const heroImage =
-    (featured.length ? featured : store.products).flatMap((p) => p.images)[0] ?? null;
+    featured.flatMap((p) => p.images)[0] ?? store.categories.find((c) => c.image)?.image ?? null;
   const categories = store.categories.filter((c) => c.productCount > 0);
-  const eventTypes = eventTypesOf(store.products).slice(0, 8);
+  const eventTypes = store.eventTypes.slice(0, 8);
   const where = whereWeServe(store);
   const { freeDeliveryMiles, maximumDeliveryMiles, serviceAreas } = store.profile;
   const safetyPolicy = store.profile.policies.find((p) => /weather|safety/.test(p.type));
-  const origin = await siteOrigin(tenant);
+  const { canonicalOrigin: origin } = await getSeo(tenant);
 
   const trust = [
     {
@@ -69,19 +68,21 @@ export default async function StorefrontHome() {
 
   return (
     <>
-      <JsonLd
-        data={localBusinessJsonLd(
-          origin,
-          {
-            name: tenant.name,
-            currency: tenant.currency,
-            phone: tenant.contact.phone,
-            email: tenant.contact.email,
-            logoUrl: brandAssetUrl(tenant.branding.logoPath),
-          },
-          store.profile,
-        )}
-      />
+      {origin ? (
+        <JsonLd
+          data={localBusinessJsonLd(
+            origin,
+            {
+              name: tenant.name,
+              currency: tenant.currency,
+              phone: tenant.contact.phone,
+              email: tenant.contact.email,
+              logoUrl: brandAssetUrl(tenant.branding.logoPath),
+            },
+            store.profile,
+          )}
+        />
+      ) : null}
 
       <section
         aria-labelledby="hero-title"
@@ -173,7 +174,7 @@ export default async function StorefrontHome() {
             </CtaLink>
           }
         >
-          <ProductGrid products={featured.slice(0, 6)} currency={tenant.currency} />
+          <ProductGrid products={featured} currency={tenant.currency} />
         </Section>
       ) : null}
 

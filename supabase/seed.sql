@@ -122,6 +122,28 @@ insert into public.product_categories (organization_id, product_id, category_id)
   ('20000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000001')
 on conflict do nothing;
 
+-- SEO fixtures: a verified alias (noindex,follow; canonical → primary) and an unverified host
+-- that still resolves the tenant but must never be indexable or canonical.
+insert into public.organization_domains (organization_id, hostname, is_primary, verified_at) values
+  ('10000000-0000-4000-8000-000000000001', 'www.acme.localhost',        false, now()),
+  ('10000000-0000-4000-8000-000000000001', 'unverified.acme.localhost', false, null)
+on conflict do nothing;
+
+-- Price fixture: bookable variants that start from different prices ("From $300", no single Offer);
+-- the product base alone ($250) is never what a quote would charge.
+insert into public.products (id, organization_id, primary_category_id, name, slug, short_description, is_published, base_price_cents) values
+  ('12000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000003',
+   'Party Tent', 'party-tent', 'A fictional frame tent in two sizes.', true, 25000)
+on conflict do nothing;
+insert into public.product_categories (organization_id, product_id, category_id) values
+  ('10000000-0000-4000-8000-000000000001', '12000000-0000-4000-8000-000000000005', '11000000-0000-4000-8000-000000000003')
+on conflict do nothing;
+update public.product_variants set name = '20 x 20', price_override_cents = 30000
+where product_id = '12000000-0000-4000-8000-000000000005' and is_default;
+insert into public.product_variants (organization_id, product_id, name, is_default, price_override_cents) values
+  ('10000000-0000-4000-8000-000000000001', '12000000-0000-4000-8000-000000000005', '20 x 40', false, 45000)
+on conflict do nothing;
+
 insert into public.inventory_units (organization_id, variant_id, label)
 select v.organization_id, v.id, 'Unit ' || g
 from public.product_variants v, generate_series(1, 2) g

@@ -49,7 +49,9 @@ export function EventFields({
   timeZone,
   defaults,
   minDate,
+  delivery = "delivery",
 }: {
+  delivery?: "delivery" | "pickup";
   timeZone: string;
   defaults?: { date?: string; startTime?: string; endTime?: string; endDate?: string } | null;
   minDate?: string;
@@ -123,11 +125,22 @@ export function EventFields({
       </div>
       <div className="flex flex-wrap gap-4 text-sm">
         <label className="flex items-center gap-2">
-          <input type="radio" name="delivery" value="delivery" defaultChecked /> Deliver to the
-          event
+          <input
+            type="radio"
+            name="delivery"
+            value="delivery"
+            defaultChecked={delivery === "delivery"}
+          />{" "}
+          Deliver to the event
         </label>
         <label className="flex items-center gap-2">
-          <input type="radio" name="delivery" value="pickup" /> I will pick up
+          <input
+            type="radio"
+            name="delivery"
+            value="pickup"
+            defaultChecked={delivery === "pickup"}
+          />{" "}
+          I will pick up
         </label>
       </div>
       <div className="grid gap-3 sm:grid-cols-[8rem_1fr]">
