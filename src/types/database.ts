@@ -2245,6 +2245,13 @@ export type Database = {
             foreignKeyName: "service_area_rules_organization_id_service_area_id_fkey";
             columns: ["organization_id", "service_area_id"];
             isOneToOne: false;
+            referencedRelation: "public_service_areas";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "service_area_rules_organization_id_service_area_id_fkey";
+            columns: ["organization_id", "service_area_id"];
+            isOneToOne: false;
             referencedRelation: "service_areas";
             referencedColumns: ["organization_id", "id"];
           },
@@ -2802,6 +2809,64 @@ export type Database = {
             isOneToOne: false;
             referencedRelation: "public_catalog_products";
             referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      public_service_areas: {
+        Row: {
+          id: string | null;
+          name: string | null;
+          organization_id: string | null;
+          priority: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "service_areas_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      public_storefront_policies: {
+        Row: {
+          body: string | null;
+          id: string | null;
+          organization_id: string | null;
+          policy_type: string | null;
+          title: string | null;
+          updated_at: string | null;
+          version: number | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "organization_policies_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      public_storefront_settings: {
+        Row: {
+          address_line1: string | null;
+          city: string | null;
+          free_delivery_miles: number | null;
+          maximum_delivery_miles: number | null;
+          organization_id: string | null;
+          postal_code: string | null;
+          primary_hostname: string | null;
+          state: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "organization_settings_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: true;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
           },
         ];
       };

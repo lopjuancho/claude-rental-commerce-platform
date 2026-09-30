@@ -1,5 +1,6 @@
 import "server-only";
 import { FormReader } from "@/server/forms";
+import { QUOTE_ITEM_ROWS } from "@/domain/storefront/quote-prefill";
 
 /** Shared FormData → plain values for the quote/event forms (validated later by strict schemas). */
 export function readEventForm(fd: FormData) {
@@ -27,7 +28,7 @@ export function readEventForm(fd: FormData) {
   };
 }
 
-export function readItemsForm(fd: FormData, rows = 6) {
+export function readItemsForm(fd: FormData, rows = QUOTE_ITEM_ROWS) {
   const f = new FormReader(fd);
   return Array.from({ length: rows }, (_, i) => ({
     variantId: f.text(`variant${i}`),

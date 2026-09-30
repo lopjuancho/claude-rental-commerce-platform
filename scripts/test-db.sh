@@ -20,7 +20,8 @@ for f in "$ROOT"/supabase/migrations/*.sql; do
 done
 
 if [[ "${WITH_SEED:-0}" == "1" ]]; then
-  psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$ROOT/supabase/seed.sql"
+  # One transaction, as the Supabase CLI applies it (the seed declares its organization gates once).
+  psql "$DB_URL" -v ON_ERROR_STOP=1 -q --single-transaction -f "$ROOT/supabase/seed.sql"
 fi
 
 echo "Test database ready: ${DB_URL}"

@@ -54,8 +54,8 @@ async function assertSeeded(query: Query) {
     orgs: "acme,funtime",
     acme_color: "#2563eb",
     funtime_color: "#db2777",
-    acme_categories: 3,
-    acme_products: 3,
+    acme_categories: 4, // incl. one unpublished storefront fixture
+    acme_products: 4, // incl. one unpublished storefront fixture
     acme_pooled: 1,
     acme_rules: 3,
     domains: 2,

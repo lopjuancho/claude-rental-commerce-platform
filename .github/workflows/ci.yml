@@ -66,10 +66,11 @@ jobs:
 
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
-      - name: E2E smoke tests
+      - name: E2E tests (smoke + seeded tenant storefronts)
         run: pnpm test:e2e
         env:
           E2E_START_SERVER: "1"
+          E2E_TENANTS: "1"
           APP_ENV: development
 
       - name: Cloudflare Workers bundle builds

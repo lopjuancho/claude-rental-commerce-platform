@@ -104,6 +104,24 @@ select organization_id, id, primary_category_id from public.products
 where organization_id = '10000000-0000-4000-8000-000000000001'
 on conflict do nothing;
 
+-- Storefront fixtures (ADR 0016): an unpublished category and product that must never show, a
+-- featured product, and a second tenant's product whose slug must 404 on the first tenant's host.
+update public.products set is_featured = true where id = '12000000-0000-4000-8000-000000000001';
+insert into public.categories (id, organization_id, name, slug, sort_order, is_published) values
+  ('11000000-0000-4000-8000-000000000004', '10000000-0000-4000-8000-000000000001', 'Coming Soon', 'coming-soon', 40, false),
+  ('21000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'Concessions', 'concessions', 10, true)
+on conflict do nothing;
+insert into public.products (id, organization_id, primary_category_id, name, slug, short_description, is_published, base_price_cents) values
+  ('12000000-0000-4000-8000-000000000004', '10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001',
+   'Unreleased Obstacle Course', 'unreleased-obstacle-course', 'Not yet published.', false, 60000),
+  ('22000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000001',
+   'FunTime Popcorn Machine', 'popcorn-machine', 'A fictional popcorn machine.', true, 9500)
+on conflict do nothing;
+insert into public.product_categories (organization_id, product_id, category_id) values
+  ('10000000-0000-4000-8000-000000000001', '12000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000004'),
+  ('20000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000001')
+on conflict do nothing;
+
 insert into public.inventory_units (organization_id, variant_id, label)
 select v.organization_id, v.id, 'Unit ' || g
 from public.product_variants v, generate_series(1, 2) g

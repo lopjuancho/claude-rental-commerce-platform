@@ -107,6 +107,7 @@ M5 work is paused on a local WIP branch until this is reviewed.
 - Tenant-themed, mobile-first storefront: hero "What are you planning?" input, category rails, category pages, product detail (gallery, specs, requirements), "Check availability" (date/time → `check_availability`), "Get quote" form, "Ask AI about this item".
 - SEO basics (metadata, sitemap per tenant), image optimization, accessibility (WCAG AA targets).
 - **Tests:** E2E browse → product → availability check; unpublished product 404; tenant B host shows tenant B catalog only.
+- **Implemented (ADR 0016):** `/`, `/rentals` (event filter; `?category=` → category page), `/categories/[slug]`, `/rentals/[slug]`, `/policies/[type]`, `/media/[id]`, tenant `robots.txt`/`sitemap.xml`; quote form with product preselect, dynamic rows and prefill from an earlier quote; stale-quote UX. "Ask AI about this item" and the planning input are M7. Availability is checked by the quote itself (no separate client-side check).
 
 ### M7 — AI Event Assistant + tool calling
 - Migration `0008`; `LlmProvider` + OpenAI implementation; tool registry with the Phase 1 tools; orchestrator loop with budgets; structured final output; grounding validator; streaming endpoint; Turnstile + rate limits.
@@ -148,7 +149,7 @@ Still open:
 - **System-context runtime tests:** there are no public write paths yet; the `ResolvedTenant` branded type and the ESLint allow-list guard them now. Runtime tests that system-context repositories reject mismatched tenants land with the first public write path (M5/M7).
 - **Auth flows against a real Supabase Auth server** (sign-in, sign-up, invitation acceptance, org switching end-to-end) run only in CI; the build sandbox could not pull Supabase images.
 - **MFA enforcement UI** for owner/admin (D9) — M8.
-- **Accessibility linting** (jsx-a11y is not ESLint-10 compatible) — replace with axe checks in Playwright at M6.
+- **Accessibility linting** (jsx-a11y is not ESLint-10 compatible). M6 Playwright checks cover one h1 per page, alt text, labelled form controls, skip link, touch-target size and no horizontal scroll on mobile; a full axe-core audit is still to be added.
 - **Organization self-service onboarding** is intentionally absent; organizations are created by platform tooling (`create_organization`, service role).
 
 ## 8. M2 follow-ups (carried forward)

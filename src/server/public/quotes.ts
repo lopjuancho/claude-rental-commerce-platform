@@ -133,7 +133,14 @@ const viewSchema = z.object({
   taxCents: z.number(),
   totalCents: z.number(),
   items: z.array(
-    z.object({ name: z.string(), quantity: z.number(), start: z.string(), end: z.string() }),
+    z.object({
+      name: z.string(),
+      quantity: z.number(),
+      start: z.string(),
+      end: z.string(),
+      variantId: z.string().nullish(),
+      productId: z.string().nullish(),
+    }),
   ),
   event: z
     .object({
@@ -150,6 +157,8 @@ const viewSchema = z.object({
     })
     .nullable(),
   canRequestBooking: z.boolean(),
+  /** The event changed after this quote was priced: it must be re-quoted before booking. */
+  stale: z.boolean().default(false),
 });
 export type PublicQuoteView = z.infer<typeof viewSchema>;
 

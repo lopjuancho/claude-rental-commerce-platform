@@ -90,7 +90,8 @@ create table if not exists storage.objects (
   unique (bucket_id, name)
 );
 alter table storage.objects enable row level security;
-grant all on storage.objects to authenticated, service_role;
+-- As on Supabase: every API role has table privileges; RLS policies decide.
+grant all on storage.objects to anon, authenticated, service_role;
 grant select on storage.buckets to anon, authenticated, service_role;
 
 create or replace function storage.foldername(name text) returns text[]

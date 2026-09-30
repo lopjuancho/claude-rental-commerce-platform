@@ -148,6 +148,9 @@ export const PUBLIC_VIEWS = [
   "public_catalog_product_media",
   "public_catalog_products",
   "public_catalog_variants",
+  "public_service_areas",
+  "public_storefront_policies",
+  "public_storefront_settings",
 ] as const;
 
 /** Creates a category + product (with its default variant) and returns their ids. Idempotent per org. */

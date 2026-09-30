@@ -755,6 +755,15 @@ booking_requests (id, organization_id, quote_id, customer_id, event_id,
 - No gate is added after another is held (`RA014`). Undeclared script/service writes fail fast
   with `55P03`.
 
+**Storefront** (`20261001000100`, ADR 0016):
+
+- Anon-safe views `public_storefront_settings`, `public_storefront_policies` (published, not
+  placeholder) and `public_service_areas` (active names only); active organizations only.
+- Storage policy `product_media_objects_public_select`: anon/authenticated may read exactly the
+  objects listed in `public_catalog_product_media`.
+- `public_quote_view` adds `stale` (open quote whose event no longer matches its pricing) and item
+  `variantId`/`productId`; `canRequestBooking` is false for a stale quote.
+
 **RLS:**
 
 - `customers`: `customers.read` / `customers.write`.

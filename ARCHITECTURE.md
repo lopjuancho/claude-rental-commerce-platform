@@ -90,7 +90,9 @@ Single Next.js application, not a monorepo. Domain modules are separated by fold
 │   └── gen-types.ts               # supabase gen types → src/types/database.ts
 ├── src/
 │   ├── app/
-│   │   ├── (storefront)/          # public, tenant-resolved: /, /c/[category], /p/[slug], /assistant
+│   │   ├── (storefront)/          # public, host-resolved (ADR 0016): /, /rentals, /rentals/[slug],
+│   │   │                          # /categories/[slug], /policies/[type], /quote, /q/[token]
+│   │   ├── media/[id]/            # tenant-scoped published product media (anon storage policy)
 │   │   ├── (admin)/admin/         # products, categories, availability, customers, events,
 │   │   │                          # quotes, conversations, settings
 │   │   ├── (auth)/                # sign-in, invite acceptance, org switcher
@@ -259,6 +261,18 @@ Delivery is priced before the engine runs (`src/domain/delivery/quote.ts`, ADR 0
 1. Active service areas decide *where* delivery is offered. A ZIP or city+state match yields `flat`, `mileage` or `manual_review`. If areas are configured and none matches, the result is manual review. If no areas are configured, mileage applies everywhere.
 2. Mileage uses one-way (or round-trip, if configured) **road** distance from the depot. It comes from a `DistanceProvider`: Google Routes API `computeRoutes`, DRIVE, traffic-unaware. The first N miles are free, then the per-mile rate applies to billable miles rounded up (8.2 mi → 4 × $4 = $16). Beyond `maximum_delivery_miles`, the result is manual review.
 3. Distances are cached per org, provider, provider version and route key for up to 30 days. Provider failure, an unresolvable address, or no route all lead to manual review, and the failure is not cached.
+
+### 7.6 Storefront (implemented in M6, ADR 0016)
+
+- Tenant = Host header, resolved on the server; unknown hosts and foreign/unpublished slugs 404.
+- Reads use the anonymous client through the anon-safe views (`public_catalog_*`,
+  `public_storefront_settings`, `public_storefront_policies`, `public_service_areas`), loaded once
+  per request (`server/public/storefront.ts`) and assembled by the pure `domain/storefront/*`
+  modules (catalog model, price/spec presentation, JSON-LD, quote next step, quote prefill).
+- Only configured facts are shown or put in structured data; prices are base rates with the
+  quote qualifier. Canonical origin = verified primary domain; only production hosts are indexable.
+- Quote pages reuse the M5 services; a stale quote (event changed after pricing) asks to
+  recalculate instead of offering a booking request.
 
 ### 7.5 Customers, events, quotes (implemented in M5, ADR 0015)
 

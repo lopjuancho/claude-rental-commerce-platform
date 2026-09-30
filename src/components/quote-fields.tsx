@@ -44,23 +44,56 @@ export function ItemFields({
   );
 }
 
-/** Event date/time (organization's local time) and address. */
-export function EventFields({ timeZone }: { timeZone: string }) {
+/** Event date/time (organization's local time) and address. Defaults are a convenience only. */
+export function EventFields({
+  timeZone,
+  defaults,
+  minDate,
+}: {
+  timeZone: string;
+  defaults?: { date?: string; startTime?: string; endTime?: string; endDate?: string } | null;
+  minDate?: string;
+}) {
   return (
     <fieldset className="grid gap-3">
       <legend className="mb-1 text-sm font-semibold">Event (times in {timeZone})</legend>
       <div className="grid gap-3 sm:grid-cols-4">
         <FormField id="date" label="Date">
-          <Input id="date" name="date" type="date" required />
+          <Input
+            id="date"
+            name="date"
+            type="date"
+            min={minDate}
+            defaultValue={defaults?.date}
+            required
+          />
         </FormField>
         <FormField id="startTime" label="Start">
-          <Input id="startTime" name="startTime" type="time" defaultValue="12:00" required />
+          <Input
+            id="startTime"
+            name="startTime"
+            type="time"
+            defaultValue={defaults?.startTime ?? "12:00"}
+            required
+          />
         </FormField>
         <FormField id="endTime" label="End" hint="Earlier than the start = next day">
-          <Input id="endTime" name="endTime" type="time" defaultValue="16:00" required />
+          <Input
+            id="endTime"
+            name="endTime"
+            type="time"
+            defaultValue={defaults?.endTime ?? "16:00"}
+            required
+          />
         </FormField>
         <FormField id="endDate" label="End date (multi-day)">
-          <Input id="endDate" name="endDate" type="date" />
+          <Input
+            id="endDate"
+            name="endDate"
+            type="date"
+            min={minDate}
+            defaultValue={defaults?.endDate}
+          />
         </FormField>
       </div>
       <FormField
