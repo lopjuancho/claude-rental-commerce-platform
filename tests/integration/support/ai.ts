@@ -28,20 +28,38 @@ async function call<T extends Record<string, unknown>>(
   }
 }
 
+const json = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
+
 export function pgAiStore(): AiConversationStore {
   return {
-    async open(org, hash) {
+    async beginTurn(org, hash, key, lease, correlationId) {
       const [r] = await call<{
-        id: string;
+        outcome: string;
+        turn_id: string | null;
+        attempt: number | null;
+        conversation_id: string;
         state: unknown;
         state_version: number;
         message_count: number;
-      }>("select * from public.ai_conversation_open($1, $2)", [org, hash]);
+        applied_mutation_seq: string | number;
+        response: unknown;
+      }>("select * from public.ai_turn_begin($1, $2, $3, $4, $5)", [
+        org,
+        hash,
+        key,
+        lease,
+        correlationId,
+      ]);
       return {
-        id: r!.id,
+        outcome: r!.outcome as "started",
+        turnId: r!.turn_id,
+        attempt: r!.attempt,
+        conversationId: r!.conversation_id,
         state: r!.state,
         stateVersion: r!.state_version,
         messageCount: r!.message_count,
+        appliedSeq: Number(r!.applied_mutation_seq),
+        response: r!.response,
       };
     },
     async history(org, id, limit) {
@@ -53,22 +71,76 @@ export function pgAiStore(): AiConversationStore {
       }>("select * from public.ai_conversation_history($1, $2, $3)", [org, id, limit]);
       return rows.map((r) => ({ ...r, structured: r.structured as never }));
     },
-    async append(org, id, expected, u) {
+    async mutationsSince(org, id, after) {
+      const rows = await call<{ seq: string; tool_name: string; ref: unknown }>(
+        "select * from public.ai_conversation_mutations($1, $2, $3)",
+        [org, id, after],
+      );
+      return rows.map((r) => ({ seq: Number(r.seq), toolName: r.tool_name, ref: r.ref }));
+    },
+    async finishTurn(org, t, u) {
       const [r] = await call<{ v: number }>(
-        "select public.ai_conversation_append($1, $2, $3, $4, $5, $6, $7, $8, $9) as v",
+        "select public.ai_turn_finish($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) as v",
         [
           org,
-          id,
-          expected,
-          JSON.stringify(u.state),
+          t.turnId,
+          t.attempt,
+          json(u.state),
           u.quoteId,
-          JSON.stringify(u.messages),
+          json(u.messages),
           u.toolCalls,
           u.tokens,
           u.promptVersion,
+          u.appliedSeq,
+          json(u.response),
         ],
       );
       return r!.v;
+    },
+    async failTurn(org, t, f) {
+      await call("select public.ai_turn_fail($1, $2, $3, $4, $5, $6, $7)", [
+        org,
+        t.turnId,
+        t.attempt,
+        f.errorCode,
+        json(f.state),
+        f.quoteId,
+        f.appliedSeq,
+      ]);
+    },
+    async beginMutation(org, t, m) {
+      const [r] = await call<{
+        outcome: string;
+        mutation_id: string;
+        pending: unknown;
+        ref: unknown;
+        result: unknown;
+      }>("select * from public.ai_mutation_begin($1, $2, $3, $4, $5, $6, $7)", [
+        org,
+        t.turnId,
+        t.attempt,
+        m.key,
+        m.toolName,
+        m.toolCallId,
+        json(m.pending),
+      ]);
+      return {
+        outcome: r!.outcome as "proceed",
+        mutationId: r!.mutation_id,
+        pending: r!.pending,
+        ref: r!.ref,
+        result: r!.result,
+      };
+    },
+    async commitMutation(org, id, ref, result) {
+      const [r] = await call<{ s: string }>(
+        "select public.ai_mutation_commit($1, $2, $3, $4) as s",
+        [org, id, json(ref), json(result)],
+      );
+      return Number(r!.s);
+    },
+    async failMutation(org, id, code) {
+      await call("select public.ai_mutation_fail($1, $2, $3)", [org, id, code]);
     },
     async recordAction(org, a) {
       await call("select public.ai_action_record($1, $2, $3, $4, $5, $6, $7, $8)", [

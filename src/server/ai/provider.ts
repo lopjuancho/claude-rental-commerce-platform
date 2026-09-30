@@ -20,6 +20,8 @@ export interface LlmToolSpec {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /** Ask the provider to generate arguments that match `parameters` exactly (closed schema). */
+  strict?: boolean;
 }
 
 export interface LlmRequest {

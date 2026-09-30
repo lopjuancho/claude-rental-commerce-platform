@@ -89,7 +89,12 @@ export class OpenAiProvider implements LlmProvider {
           messages: req.messages.map(toOpenAi),
           tools: req.tools.map((t) => ({
             type: "function",
-            function: { name: t.name, description: t.description, parameters: t.parameters },
+            function: {
+              name: t.name,
+              description: t.description,
+              parameters: t.parameters,
+              ...(t.strict ? { strict: true } : {}),
+            },
           })),
           tool_choice: "auto",
           parallel_tool_calls: false,

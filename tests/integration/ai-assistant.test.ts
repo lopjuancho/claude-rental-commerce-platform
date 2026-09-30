@@ -393,3 +393,62 @@ describeRest("adversarial customers and models fail safely", () => {
     ).toBe(0);
   });
 });
+
+describeRest("false transactional claims are replaced by server-written facts (H1)", () => {
+  it.each([
+    "The total is three hundred dollars.",
+    "Everything is reserved and paid in full.",
+    "Availability is guaranteed for Saturday.",
+    "We deliver to your address at no charge; tax is included.",
+  ])("no evidence: %s", async (claim) => {
+    const { res, actions } = await attack("hi", [], claim);
+    expect(res.reply).toBe(SAFE_FALLBACK);
+    expect(actions.at(-1)).toMatchObject({ status: "guardrail_violation" });
+  });
+
+  it("a real availability result for one date does not back a claim about another day or a booking", async () => {
+    const date = "2027-10-09"; // a Saturday
+    const { res } = await attack(
+      "is the slide free?",
+      [
+        {
+          name: "check_availability",
+          args: {
+            productSlug: "party-slide",
+            quantity: 1,
+            date,
+            startTime: "12:00",
+            endTime: "16:00",
+          },
+        },
+      ],
+      "The Party Slide is available on Sunday, and it's reserved for you.",
+    );
+    // The prose is replaced by facts built from the typed result; the card is kept.
+    expect(res.reply).toMatch(/^I want to make sure I only share confirmed details\./);
+    expect(res.reply).toContain("Party Slide (quantity 1) shows as available");
+    expect(res.reply).toContain("It is not reserved until a booking is requested.");
+    expect(res.reply).not.toMatch(/Sunday|reserved for you/);
+    expect(res.blocks[0]).toMatchObject({ type: "availability", status: "available" });
+  });
+
+  it("a claim that matches the real result is kept", async () => {
+    const { res } = await attack(
+      "is the slide free?",
+      [
+        {
+          name: "check_availability",
+          args: {
+            productSlug: "party-slide",
+            quantity: 1,
+            date: "2027-10-16",
+            startTime: "12:00",
+            endTime: "16:00",
+          },
+        },
+      ],
+      "Good news: the Party Slide is available on Saturday, October 16.",
+    );
+    expect(res.reply).toBe("Good news: the Party Slide is available on Saturday, October 16.");
+  });
+});

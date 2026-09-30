@@ -43,14 +43,21 @@ export function visitorCookieOptions(production: boolean) {
   };
 }
 
-/** Storefront pages (GET/HEAD) establish the visitor identity; nothing else issues it. */
+/**
+ * Storefront page views (GET/HEAD) establish the visitor identity; nothing else issues it. Every
+ * storefront page that renders the assistant or a booking step is included — a visitor who lands
+ * on a product or category page can get to a booking request without visiting another page first.
+ */
+const STOREFRONT_PAGES = [/^\/$/, /^\/(rentals|categories|policies|quote|q)(\/|$)/];
+
+export function isStorefrontPage(pathname: string): boolean {
+  return STOREFRONT_PAGES.some((re) => re.test(pathname));
+}
+
 export function shouldIssueVisitorCookie(method: string, pathname: string, current: unknown) {
-  const storefront =
-    pathname === "/" ||
-    pathname === "/quote" ||
-    pathname.startsWith("/quote/") ||
-    pathname.startsWith("/q/");
   return (
-    (method === "GET" || method === "HEAD") && storefront && !isWellFormedVisitorToken(current)
+    (method === "GET" || method === "HEAD") &&
+    isStorefrontPage(pathname) &&
+    !isWellFormedVisitorToken(current)
   );
 }

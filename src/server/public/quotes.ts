@@ -60,12 +60,17 @@ async function audit(
   });
 }
 
-/** Creates (or matches) the customer, the event, a priced snapshot and a draft quote. */
+/**
+ * Creates (or matches) the customer, the event, a priced snapshot and a draft quote.
+ * `options.token` lets a caller that journals the request (the assistant, ADR 0017 §11) choose the
+ * link token first, so it can find the quote by its hash if the response is lost.
+ */
 export async function submitQuoteRequest(
   tenant: ResolvedTenant,
   raw: unknown,
   meta: RequestMeta,
   deps: PublicDeps = defaultDeps(),
+  options: { token?: string } = {},
 ) {
   await deps.rateLimit("publicWrite", limitKey(tenant, meta));
   const input = publicQuoteRequestSchema.parse(raw);
@@ -98,7 +103,8 @@ export async function submitQuoteRequest(
     request,
     "public",
   );
-  const token = generateQuoteToken();
+  const token =
+    options.token && isWellFormedQuoteToken(options.token) ? options.token : generateQuoteToken();
   const quote = await mapped(
     deps.gateway.createQuote(org, {
       customerId,

@@ -505,25 +505,43 @@ export const TENANT_TABLES: Record<
   ai_conversations: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
   ai_messages: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
   ai_actions: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
+  ai_turns: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
+  ai_mutations: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
 };
 
-/** One conversation with a message and a telemetry row, created as the server would. */
+/**
+ * One conversation with a completed turn (message), a committed journal entry and a telemetry row,
+ * created through the same service-role functions the server uses.
+ */
 async function ensureAiConversation(org: TestOrg): Promise<void> {
   const hash = createHash("sha256").update(`fixture:${org.id}`).digest("hex");
-  const [c] = await rpc<{ id: string; state_version: number }>(
+  const [t] = await rpc<{
+    outcome: string;
+    turn_id: string;
+    attempt: number;
+    conversation_id: string;
+  }>(SYSTEM, "select * from public.ai_turn_begin($1, $2, 'fixture-request', 60, null)", [
+    org.id,
+    hash,
+  ]);
+  if (t!.outcome !== "started") return;
+  const [m] = await rpc<{ mutation_id: string }>(
     SYSTEM,
-    "select * from public.ai_conversation_open($1, $2)",
-    [org.id, hash],
+    "select * from public.ai_mutation_begin($1, $2, $3, $4, 'create_quote', 'fixture', null)",
+    [org.id, t!.turn_id, t!.attempt, "f".repeat(64)],
   );
-  if (c!.state_version > 0) return;
+  await rpc(SYSTEM, "select public.ai_mutation_commit($1, $2, '{}'::jsonb, '{}'::jsonb)", [
+    org.id,
+    m!.mutation_id,
+  ]);
   await rpc(
     SYSTEM,
-    "select public.ai_conversation_append($1, $2, 0, '{}'::jsonb, null, $3::jsonb, 0, 0, 'fixture')",
-    [org.id, c!.id, JSON.stringify([{ role: "user", content: "hello" }])],
+    "select public.ai_turn_finish($1, $2, $3, '{}'::jsonb, null, $4::jsonb, 0, 0, 'fixture', 0, '{}'::jsonb)",
+    [org.id, t!.turn_id, t!.attempt, JSON.stringify([{ role: "user", content: "hello" }])],
   );
   await rpc(
     SYSTEM,
     "select public.ai_action_record($1, $2, 'search_products', 'ok', null, 1, null, null)",
-    [org.id, c!.id],
+    [org.id, t!.conversation_id],
   );
 }

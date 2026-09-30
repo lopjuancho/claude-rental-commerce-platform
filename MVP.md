@@ -214,3 +214,12 @@ Still open:
 - **Policies tool:** `get_business_policies` and `request_human_followup` from the plan are not in
   the M7 tool set; the assistant points to the policy pages and the team instead.
 
+- **Review fixes (Codex review of 88d1f29):** typed-evidence grounding (H1), durable turns and a
+  mutation journal (H2), active-quote reconciliation (H3), visitor cookie on every storefront entry
+  page (M1), explicit item/quantity refusals (M2), rate limit before reading a capped body (M3), one
+  absolute turn deadline (M4), strict OpenAI function schemas (L1). See ADR 0017 §4, §8, §11, §12.
+- **Live model:** `pnpm ai:smoke` (opt-in: `AI_SMOKE_CONFIRM=live`, `AI_SMOKE_BASE_URL`) runs the
+  live smoke test against a staging storefront once `OPENAI_API_KEY` is set in its server secrets.
+  It has not been run yet.
+- **Residual (ADR 0017 §11):** a mutation still in flight when its turn's lease expires can race a
+  new attempt of the same request; bounded by the deadline + 30 s lease.

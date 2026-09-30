@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import http from "node:http";
 import { expect, type Page, test } from "@playwright/test";
 import pg from "pg";
 
@@ -15,6 +16,13 @@ const ACME = `http://acme.localhost:${port}`;
 const FUNTIME = `http://funtime.localhost:${port}`;
 
 const panel = (page: Page) => page.getByRole("dialog", { name: /rental assistant/i });
+
+/** A client address per test: the per-IP assistant budget is per test, not shared by the suite. */
+const testIp = () =>
+  `198.51.${String(Math.floor(Math.random() * 250))}.${String(Math.floor(Math.random() * 250))}`;
+test.beforeEach(async ({ context }) => {
+  await context.setExtraHTTPHeaders({ "cf-connecting-ip": testIp() });
+});
 
 async function openAssistant(page: Page) {
   await page.getByRole("button", { name: "Ask our assistant" }).click();
@@ -193,9 +201,14 @@ test("mobile: the assistant is a bottom sheet that fits the screen and closes wi
 test("the API accepts only a JSON message and page context from the browser", async ({
   request,
 }) => {
+  const ip = testIp();
   const post = (data: string, contentType = "application/json") =>
     request.post(`http://localhost:${port}/api/assistant`, {
-      headers: { host: `acme.localhost:${port}`, "content-type": contentType },
+      headers: {
+        host: `acme.localhost:${port}`,
+        "content-type": contentType,
+        "cf-connecting-ip": ip,
+      },
       data,
     });
   expect((await post("message=hi", "application/x-www-form-urlencoded")).status()).toBe(415);
@@ -219,4 +232,125 @@ test("the API accepts only a JSON message and page context from the browser", as
     data: JSON.stringify({ message: "hi" }),
   });
   expect(none.status()).toBe(404);
+});
+
+/** A random future Saturday (reruns and parallel projects never compete for units). */
+function randomSaturday(): string {
+  const d = new Date(Date.UTC(2029, 0, 1 + 7 * Math.floor(Math.random() * 150)));
+  d.setUTCDate(d.getUTCDate() + ((6 - d.getUTCDay() + 7) % 7));
+  return d.toISOString().slice(0, 10);
+}
+
+// M1 (Codex review of 88d1f29): a visitor who LANDS on a product or category page can go all the
+// way to a booking request — the anonymous visitor identity exists from the first page view.
+for (const entry of [
+  { name: "product page", url: "/rentals/sample-castle", first: null },
+  { name: "category page", url: "/categories/bounce-houses", first: "Do you have a castle?" },
+]) {
+  test(`fresh browser → ${entry.name} → assistant → quote → booking request`, async ({
+    page,
+    context,
+  }) => {
+    expect(await context.cookies()).toEqual([]);
+    await page.goto(`${ACME}${entry.url}`);
+    expect((await context.cookies()).map((c) => c.name)).toContain("rc_visitor");
+    await openAssistant(page);
+    if (entry.first) await ask(page, entry.first);
+    const date = randomSaturday();
+    await ask(page, `Is it available on ${date} from 12:00 to 16:00?`);
+    await ask(
+      page,
+      `My name is Robin and my email is e2e-${randomUUID().slice(0, 8)}@example.test`,
+    );
+    await ask(page, "Please create my quote");
+    const booked = await ask(page, "Please request the booking");
+    await expect(booked).toContainText(
+      "Your booking request has been submitted and the inventory is being held for 15 minutes.",
+    );
+    await expect(panel(page).getByText(/reload the page/i)).toHaveCount(0);
+  });
+}
+
+// M3: every request spends the per-IP budget BEFORE its body is read — malformed, oversized and
+// wrong-type ones included — and the body is read with a hard byte ceiling.
+test("abuse: malformed, oversized and concurrent requests spend the per-IP budget", async ({
+  request,
+}) => {
+  const post = (ip: string, data: string, contentType = "application/json") =>
+    request.post(`http://localhost:${port}/api/assistant`, {
+      headers: {
+        host: `acme.localhost:${port}`,
+        "content-type": contentType,
+        "cf-connecting-ip": ip,
+      },
+      data,
+    });
+  const ip = () =>
+    `198.18.${String(Math.floor(Math.random() * 250))}.${String(Math.floor(Math.random() * 250))}`;
+
+  const malformed = ip();
+  const statuses: number[] = [];
+  for (let i = 0; i < 30; i++) statuses.push((await post(malformed, "{not json")).status());
+  expect(new Set(statuses)).toEqual(new Set([400]));
+  expect((await post(malformed, JSON.stringify({ message: "hi" }))).status()).toBe(429);
+
+  const oversized = ip();
+  const big = JSON.stringify({ message: "x".repeat(20_000) });
+  const bigStatuses: number[] = [];
+  for (let i = 0; i < 30; i++) bigStatuses.push((await post(oversized, big)).status());
+  expect(new Set(bigStatuses)).toEqual(new Set([413]));
+  expect((await post(oversized, big)).status()).toBe(429);
+
+  const wrongType = ip();
+  for (let i = 0; i < 30; i++) await post(wrongType, "message=hi", "text/plain");
+  expect((await post(wrongType, "message=hi", "text/plain")).status()).toBe(429);
+
+  const concurrent = ip();
+  const burst = await Promise.all(
+    Array.from({ length: 40 }, () => post(concurrent, "{not json").then((r) => r.status())),
+  );
+  expect(burst.filter((s) => s === 429).length).toBeGreaterThanOrEqual(10);
+  expect(burst.filter((s) => s === 400).length).toBeLessThanOrEqual(30);
+});
+
+test("a chunked body without Content-Length is cut off at the limit (413)", async () => {
+  const status = await new Promise<number | "closed">((resolve) => {
+    let done = false;
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: Number(port),
+        path: "/api/assistant",
+        method: "POST",
+        headers: {
+          host: `acme.localhost:${port}`,
+          "content-type": "application/json",
+          "transfer-encoding": "chunked",
+          "cf-connecting-ip": `198.19.${String(Math.floor(Math.random() * 250))}.1`,
+        },
+      },
+      (res) => {
+        done = true;
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on("error", () => {
+      if (!done) resolve("closed");
+    });
+    const chunk = `{"message":"${"x".repeat(16 * 1024)}`;
+    let sent = 0;
+    const write = () => {
+      while (!done && sent < 8 * 1024 * 1024) {
+        sent += chunk.length;
+        if (!req.write(chunk)) {
+          req.once("drain", write);
+          return;
+        }
+      }
+      req.end();
+    };
+    write();
+  });
+  expect(status === 413 || status === "closed").toBe(true);
 });

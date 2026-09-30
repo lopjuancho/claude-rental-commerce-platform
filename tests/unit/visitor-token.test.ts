@@ -45,13 +45,33 @@ describe("anonymous visitor token", () => {
   });
 
   it("is issued only by storefront page views, never by actions (POST) or admin/auth pages", () => {
-    for (const path of ["/", "/quote", "/q/abc"]) {
+    // Every storefront entry page (the assistant can reach a booking request from any of them).
+    for (const path of [
+      "/",
+      "/quote",
+      "/q/abc",
+      "/rentals",
+      "/rentals/sample-castle",
+      "/categories/bounce-houses",
+      "/policies/weather",
+    ]) {
       expect(shouldIssueVisitorCookie("GET", path, undefined)).toBe(true);
       expect(shouldIssueVisitorCookie("HEAD", path, "bad")).toBe(true);
       expect(shouldIssueVisitorCookie("POST", path, undefined)).toBe(false); // server actions
       expect(shouldIssueVisitorCookie("GET", path, generateVisitorToken())).toBe(false); // kept
     }
-    for (const path of ["/admin", "/admin/quotes", "/sign-in", "/api/health", "/invite"]) {
+    for (const path of [
+      "/admin",
+      "/admin/quotes",
+      "/sign-in",
+      "/api/health",
+      "/api/assistant",
+      "/invite",
+      "/media/abc",
+      "/robots.txt",
+      "/sitemap.xml",
+      "/rentalsx",
+    ]) {
       expect(shouldIssueVisitorCookie("GET", path, undefined)).toBe(false);
     }
   });

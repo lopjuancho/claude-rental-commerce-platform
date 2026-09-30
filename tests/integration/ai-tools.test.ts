@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, expect, it } from "vitest";
 import { type AssistantState, emptyState, type ToolContext } from "@/server/ai/context";
-import { executeTool } from "@/server/ai/tools";
+import { Deadline } from "@/server/ai/deadline";
+import { directJournal } from "@/server/ai/journal";
+import { executeTool, quoteRelation } from "@/server/ai/tools";
 import { hashQuoteToken } from "@/server/quotes/token";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { generateVisitorToken } from "@/server/visitor";
@@ -43,6 +45,7 @@ function ctxFor(
   org: TestOrg,
   opts: { state?: AssistantState; visitorToken?: string | null; miles?: number | null } = {},
 ): ToolContext {
+  const state = opts.state ?? emptyState();
   return {
     tenant: tenantOf(org),
     meta: {
@@ -52,13 +55,15 @@ function ctxFor(
         ? {}
         : { visitorToken: opts.visitorToken ?? generateVisitorToken() }),
     },
-    state: opts.state ?? emptyState(),
+    state,
     deps: {
       gateway: pgGateway(),
       rateLimit: () => Promise.resolve(),
       provider: opts.miles === null ? null : fakeProvider(opts.miles ?? 3),
     },
     now: () => new Date(),
+    deadline: Deadline.in(60_000),
+    journal: directJournal(state),
   };
 }
 const run = (ctx: ToolContext, name: string, args: unknown) =>
@@ -426,8 +431,14 @@ describeRest("customer, event, quote and booking (the M5 public path)", () => {
       organization_id: a.id,
       total_cents: "33000",
     });
+    // Asking again with nothing changed returns the same quote; nothing new is created.
     const again = await run(ctx, "create_quote", {});
-    expect(again.errorCode).toBe("QUOTE_EXISTS");
+    expect(again.result).toMatchObject({ quote: "existing", quoteNumber: res.result.quoteNumber });
+    const mine = await admin(
+      "select 1 from public.quotes where organization_id = $1 and customer_id = (select customer_id from public.quotes where token_hash = $2)",
+      [a.id, ctx.state.quote!.tokenHash],
+    );
+    expect(mine.rowCount).toBe(1);
   });
 
   it("customer duplicate protection: an existing customer is matched, never overwritten or disclosed", async () => {
@@ -573,15 +584,29 @@ describeRest("tenant isolation", () => {
     await run(bCtx, "create_quote", { items: [{ productSlug: "b-slide", quantity: 1 }] });
     const bQuote = bCtx.state.quote!;
     // …planted into tenant A's conversation state (e.g. a forged session) is simply not found.
-    const aCtx = ctxFor(a, { state: { items: [], quote: bQuote } });
+    const planted = { ...bQuote, basis: { contact: null, event: null, items: null } };
+    const aCtx = ctxFor(a, {
+      state: { ...emptyState(), quote: planted },
+    });
     const res = await run(aCtx, "request_booking", {});
     expect(res.errorCode).toBe("NOT_FOUND");
     expect(
       (await admin("select 1 from public.booking_requests where quote_id = $1", [bQuote.quoteId]))
         .rowCount,
     ).toBe(0);
+    const count = async () =>
+      Number(
+        (
+          await admin<{ n: string }>(
+            "select count(*)::text n from public.quotes where organization_id in ($1, $2)",
+            [a.id, b.id],
+          )
+        ).rows[0]!.n,
+      );
+    const before = await count();
     const add = await run(aCtx, "add_quote_item", { productSlug: "mega-slide", quantity: 1 });
-    expect(add.errorCode).toBe("QUOTE_NOT_EDITABLE");
+    expect(add.status).toMatch(/^rejected_/);
+    expect(await count()).toBe(before);
     expect(JSON.stringify(await run(aCtx, "search_products", { query: "slide" }))).not.toContain(
       "B Slide",
     );
@@ -611,5 +636,155 @@ describeRest("tenant isolation", () => {
       productSlug: "x'; drop table products;--",
     });
     expect(injectedSlug.status).toBe("rejected_validation");
+  });
+});
+
+describeRest("active quote reconciliation (H3)", () => {
+  async function quoted(org: TestOrg, date = nextDate()) {
+    const ctx = ctxFor(org);
+    await run(ctx, "create_customer", {
+      firstName: "Sam",
+      email: `h3-${randomUUID().slice(0, 8)}@example.test`,
+    });
+    await run(ctx, "create_event", { ...window(date), fulfillment: "pickup" });
+    const q = await run(ctx, "create_quote", {
+      items: [{ productSlug: "tiny-castle", quantity: 1 }],
+    });
+    expect(q.result.quote).toBe("created");
+    return { ctx, number: q.result.quoteNumber as string, date };
+  }
+  const bookings = async (tokenHash: string) =>
+    (
+      await admin(
+        "select 1 from public.booking_requests b join public.quotes q on q.id = b.quote_id where q.token_hash = $1",
+        [tokenHash],
+      )
+    ).rowCount;
+
+  it("an event change after the quote makes it mismatched: booking refused until a new quote replaces it", async () => {
+    const { ctx, number } = await quoted(a);
+    const oldHash = ctx.state.quote!.tokenHash;
+    const newDate = nextDate();
+    const moved = await run(ctx, "create_event", { ...window(newDate), fulfillment: "pickup" });
+    expect(moved.result).toMatchObject({ quoteStatus: "out_of_date" });
+    expect(await quoteRelation(ctx.state)).toEqual({ status: "mismatched", changed: ["event"] });
+    const refused = await run(ctx, "request_booking", {});
+    expect(refused).toMatchObject({ status: "rejected_policy", errorCode: "DETAILS_CHANGED" });
+    expect(await bookings(oldHash)).toBe(0);
+    // The updated quote replaces it; the booking then targets the NEW quote and the new event.
+    const updated = await run(ctx, "create_quote", {});
+    expect(updated.result).toMatchObject({ quote: "replaced", replaces: number });
+    const booked = await run(ctx, "request_booking", {});
+    expect(booked.result).toMatchObject({
+      booking: "hold_placed",
+      quoteNumber: updated.result.quoteNumber,
+    });
+    const row = await admin<{ quote_number: string; start_date: string }>(
+      `select q.quote_number, e.event_date::text start_date from public.booking_requests b
+       join public.quotes q on q.id = b.quote_id join public.events e on e.id = q.event_id
+       where q.token_hash = $1`,
+      [ctx.state.quote!.tokenHash],
+    );
+    expect(row.rows[0]).toEqual({ quote_number: updated.result.quoteNumber, start_date: newDate });
+    expect(await bookings(oldHash)).toBe(0);
+  });
+
+  it("contact, item and quantity changes after the quote are mismatches too", async () => {
+    for (const change of ["contact", "items", "quantity"] as const) {
+      const { ctx } = await quoted(a);
+      if (change === "contact") {
+        await run(ctx, "create_customer", {
+          email: `other-${randomUUID().slice(0, 6)}@example.test`,
+        });
+      } else {
+        // Staged directly (as a create_quote with new items would before re-quoting).
+        ctx.state.items =
+          change === "items"
+            ? [...ctx.state.items, { ...ctx.state.items[0]!, variantId: fx.slide.variantId }]
+            : ctx.state.items.map((i) => ({ ...i, quantity: i.quantity + 1 }));
+      }
+      const rel = await quoteRelation(ctx.state);
+      expect(rel, change).toMatchObject({ status: "mismatched" });
+      const refused = await run(ctx, "request_booking", {});
+      expect(refused.errorCode, change).toBe("DETAILS_CHANGED");
+      expect(await bookings(ctx.state.quote!.tokenHash)).toBe(0);
+    }
+  });
+
+  it("a different quote being viewed is never booked silently: ambiguous → explicit choice", async () => {
+    const A = await quoted(a);
+    const B = await quoted(a);
+    // The chat's quote is A; the customer is viewing B (validated by its link token this turn).
+    A.ctx.pageQuote = { tokenHash: B.ctx.state.quote!.tokenHash, quoteNumber: B.number };
+    const hashA = A.ctx.state.quote!.tokenHash;
+    const ambiguous = await run(A.ctx, "request_booking", {});
+    expect(ambiguous).toMatchObject({ errorCode: "AMBIGUOUS_QUOTE" });
+    expect(await bookings(hashA)).toBe(0);
+    const unknown = await run(A.ctx, "request_booking", { quoteNumber: "Q-999999" });
+    expect(unknown.errorCode).toBe("UNKNOWN_QUOTE");
+    // The customer picks B: B becomes the active quote and is the one requested.
+    const chosen = await run(A.ctx, "request_booking", { quoteNumber: B.number });
+    expect(chosen.result).toMatchObject({ booking: "hold_placed", quoteNumber: B.number });
+    expect(await bookings(B.ctx.state.quote!.tokenHash)).toBe(1);
+    expect(A.ctx.state.quote?.quoteNumber).toBe(B.number);
+    expect(await bookings(hashA)).toBe(0);
+  });
+
+  it("choosing the chat's own quote while viewing another books the chat's quote", async () => {
+    const A = await quoted(a);
+    const B = await quoted(a);
+    A.ctx.pageQuote = { tokenHash: B.ctx.state.quote!.tokenHash, quoteNumber: B.number };
+    const hashA = A.ctx.state.quote!.tokenHash;
+    const chosen = await run(A.ctx, "request_booking", { quoteNumber: A.number });
+    expect(chosen.result).toMatchObject({ booking: "hold_placed", quoteNumber: A.number });
+    expect(await bookings(hashA)).toBe(1);
+    expect(await bookings(B.ctx.state.quote!.tokenHash)).toBe(0);
+  });
+});
+
+describeRest("staged items are never silently changed (M2)", () => {
+  it("aggregate quantity over the maximum is refused, not clamped", async () => {
+    const ctx = ctxFor(a);
+    expect(
+      (await run(ctx, "add_quote_item", { productSlug: "tiny-castle", quantity: 600 })).status,
+    ).toBe("ok");
+    const over = await run(ctx, "add_quote_item", { productSlug: "tiny-castle", quantity: 600 });
+    expect(over).toMatchObject({ status: "rejected_validation", errorCode: "QUANTITY_LIMIT" });
+    expect(over.result.message).toMatch(/Nothing was changed/);
+    expect(ctx.state.items).toEqual([expect.objectContaining({ quantity: 600 })]);
+    const priced = await run(ctx, "calculate_price", {
+      items: [
+        { productSlug: "tiny-castle", quantity: 600 },
+        { productSlug: "tiny-castle", quantity: 600 },
+      ],
+      ...window(nextDate()),
+      fulfillment: "pickup",
+    });
+    expect(priced.errorCode).toBe("QUANTITY_LIMIT");
+  });
+
+  it("duplicates are combined; an 11th distinct item is refused, never dropped", async () => {
+    const ctx = ctxFor(a);
+    await run(ctx, "add_quote_item", { productSlug: "tiny-castle", quantity: 2 });
+    await run(ctx, "add_quote_item", { productSlug: "tiny-castle", quantity: 3 });
+    expect(ctx.state.items).toEqual([expect.objectContaining({ quantity: 5 })]);
+    // Ten distinct items staged (fabricated staging of existing variants is not needed: fill with
+    // real products).
+    const extra: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const slug = `m2-item-${randomUUID().slice(0, 6)}`;
+      await product(a, slug, { name: `Item ${String(i)}`, base_price_cents: 1000 });
+      extra.push(slug);
+    }
+    for (const slug of extra.slice(0, 9)) {
+      expect((await run(ctx, "add_quote_item", { productSlug: slug, quantity: 1 })).status).toBe(
+        "ok",
+      );
+    }
+    expect(ctx.state.items).toHaveLength(10);
+    const eleventh = await run(ctx, "add_quote_item", { productSlug: extra[9]!, quantity: 1 });
+    expect(eleventh).toMatchObject({ status: "rejected_validation", errorCode: "TOO_MANY_ITEMS" });
+    expect(ctx.state.items).toHaveLength(10);
+    expect(ctx.state.items.map((i) => i.productSlug)).not.toContain(extra[9]);
   });
 });

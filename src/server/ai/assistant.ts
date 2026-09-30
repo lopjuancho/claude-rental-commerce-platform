@@ -1,4 +1,6 @@
 import "server-only";
+import type { Evidence } from "@/domain/assistant/evidence";
+import { formatCents } from "@/domain/money";
 import { humanize } from "@/domain/storefront/catalog";
 import type { PublicClient } from "@/server/db/public";
 import type { PublicDeps, RequestMeta } from "@/server/public/deps";
@@ -6,20 +8,51 @@ import { getPublicQuote } from "@/server/public/quotes";
 import { loadProductBySlug, loadShell } from "@/server/public/storefront";
 import { hashQuoteToken } from "@/server/quotes/token";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
-import type { AiConversationStore, AiStoredMessage, AiTurnUpdate } from "@/server/trusted/gateway";
+import type {
+  AiConversationStore,
+  AiStoredMessage,
+  AiTurnFinish,
+  AiTurnRef,
+} from "@/server/trusted/gateway";
+import type { Json } from "@/types/database";
 import { AI_LIMITS, PROMPT_VERSION } from "./config";
-import { type AssistantBlock, type AssistantState, parseState, type ToolContext } from "./context";
-import { checkGrounding, cleanReply, redactArguments, SAFE_FALLBACK, systemPrompt } from "./policy";
+import {
+  applyMutationRef,
+  type AssistantBlock,
+  type AssistantState,
+  type MutationRef,
+  mutationRefSchema,
+  parseState,
+  recordEvidence,
+  type ToolContext,
+  type ToolStatus,
+} from "./context";
+import { Deadline, DeadlineError } from "./deadline";
+import { durableJournal } from "./journal";
+import {
+  checkGrounding,
+  cleanReply,
+  factSentences,
+  MANUAL_REVIEW_TEXT,
+  redactArguments,
+  SAFE_FALLBACK,
+  systemPrompt,
+} from "./policy";
 import type { LlmMessage, LlmProvider, LlmToolSpec } from "./provider";
-import { TOOL_DESCRIPTIONS, TOOL_NAMES, toolJsonSchema } from "./schemas";
+import { strictToolJsonSchema, TOOL_DESCRIPTIONS, TOOL_NAMES } from "./schemas";
 import { hashSessionToken } from "./session";
 import { logAssistantError, recordToolAction } from "./telemetry";
-import { executeTool } from "./tools";
+import { adoptPageQuote, executeTool } from "./tools";
 
 /**
- * One assistant turn (ADR 0017): load the tenant-scoped conversation, let the model call the fixed
- * tool set within budgets, check the reply against tool results, persist, and return text plus
- * server-built cards. The model never receives or supplies an organization id or a quote token.
+ * One assistant turn (ADR 0017): claim the conversation, re-apply committed mutations, let the
+ * model call the fixed tool set within budgets and ONE absolute deadline, check the reply against
+ * typed evidence, persist, and return text plus server-built cards. The model never receives or
+ * supplies an organization id or a quote token.
+ *
+ * Durability (§11): the turn owns the conversation (lease) from the first step; business mutations
+ * are journaled and committed as soon as they happen; a failed turn keeps its state (with those
+ * references) but not its messages, so the same request can be retried without repeating anything.
  */
 
 export type PageContext =
@@ -31,10 +64,14 @@ export type PageContext =
 export interface TurnInput {
   tenant: ResolvedTenant;
   sessionToken: string;
+  /** Client id of this message; a retry of the same message reuses it. */
+  requestKey?: string | undefined;
   message: string;
   page?: PageContext | undefined;
   meta: RequestMeta;
   correlationId: string | null;
+  /** When the request arrived (the deadline counts from here). */
+  startedAt?: number;
 }
 
 export interface TurnDeps {
@@ -45,7 +82,7 @@ export interface TurnDeps {
   db?: PublicClient;
   now?: () => Date;
   execute?: typeof executeTool;
-  limits?: Partial<typeof AI_LIMITS>;
+  limits?: Partial<Record<keyof typeof AI_LIMITS, number>>;
 }
 
 export interface TurnResult {
@@ -53,16 +90,24 @@ export interface TurnResult {
   reply: string;
   blocks: AssistantBlock[];
   errorCode?: string;
+  /** The stored reply of an already-completed request (duplicate or retried POST). */
+  replayed?: boolean;
 }
 
 export const TOOL_SPECS: LlmToolSpec[] = TOOL_NAMES.map((name) => ({
   name,
   description: TOOL_DESCRIPTIONS[name],
-  parameters: toolJsonSchema(name),
+  parameters: strictToolJsonSchema(name),
+  strict: true,
 }));
 
 const UNAVAILABLE =
   "The assistant is unavailable right now. You can keep browsing or try again in a moment.";
+const TIMED_OUT = "That took longer than expected, so I stopped.";
+/** Persistence and telemetry may run this long past the deadline (never business mutations). */
+const PERSIST_GRACE_MS = 5_000;
+/** The lease outlives the deadline, so a stuck turn is taken over only after it cannot act. */
+const LEASE_GRACE_SECONDS = 30;
 
 function today(timeZone: string, now: Date): string {
   const date = new Intl.DateTimeFormat("en-CA", { timeZone, dateStyle: "short" }).format(now);
@@ -100,17 +145,23 @@ function toMessage(row: AiStoredMessage): LlmMessage {
   return { role: "assistant", content: row.content, ...(calls.length ? { toolCalls: calls } : {}) };
 }
 
-/** Page context resolved on the server; only names and statuses reach the model. */
+/**
+ * Page context resolved on the server; only names and statuses reach the model. A quote page's
+ * token is validated for this tenant: with no active quote it becomes the active one; a DIFFERENT
+ * quote than the active one is never selected silently (request_booking asks which one).
+ */
 async function pageNote(
   input: TurnInput,
-  state: AssistantState,
+  ctx: ToolContext,
   deps: TurnDeps,
 ): Promise<string | null> {
   const page = input.page;
   if (!page || page.kind === "other") return null;
   if (page.kind === "product") {
     const p = await loadProductBySlug(input.tenant, page.slug, deps.db);
-    return p ? `The customer is on the page for "${p.name}" (slug: ${p.slug}).` : null;
+    if (!p) return null;
+    ctx.state.knownProducts = [...ctx.state.knownProducts.filter((n) => n !== p.name), p.name];
+    return `The customer is on the page for "${p.name}" (slug: ${p.slug}).`;
   }
   if (page.kind === "category") {
     const shell = await loadShell(input.tenant, deps.db);
@@ -120,17 +171,72 @@ async function pageNote(
   // Quote page: the token proves access; it never enters the prompt.
   const view = await getPublicQuote(input.tenant, page.token, deps.publicDeps);
   if (!view) return null;
-  if (!state.quote) {
-    state.quote = { tokenHash: await hashQuoteToken(page.token), quoteNumber: view.quoteNumber };
-  }
-  return `The customer is viewing their quote ${view.quoteNumber} (status: ${humanize(view.status)}; items: ${view.items
+  const viewed = { tokenHash: await hashQuoteToken(page.token), quoteNumber: view.quoteNumber };
+  const summary = `quote ${view.quoteNumber} (status: ${humanize(view.status)}; items: ${view.items
     .map((i) => `${String(i.quantity)} × ${i.name}`)
-    .join(", ")}). Use request_booking only if they ask.`;
+    .join(", ")})`;
+  if (!ctx.state.quote) {
+    await adoptPageQuote(ctx.state, viewed);
+    return `The customer is viewing their ${summary}; it is this chat's quote now. Use request_booking only if they ask.`;
+  }
+  if (ctx.state.quote.tokenHash === viewed.tokenHash) {
+    return `The customer is viewing this chat's ${summary}. Use request_booking only if they ask.`;
+  }
+  ctx.pageQuote = viewed;
+  return `The customer is viewing ${summary}, but this chat's quote is ${ctx.state.quote.quoteNumber}. If they ask to book, first ask which quote they mean.`;
 }
+
+function fallbackReply(evidence: Evidence[], currency: string): string {
+  const facts = factSentences(evidence, (c) => formatCents(c, currency));
+  return facts.length
+    ? `I want to make sure I only share confirmed details. ${facts.join(" ")}`
+    : SAFE_FALLBACK;
+}
+
+/** What is stored for replay: no quote link tokens. */
+function storable(result: TurnResult): Json {
+  return {
+    status: result.status,
+    reply: result.reply,
+    ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+    blocks: result.blocks.map((b) => (b.type === "quote" ? { ...b, url: null } : b)),
+  } as unknown as Json;
+}
+
+function replayOf(stored: unknown): TurnResult {
+  const r = stored as Partial<TurnResult> | null;
+  if (!r || typeof r.reply !== "string") {
+    return { status: "error", errorCode: "REPLAY", reply: UNAVAILABLE, blocks: [], replayed: true };
+  }
+  return {
+    status: r.status === "ok" ? "ok" : "error",
+    reply: r.reply,
+    blocks: Array.isArray(r.blocks) ? r.blocks : [],
+    ...(r.errorCode ? { errorCode: r.errorCode } : {}),
+    replayed: true,
+  };
+}
+
+const randomKey = () => crypto.randomUUID().replace(/-/g, "");
 
 export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnResult> {
   const limits = { ...AI_LIMITS, ...deps.limits };
   const now = deps.now ?? (() => new Date());
+  const deadline = new Deadline((input.startedAt ?? Date.now()) + limits.turnTimeoutMs);
+  try {
+    return await turn(input, deps, limits, now, deadline);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function turn(
+  input: TurnInput,
+  deps: TurnDeps,
+  limits: Record<keyof typeof AI_LIMITS, number>,
+  now: () => Date,
+  deadline: Deadline,
+): Promise<TurnResult> {
   const execute = deps.execute ?? executeTool;
   const org = input.tenant.organizationId;
   const message = input.message.trim();
@@ -142,9 +248,65 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
       blocks: [],
     };
   }
+  const grace = <T>(p: Promise<T>, what: string) => deadline.race(p, what, PERSIST_GRACE_MS);
 
-  const conversation = await deps.store.open(org, await hashSessionToken(input.sessionToken));
-  if (conversation.messageCount >= limits.maxConversationMessages) {
+  // 1. Claim the conversation (one writer at a time; duplicates replay or wait).
+  const claim = await deadline.race(
+    deps.store.beginTurn(
+      org,
+      await hashSessionToken(input.sessionToken),
+      input.requestKey ?? randomKey(),
+      Math.ceil(limits.turnTimeoutMs / 1000) + LEASE_GRACE_SECONDS,
+      input.correlationId,
+    ),
+    "begin",
+  );
+  if (claim.outcome === "replay") return replayOf(claim.response);
+  if (claim.outcome === "in_progress" || claim.outcome === "busy" || !claim.turnId) {
+    return {
+      status: "error",
+      errorCode: claim.outcome === "in_progress" ? "IN_PROGRESS" : "BUSY",
+      reply:
+        claim.outcome === "in_progress"
+          ? "I'm still working on that message. Please wait a moment."
+          : "Another message in this chat is still being handled. Please wait a moment and send yours again.",
+      blocks: [],
+    };
+  }
+  const turnRef: AiTurnRef = { turnId: claim.turnId, attempt: claim.attempt ?? 1 };
+  const conversationId = claim.conversationId;
+  const state: AssistantState = parseState(claim.state);
+  let appliedSeq = claim.appliedSeq;
+  // What a failed turn keeps: the state it started from plus every mutation reference it applied
+  // (committed, recovered or replayed) — never its uncommitted staging, so retrying the same
+  // message cannot apply a change twice.
+  let baseState = JSON.stringify(state);
+  const appliedRefs: MutationRef[] = [];
+  const stateAfterFailure = () => {
+    const kept = parseState(JSON.parse(baseState));
+    for (const ref of appliedRefs) applyMutationRef(kept, ref);
+    return kept;
+  };
+
+  const fail = async (errorCode: string) => {
+    const kept = stateAfterFailure();
+    try {
+      await grace(
+        deps.store.failTurn(org, turnRef, {
+          errorCode,
+          state: kept as unknown as Json,
+          quoteId: kept.quote?.quoteId ?? null,
+          appliedSeq,
+        }),
+        "fail",
+      );
+    } catch (e) {
+      logAssistantError(input.correlationId, "persist:fail", e);
+    }
+  };
+
+  if (claim.messageCount >= limits.maxConversationMessages) {
+    await fail("CONVERSATION_FULL");
     return {
       status: "error",
       errorCode: "CONVERSATION_FULL",
@@ -152,37 +314,90 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
       blocks: [],
     };
   }
-  const state = parseState(conversation.state);
-  const history = historyToMessages(
-    await deps.store.history(org, conversation.id, limits.maxHistoryMessages),
-    limits.maxHistoryChars,
-  );
 
-  const ctx: ToolContext = {
-    tenant: input.tenant,
-    meta: {
-      ...input.meta,
-      actor: "ai",
-      ...(input.correlationId ? { requestId: input.correlationId } : {}),
-    },
-    state,
-    deps: deps.publicDeps,
-    ...(deps.db ? { db: deps.db } : {}),
-    now,
-  };
-
-  const abort = new AbortController();
-  const timer = setTimeout(() => {
-    abort.abort();
-  }, limits.turnTimeoutMs);
   const blocks: AssistantBlock[] = [];
-  const stored: AiTurnUpdate["messages"] = [{ role: "user", content: message }];
-  const turnToolResults: string[] = [];
+  const turnEvidence: Evidence[] = [];
+  const stored: AiTurnFinish["messages"] = [{ role: "user", content: message }];
   let tokens = 0;
   let toolCalls = 0;
   let reply: string | null = null;
+  let currentCallId = "";
+
+  const record = (
+    toolName: string,
+    status: ToolStatus | "guardrail_violation",
+    errorCode: string | undefined,
+    ms: number,
+  ) =>
+    grace(
+      recordToolAction(deps.store, org, {
+        conversationId,
+        toolName,
+        status,
+        errorCode,
+        durationMs: ms,
+        correlationId: input.correlationId,
+        model: deps.provider.model,
+      }),
+      "telemetry",
+    ).catch(() => undefined);
 
   try {
+    // 2. Committed mutations are re-applied, whatever happened to the turn that made them.
+    const committedRefs = await deadline.race(
+      deps.store.mutationsSince(org, conversationId, appliedSeq),
+      "mutations",
+    );
+    for (const m of committedRefs) {
+      const ref = mutationRefSchema.safeParse(m.ref);
+      if (ref.success) applyMutationRef(state, ref.data);
+      appliedSeq = Math.max(appliedSeq, m.seq);
+    }
+    baseState = JSON.stringify(state);
+    const history = historyToMessages(
+      await deadline.race(
+        deps.store.history(org, conversationId, limits.maxHistoryMessages),
+        "history",
+      ),
+      limits.maxHistoryChars,
+    );
+
+    const ctx: ToolContext = {
+      tenant: input.tenant,
+      meta: {
+        ...input.meta,
+        actor: "ai",
+        ...(input.correlationId ? { requestId: input.correlationId } : {}),
+      },
+      state,
+      deps: deps.publicDeps,
+      ...(deps.db ? { db: deps.db } : {}),
+      now,
+      deadline,
+      journal: durableJournal({
+        store: deps.store,
+        organizationId: org,
+        conversationId,
+        turn: turnRef,
+        state,
+        deadline,
+        toolCallId: () => currentCallId,
+        onApplied: (ref) => {
+          appliedRefs.push(ref);
+        },
+        onCommitted: (seq) => {
+          appliedSeq = Math.max(appliedSeq, seq);
+        },
+        onError: (where, e) => {
+          logAssistantError(input.correlationId, where, e);
+        },
+      }),
+    };
+
+    const note = await deadline.race(pageNote(input, ctx, deps), "page").catch((e: unknown) => {
+      if (e instanceof DeadlineError) throw e;
+      return null;
+    });
     const messages: LlmMessage[] = [
       {
         role: "system",
@@ -190,20 +405,25 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
           businessName: input.tenant.name,
           timeZone: input.tenant.timezone,
           today: today(input.tenant.timezone, now()),
-          pageNote: await pageNote(input, state, deps).catch(() => null),
+          pageNote: note,
         }),
       },
       ...history,
       { role: "user", content: message },
     ];
 
+    // 3. The model loop: every step checks the one deadline.
     for (let step = 0; step < limits.maxModelSteps; step++) {
-      const res = await deps.provider.complete({
-        messages,
-        tools: TOOL_SPECS,
-        maxOutputTokens: deps.maxOutputTokens,
-        signal: abort.signal,
-      });
+      deadline.assertOpen("model");
+      const res = await deadline.race(
+        deps.provider.complete({
+          messages,
+          tools: TOOL_SPECS,
+          maxOutputTokens: deps.maxOutputTokens,
+          signal: deadline.signal,
+        }),
+        "model",
+      );
       tokens += res.usage.inputTokens + res.usage.outputTokens;
       if (res.toolCalls.length === 0) {
         reply = res.text ?? "";
@@ -227,6 +447,7 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
       });
       for (const c of calls) {
         const started = Date.now();
+        currentCallId = c.id;
         const outcome =
           toolCalls >= limits.maxToolCallsPerTurn
             ? {
@@ -243,72 +464,88 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
               });
         toolCalls++;
         const content = JSON.stringify(outcome.result).slice(0, 8000);
-        turnToolResults.push(content);
         blocks.push(...outcome.blocks);
+        const evidence = "evidence" in outcome ? (outcome.evidence ?? []) : [];
+        turnEvidence.push(...evidence);
+        recordEvidence(state, evidence);
         messages.push({ role: "tool", toolCallId: c.id, name: c.name, content });
         stored.push({
           role: "tool",
           content,
           structured: { toolCallId: c.id, name: c.name, status: outcome.status },
         });
-        await recordToolAction(deps.store, org, {
-          conversationId: conversation.id,
-          toolName: c.name,
-          status: outcome.status,
-          errorCode: outcome.errorCode,
-          durationMs: Date.now() - started,
-          correlationId: input.correlationId,
-          model: deps.provider.model,
-        });
+        await record(c.name, outcome.status, outcome.errorCode, Date.now() - started);
       }
     }
   } catch (e) {
-    logAssistantError(input.correlationId, "provider", e);
-    // Nothing is persisted for a failed turn (the customer can simply retry). Mutations a tool
-    // already made are real and audited by their services; their cards are still returned.
-    return { status: "error", errorCode: "AI_UNAVAILABLE", reply: UNAVAILABLE, blocks };
-  } finally {
-    clearTimeout(timer);
-  }
-
-  let text = cleanReply(reply ?? "");
-  if (!text) text = "I couldn't finish that just now. Please try again or rephrase.";
-  const evidence = [
-    ...history.flatMap((m) => (m.role === "tool" ? [m.content] : [])),
-    ...turnToolResults,
-  ];
-  const grounding = checkGrounding(text, evidence);
-  if (!grounding.ok) {
-    await recordToolAction(deps.store, org, {
-      conversationId: conversation.id,
-      toolName: "reply_guardrail",
-      status: "guardrail_violation",
-      errorCode: grounding.violations[0]?.slice(0, 60),
-      durationMs: 0,
-      correlationId: input.correlationId,
-      model: deps.provider.model,
-    });
-    text = SAFE_FALLBACK;
-  }
-  stored.push({ role: "assistant", content: text });
-
-  try {
-    await deps.store.append(org, conversation.id, conversation.stateVersion, {
-      state: state as unknown as AiTurnUpdate["state"],
-      quoteId: state.quote?.quoteId ?? null,
-      messages: stored,
-      toolCalls,
-      tokens,
-      promptVersion: PROMPT_VERSION,
-    });
-  } catch (e) {
-    logAssistantError(input.correlationId, "persist", e);
+    // Provider failure or the deadline: the turn ends without a model reply. Its state — with the
+    // references of anything it committed — is kept; its messages are not, so retrying the same
+    // message re-runs it and the journal prevents any repeated mutation.
+    const timedOut = e instanceof DeadlineError || deadline.expired();
+    logAssistantError(input.correlationId, timedOut ? "deadline" : "provider", e);
+    await fail(timedOut ? "TURN_TIMEOUT" : "AI_UNAVAILABLE");
     return {
       status: "error",
-      errorCode: "CONFLICT",
-      reply: "Another message was being handled at the same time. Please send yours again.",
+      errorCode: timedOut ? "TURN_TIMEOUT" : "AI_UNAVAILABLE",
+      reply:
+        appliedRefs.length > 0 || turnEvidence.length > 0
+          ? `${timedOut ? TIMED_OUT : UNAVAILABLE} ${factSentences(turnEvidence, (c) => formatCents(c, input.tenant.currency)).join(" ")}`.trim()
+          : timedOut
+            ? `${TIMED_OUT} Please try again.`
+            : UNAVAILABLE,
       blocks,
     };
   }
-  return { status: "ok", reply: text, blocks };
+
+  // 4. Grounding: transactional claims in the prose need current typed evidence.
+  let text = cleanReply(reply ?? "");
+  if (!text) text = "I couldn't finish that just now. Please try again or rephrase.";
+  const grounding = checkGrounding({
+    reply: text,
+    evidence: state.evidence,
+    now: now(),
+    knownProducts: state.knownProducts,
+    businessName: input.tenant.name,
+    currency: input.tenant.currency,
+    exemptSentences: [MANUAL_REVIEW_TEXT],
+  });
+  if (!grounding.ok) {
+    logAssistantError(input.correlationId, "reply_guardrail", {
+      name: "GuardrailViolation",
+      code: grounding.violations[0]?.slice(0, 60),
+    });
+    await record(
+      "reply_guardrail",
+      "guardrail_violation",
+      grounding.violations[0]?.slice(0, 60),
+      0,
+    );
+    text = fallbackReply(turnEvidence, input.tenant.currency);
+  }
+  stored.push({ role: "assistant", content: text });
+  const result: TurnResult = { status: "ok", reply: text, blocks };
+
+  // 5. Persist and release the conversation.
+  try {
+    await grace(
+      deps.store.finishTurn(org, turnRef, {
+        state: state as unknown as Json,
+        quoteId: state.quote?.quoteId ?? null,
+        messages: stored,
+        toolCalls,
+        tokens,
+        promptVersion: PROMPT_VERSION,
+        appliedSeq,
+        response: storable(result),
+      }),
+      "finish",
+    );
+  } catch (e) {
+    // The reply is true and any mutation is in the journal (re-applied next turn); only this
+    // turn's messages are missing from the history. Release the conversation (keeping the
+    // committed references) so the next message is not refused as busy until the lease expires.
+    logAssistantError(input.correlationId, "persist:finish", e);
+    await fail("PERSIST_FAILED");
+  }
+  return result;
 }

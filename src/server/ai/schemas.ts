@@ -100,8 +100,23 @@ export const toolSchemas = {
   add_quote_item: itemRef,
   request_booking: z.strictObject({
     message: z.string().trim().max(500).optional().describe("Customer's note for the team."),
+    quoteNumber: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9-]{1,40}$/)
+      .optional()
+      .describe(
+        "Only when the customer chose between the quote they are viewing and this chat's quote: that quote's number.",
+      ),
   }),
 } as const;
+
+/** Tools that create business records (quotes, booking requests): journaled, never cut off. */
+export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
+  "create_quote",
+  "add_quote_item",
+  "request_booking",
+]);
 
 export type ToolName = keyof typeof toolSchemas;
 export const TOOL_NAMES = Object.keys(toolSchemas) as ToolName[];
@@ -135,6 +150,83 @@ export function toolJsonSchema(name: ToolName): Record<string, unknown> {
   const schema = z.toJSONSchema(toolSchemas[name], { io: "input" }) as Record<string, unknown>;
   delete schema.$schema;
   return stripDatePatterns(schema) as Record<string, unknown>;
+}
+
+/** Keywords OpenAI strict function schemas accept (others are dropped; Zod still enforces them). */
+const STRICT_KEYWORDS = new Set([
+  "type",
+  "properties",
+  "required",
+  "additionalProperties",
+  "items",
+  "enum",
+  "const",
+  "anyOf",
+  "description",
+  "pattern",
+  "format",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minItems",
+  "maxItems",
+]);
+const STRICT_FORMATS = new Set(["date", "date-time", "time", "email", "uuid"]);
+
+/**
+ * The strict variant (L1): every object closed and every property required, optional ones as
+ * `null`-able — the provider then generates arguments that parse. The server removes the nulls
+ * (stripNulls) and validates with the Zod schema as before: strictness at the provider is a
+ * convenience, never the authority.
+ */
+export function strictToolJsonSchema(name: ToolName): Record<string, unknown> {
+  return toStrict(toolJsonSchema(name), true) as Record<string, unknown>;
+}
+
+function toStrict(node: unknown, required: boolean): unknown {
+  if (Array.isArray(node)) return node.map((n) => toStrict(n, true));
+  if (!node || typeof node !== "object") return node;
+  const src = node as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (!STRICT_KEYWORDS.has(k)) continue;
+    if (k === "format" && !STRICT_FORMATS.has(String(v))) continue;
+    if (k === "properties" && v && typeof v === "object") {
+      const req = new Set((src.required as string[] | undefined) ?? []);
+      out.properties = Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).map(([p, s]) => [p, toStrict(s, req.has(p))]),
+      );
+      out.required = Object.keys(v);
+      out.additionalProperties = false;
+      continue;
+    }
+    if (k === "required" || k === "additionalProperties") continue;
+    out[k] = k === "items" || k === "anyOf" ? toStrict(v, true) : v;
+  }
+  if (out.type === "object" && !("properties" in out)) {
+    out.properties = {};
+    out.required = [];
+    out.additionalProperties = false;
+  }
+  if (required) return out;
+  const { description, ...rest } = out;
+  return {
+    anyOf: [rest, { type: "null" }],
+    ...(description !== undefined ? { description } : {}),
+  };
+}
+
+/** Removes `null` object values (strict-mode placeholders for omitted optional arguments). */
+export function stripNulls(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripNulls);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, v]) => v !== null)
+      .map(([k, v]) => [k, stripNulls(v)]),
+  );
 }
 
 function stripDatePatterns(node: unknown): unknown {

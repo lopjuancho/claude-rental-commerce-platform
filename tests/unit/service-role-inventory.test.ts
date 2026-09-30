@@ -49,9 +49,14 @@ describe("service-role boundary", () => {
         "request_booking_by_token",
         // assistant conversations and telemetry (M7, ADR 0017)
         "ai_action_record",
-        "ai_conversation_append",
         "ai_conversation_history",
-        "ai_conversation_open",
+        "ai_conversation_mutations",
+        "ai_mutation_begin",
+        "ai_mutation_commit",
+        "ai_mutation_fail",
+        "ai_turn_begin",
+        "ai_turn_fail",
+        "ai_turn_finish",
       ].sort(),
     );
     const tables = [...src.matchAll(/\.from\("([a-z_]+)"\)/g)].map((m) => m[1]);

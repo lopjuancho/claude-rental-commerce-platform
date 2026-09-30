@@ -64,6 +64,7 @@ function saveTranscript(messages: ChatMessage[]) {
 
 let counter = 0;
 const nextId = () => `m${String(Date.now())}-${String(++counter)}`;
+const newRequestId = () => crypto.randomUUID().replace(/-/g, "");
 
 export function AssistantWidget({ businessName }: { businessName: string }) {
   const pathname = usePathname();
@@ -76,7 +77,9 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
   );
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [lastFailed, setLastFailed] = useState<string | null>(null);
+  // The failed message and its request id: "Try again" resends the SAME id, so the server replays
+  // or resumes that message instead of doing its work twice.
+  const [lastFailed, setLastFailed] = useState<{ message: string; requestId: string } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const launcherRef = useRef<HTMLButtonElement>(null);
@@ -114,18 +117,21 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
   }, [open, close]);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, retryOf?: string) => {
       const message = text.trim().slice(0, MAX_CHARS);
       if (!message || busy) return;
+      const requestId = retryOf ?? newRequestId();
       setBusy(true);
       setLastFailed(null);
       setDraft("");
-      setMessages((m) => [...m, { id: nextId(), role: "user", text: message, blocks: [] }]);
+      if (!retryOf) {
+        setMessages((m) => [...m, { id: nextId(), role: "user", text: message, blocks: [] }]);
+      }
       try {
         const res = await fetch("/api/assistant", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, page: pageContext(pathname) }),
+          body: JSON.stringify({ message, requestId, page: pageContext(pathname) }),
         });
         const data = (await res.json().catch(() => null)) as {
           status?: string;
@@ -143,7 +149,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
             ...(failed ? { error: true } : {}),
           },
         ]);
-        if (failed) setLastFailed(message);
+        if (failed) setLastFailed({ message, requestId });
       } catch {
         setMessages((m) => [
           ...m,
@@ -155,7 +161,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
             error: true,
           },
         ]);
-        setLastFailed(message);
+        setLastFailed({ message, requestId });
       } finally {
         setBusy(false);
       }
@@ -258,7 +264,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
               <button
                 type="button"
                 onClick={() => {
-                  void send(lastFailed);
+                  void send(lastFailed.message, lastFailed.requestId);
                 }}
                 className="min-h-10 rounded-full border px-4 text-sm font-semibold hover:border-primary"
               >
@@ -466,7 +472,11 @@ function BlockView({ block }: { block: AssistantBlock }) {
             >
               View your quote
             </Link>
-          ) : null}
+          ) : (
+            <p className="text-muted-foreground">
+              Open it from the quote link you received when it was created.
+            </p>
+          )}
         </div>
       );
     case "booking":

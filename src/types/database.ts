@@ -53,6 +53,10 @@ export type Database = {
       };
       ai_conversations: {
         Row: {
+          active_turn_attempt: number | null;
+          active_turn_expires_at: string | null;
+          active_turn_id: string | null;
+          applied_mutation_seq: number;
           channel: string;
           created_at: string;
           expires_at: string;
@@ -69,6 +73,10 @@ export type Database = {
           tool_call_count: number;
         };
         Insert: {
+          active_turn_attempt?: number | null;
+          active_turn_expires_at?: string | null;
+          active_turn_id?: string | null;
+          applied_mutation_seq?: number;
           channel?: string;
           created_at?: string;
           expires_at?: string;
@@ -85,6 +93,10 @@ export type Database = {
           tool_call_count?: number;
         };
         Update: {
+          active_turn_attempt?: number | null;
+          active_turn_expires_at?: string | null;
+          active_turn_id?: string | null;
+          applied_mutation_seq?: number;
           channel?: string;
           created_at?: string;
           expires_at?: string;
@@ -151,6 +163,131 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "ai_messages_organization_id_conversation_id_fkey";
+            columns: ["organization_id", "conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "ai_conversations";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      ai_mutations: {
+        Row: {
+          attempt: number;
+          committed_at: string | null;
+          conversation_id: string;
+          error_code: string | null;
+          id: string;
+          mutation_key: string;
+          organization_id: string;
+          pending: Json | null;
+          ref: Json | null;
+          result: Json | null;
+          seq: number;
+          started_at: string;
+          status: string;
+          tool_call_id: string | null;
+          tool_name: string;
+          turn_id: string;
+        };
+        Insert: {
+          attempt: number;
+          committed_at?: string | null;
+          conversation_id: string;
+          error_code?: string | null;
+          id?: string;
+          mutation_key: string;
+          organization_id: string;
+          pending?: Json | null;
+          ref?: Json | null;
+          result?: Json | null;
+          seq?: never;
+          started_at?: string;
+          status: string;
+          tool_call_id?: string | null;
+          tool_name: string;
+          turn_id: string;
+        };
+        Update: {
+          attempt?: number;
+          committed_at?: string | null;
+          conversation_id?: string;
+          error_code?: string | null;
+          id?: string;
+          mutation_key?: string;
+          organization_id?: string;
+          pending?: Json | null;
+          ref?: Json | null;
+          result?: Json | null;
+          seq?: never;
+          started_at?: string;
+          status?: string;
+          tool_call_id?: string | null;
+          tool_name?: string;
+          turn_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ai_mutations_organization_id_conversation_id_fkey";
+            columns: ["organization_id", "conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "ai_conversations";
+            referencedColumns: ["organization_id", "id"];
+          },
+          {
+            foreignKeyName: "ai_mutations_organization_id_turn_id_fkey";
+            columns: ["organization_id", "turn_id"];
+            isOneToOne: false;
+            referencedRelation: "ai_turns";
+            referencedColumns: ["organization_id", "id"];
+          },
+        ];
+      };
+      ai_turns: {
+        Row: {
+          attempt: number;
+          completed_at: string | null;
+          conversation_id: string;
+          correlation_id: string | null;
+          error_code: string | null;
+          id: string;
+          lease_expires_at: string;
+          organization_id: string;
+          request_key: string;
+          response: Json | null;
+          started_at: string;
+          status: string;
+        };
+        Insert: {
+          attempt?: number;
+          completed_at?: string | null;
+          conversation_id: string;
+          correlation_id?: string | null;
+          error_code?: string | null;
+          id?: string;
+          lease_expires_at: string;
+          organization_id: string;
+          request_key: string;
+          response?: Json | null;
+          started_at?: string;
+          status: string;
+        };
+        Update: {
+          attempt?: number;
+          completed_at?: string | null;
+          conversation_id?: string;
+          correlation_id?: string | null;
+          error_code?: string | null;
+          id?: string;
+          lease_expires_at?: string;
+          organization_id?: string;
+          request_key?: string;
+          response?: Json | null;
+          started_at?: string;
+          status?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ai_turns_organization_id_conversation_id_fkey";
             columns: ["organization_id", "conversation_id"];
             isOneToOne: false;
             referencedRelation: "ai_conversations";
@@ -3150,20 +3287,6 @@ export type Database = {
         };
         Returns: undefined;
       };
-      ai_conversation_append: {
-        Args: {
-          p_conversation_id: string;
-          p_expected_version: number;
-          p_messages: Json;
-          p_organization_id: string;
-          p_prompt_version: string;
-          p_quote_id: string;
-          p_state: Json;
-          p_tokens: number;
-          p_tool_calls: number;
-        };
-        Returns: number;
-      };
       ai_conversation_history: {
         Args: { p_conversation_id: string; p_limit: number; p_organization_id: string };
         Returns: {
@@ -3173,14 +3296,87 @@ export type Database = {
           structured: Json;
         }[];
       };
-      ai_conversation_open: {
-        Args: { p_organization_id: string; p_session_hash: string };
+      ai_conversation_mutations: {
+        Args: { p_after_seq: number; p_conversation_id: string; p_organization_id: string };
         Returns: {
-          id: string;
+          ref: Json;
+          seq: number;
+          tool_name: string;
+        }[];
+      };
+      ai_mutation_begin: {
+        Args: {
+          p_attempt: number;
+          p_mutation_key: string;
+          p_organization_id: string;
+          p_pending: Json;
+          p_tool_call_id: string;
+          p_tool_name: string;
+          p_turn_id: string;
+        };
+        Returns: {
+          mutation_id: string;
+          outcome: string;
+          pending: Json;
+          ref: Json;
+          result: Json;
+        }[];
+      };
+      ai_mutation_commit: {
+        Args: { p_mutation_id: string; p_organization_id: string; p_ref: Json; p_result: Json };
+        Returns: number;
+      };
+      ai_mutation_fail: {
+        Args: { p_error_code: string; p_mutation_id: string; p_organization_id: string };
+        Returns: undefined;
+      };
+      ai_turn_begin: {
+        Args: {
+          p_correlation_id: string;
+          p_lease_seconds: number;
+          p_organization_id: string;
+          p_request_key: string;
+          p_session_hash: string;
+        };
+        Returns: {
+          applied_mutation_seq: number;
+          attempt: number;
+          conversation_id: string;
           message_count: number;
+          outcome: string;
+          response: Json;
           state: Json;
           state_version: number;
+          turn_id: string;
         }[];
+      };
+      ai_turn_fail: {
+        Args: {
+          p_applied_seq: number;
+          p_attempt: number;
+          p_error_code: string;
+          p_organization_id: string;
+          p_quote_id: string;
+          p_state: Json;
+          p_turn_id: string;
+        };
+        Returns: undefined;
+      };
+      ai_turn_finish: {
+        Args: {
+          p_applied_seq: number;
+          p_attempt: number;
+          p_messages: Json;
+          p_organization_id: string;
+          p_prompt_version: string;
+          p_quote_id: string;
+          p_response: Json;
+          p_state: Json;
+          p_tokens: number;
+          p_tool_calls: number;
+          p_turn_id: string;
+        };
+        Returns: number;
       };
       cancel_booking_by_token: {
         Args: { p_organization_id: string; p_token_hash: string };

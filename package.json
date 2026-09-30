@@ -20,6 +20,7 @@
     "test:e2e": "playwright test",
     "db:test:setup": "bash scripts/test-db.sh",
     "db:types": "bash scripts/gen-types.sh",
+    "ai:smoke": "node scripts/ai-live-smoke.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm test:integration && pnpm build",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "echo '✗ choose an environment: pnpm run deploy:production | deploy:staging | deploy:development' >&2 && exit 1",

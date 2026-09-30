@@ -44,6 +44,7 @@ organizations ─┬─ organization_domains
                │                                 ├─ quote_charges
                │                                 └─ booking_requests ── reservations (held → confirmed)
                ├─ ai_conversations ─┬─ ai_messages
+               │                    ├─ ai_turns ── ai_mutations
                │                    └─ ai_actions
                ├─ organization_counters         (quote numbers)
                └─ audit_logs
@@ -783,18 +784,24 @@ The storefront assistant's anonymous, tenant-scoped sessions and tool telemetry.
 |---|---|
 | `ai_conversations` | One per `(organization_id, session_hash)`. `session_hash` = SHA-256 of the opaque HttpOnly session cookie (the cookie is never stored). `state` (jsonb ≤ 32 KB) is the Zod-validated working state — draft contact, event input, staged items, and the current quote referenced by **token hash**, never the token. `state_version` drives optimistic concurrency. Counters (`message_count`, `tool_call_count`, `token_usage`), `prompt_version`, `quote_id` (composite FK to the same org's quote), `expires_at` (30 days, sliding). |
 | `ai_messages` | Ordered transcript (`seq`) with `role in ('user','assistant','tool')`. Assistant tool-call arguments are stored with contact details redacted; tool results are the JSON the model saw (no quote tokens). |
+| `ai_turns` | One per browser message (request id): `status processing/completed/failed/abandoned`, `attempt`, lease, the replayable response (no link tokens). A conversation has at most one active turn (`ai_conversations.active_turn_*`). |
+| `ai_mutations` | The mutation journal: one row per quote/booking creation, unique per `(conversation_id, mutation_key)` (semantic idempotency key), `status started/committed/failed`, `pending` (e.g. the quote token HASH chosen before creating it), `ref` (the committed reference re-applied to the state; for a quote it carries the staged contact/event/items it was built from — the same data the conversation state holds), `result` (the outcome as shown, no tokens). `ai_conversations.applied_mutation_seq` marks what the state already reflects. |
 | `ai_actions` | Troubleshooting telemetry per tool call: `tool_name`, `status in ('ok','manual_review','rejected_validation','rejected_policy','error','guardrail_violation')`, `error_code`, `duration_ms`, `correlation_id`, `model`. **No arguments, no results, no customer data.** |
 
 Access:
 
 - RLS enabled **and forced** on all three; `anon` has no privileges; `authenticated` has no insert/update/delete and may only `select` rows of an organization where it holds `org.read` (the staff conversation viewer is M8). `organization_id` is immutable (`app.prevent_organization_change`).
-- The server reaches them only through four `security definer` functions that call `app.require_service_role()` and are executable by `service_role` only (listed in the trusted-gateway RPC allow-list, `tests/unit/service-role-inventory.test.ts`):
+- The server reaches them only through `security definer` functions that call `app.require_service_role()` and are executable by `service_role` only (listed in the trusted-gateway RPC allow-list, `tests/unit/service-role-inventory.test.ts`):
 
 | Function | Behaviour |
 |---|---|
-| `ai_conversation_open(org, session_hash)` | Requires an active organization; creates or locks the session's row; an expired conversation is reset (messages deleted, state cleared). Returns `id, state, state_version, message_count`. |
+| `ai_turn_begin(org, session_hash, request_key, lease_seconds, correlation_id)` | Requires an active organization; creates/locks the session's conversation; replays a completed request, reports one in progress, refuses a second concurrent message (`busy`), takes over an expired lease; resets an expired conversation. |
+| `ai_turn_finish(org, turn, attempt, state, quote_id, messages, …, applied_seq, response)` | Only the owning turn: appends ≤ 40 messages, stores state and the replayable response, releases the conversation. |
+| `ai_turn_fail(org, turn, attempt, error_code, state, quote_id, applied_seq)` | Ends the owning turn keeping the given state (committed references), not its messages. |
+| `ai_mutation_begin(org, turn, attempt, key, tool, call_id, pending)` | Only the owning turn within its lease: `proceed` / `replay` / `unknown` (an earlier attempt's outcome was never recorded) / `in_progress`. |
+| `ai_mutation_commit(org, mutation, ref, result)` / `ai_mutation_fail(…)` | Records the outcome (commit is idempotent and not lease-fenced: a completed mutation is always recorded). |
+| `ai_conversation_mutations(org, conversation, after_seq)` | Committed references not yet reflected in the state. |
 | `ai_conversation_history(org, conversation, limit)` | The last `limit` (1–200) messages of that organization's conversation, oldest first. |
-| `ai_conversation_append(org, conversation, expected_version, state, quote_id, messages, tool_calls, tokens, prompt_version)` | Appends ≤ 40 messages and the new state atomically; `RA010 CONFLICT` if `state_version` moved (a concurrent turn in the same session). |
 | `ai_action_record(...)` | Inserts one `ai_actions` row. |
 
 The organization id passed to every function comes from the request host (server-resolved tenant), never from the browser or the model.
@@ -938,3 +945,4 @@ create table import_rows (
 | `0006_service_areas_pricing` (service areas incl. mileage rules, pricing rules, tax jurisdictions/rates/component rules) | M4 |
 | `0007_customers_events_quotes` (+ counters, status trigger, booking requests) | M5 |
 | `20261002000100_m7_assistant` (ai_conversations, ai_messages, ai_actions, service-role functions) | M7 |
+| `20261003000100_m7_turns_journal` (ai_turns, ai_mutations, turn/mutation functions) | M7 review |

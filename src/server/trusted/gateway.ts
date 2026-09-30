@@ -314,15 +314,22 @@ export function systemGateway(): TrustedGateway {
   };
 }
 
-// ── M7 assistant conversations (ADR 0017 §6, §10) ──────────────────────────
-// Separate from TrustedGateway: these functions store conversation state and telemetry only and
-// grant no business capability. Every organization id comes from the server-resolved tenant.
+// ── M7 assistant conversations (ADR 0017 §6, §10, §11) ─────────────────────
+// Separate from TrustedGateway: these functions store conversation state, the turn/mutation
+// journal and telemetry, and grant no business capability. Every organization id comes from the
+// server-resolved tenant.
 
-export interface AiConversation {
-  id: string;
+export interface AiTurnClaim {
+  outcome: "started" | "replay" | "in_progress" | "busy";
+  turnId: string | null;
+  attempt: number | null;
+  conversationId: string;
   state: unknown;
   stateVersion: number;
   messageCount: number;
+  appliedSeq: number;
+  /** The stored reply of a completed turn (outcome "replay"). */
+  response: unknown;
 }
 
 export interface AiStoredMessage {
@@ -332,13 +339,34 @@ export interface AiStoredMessage {
   structured: Json | null;
 }
 
-export interface AiTurnUpdate {
+export interface AiTurnFinish {
   state: Json;
   quoteId: string | null;
   messages: { role: "user" | "assistant" | "tool"; content: string | null; structured?: Json }[];
   toolCalls: number;
   tokens: number;
   promptVersion: string;
+  appliedSeq: number;
+  response: Json;
+}
+
+export interface AiTurnRef {
+  turnId: string;
+  attempt: number;
+}
+
+export interface AiMutationClaim {
+  outcome: "proceed" | "replay" | "unknown" | "in_progress";
+  mutationId: string;
+  pending: unknown;
+  ref: unknown;
+  result: unknown;
+}
+
+export interface AiCommittedMutation {
+  seq: number;
+  toolName: string;
+  ref: unknown;
 }
 
 export interface AiActionRecord {
@@ -352,41 +380,75 @@ export interface AiActionRecord {
 }
 
 export interface AiConversationStore {
-  open(organizationId: string, sessionHash: string): Promise<AiConversation>;
+  beginTurn(
+    organizationId: string,
+    sessionHash: string,
+    requestKey: string,
+    leaseSeconds: number,
+    correlationId: string | null,
+  ): Promise<AiTurnClaim>;
   history(
     organizationId: string,
     conversationId: string,
     limit: number,
   ): Promise<AiStoredMessage[]>;
-  /** Optimistic: fails with a GatewayError (RA010) when another turn changed the conversation. */
-  append(
+  mutationsSince(
     organizationId: string,
     conversationId: string,
-    expectedVersion: number,
-    update: AiTurnUpdate,
+    afterSeq: number,
+  ): Promise<AiCommittedMutation[]>;
+  /** Fails with a GatewayError (RA010) when the turn no longer owns the conversation. */
+  finishTurn(organizationId: string, turn: AiTurnRef, update: AiTurnFinish): Promise<number>;
+  failTurn(
+    organizationId: string,
+    turn: AiTurnRef,
+    failure: { errorCode: string; state: Json | null; quoteId: string | null; appliedSeq: number },
+  ): Promise<void>;
+  beginMutation(
+    organizationId: string,
+    turn: AiTurnRef,
+    m: { key: string; toolName: string; toolCallId: string; pending: Json | null },
+  ): Promise<AiMutationClaim>;
+  commitMutation(
+    organizationId: string,
+    mutationId: string,
+    ref: Json,
+    result: Json,
   ): Promise<number>;
+  failMutation(organizationId: string, mutationId: string, errorCode: string): Promise<void>;
   recordAction(organizationId: string, action: AiActionRecord): Promise<void>;
 }
+
+// Nullable SQL arguments the generated types declare as non-null.
+const nullable = <T>(v: T | null): T => v as T;
 
 export function systemAiStore(): AiConversationStore {
   const db = createSystemClient();
   return {
-    async open(organizationId, sessionHash) {
-      const [row] = present(
+    async beginTurn(organizationId, sessionHash, requestKey, leaseSeconds, correlationId) {
+      const [r] = present(
         unwrap(
-          await db.rpc("ai_conversation_open", {
+          await db.rpc("ai_turn_begin", {
             p_organization_id: organizationId,
             p_session_hash: sessionHash,
+            p_request_key: requestKey,
+            p_lease_seconds: leaseSeconds,
+            p_correlation_id: nullable(correlationId),
           }),
         ),
-        "ai_conversation_open",
+        "ai_turn_begin",
       );
-      const r = present(row, "ai_conversation_open");
+      const row = present(r, "ai_turn_begin");
       return {
-        id: r.id,
-        state: r.state,
-        stateVersion: r.state_version,
-        messageCount: r.message_count,
+        outcome: row.outcome as AiTurnClaim["outcome"],
+        turnId: row.turn_id,
+        attempt: row.attempt,
+        conversationId: row.conversation_id,
+        state: row.state,
+        stateVersion: row.state_version,
+        messageCount: row.message_count,
+        appliedSeq: row.applied_mutation_seq,
+        response: row.response,
       };
     },
     async history(organizationId, conversationId, limit) {
@@ -404,22 +466,90 @@ export function systemAiStore(): AiConversationStore {
         structured: r.structured,
       }));
     },
-    async append(organizationId, conversationId, expectedVersion, u) {
-      const version = unwrap(
-        await db.rpc("ai_conversation_append", {
+    async mutationsSince(organizationId, conversationId, afterSeq) {
+      const rows = unwrap(
+        await db.rpc("ai_conversation_mutations", {
           p_organization_id: organizationId,
           p_conversation_id: conversationId,
-          p_expected_version: expectedVersion,
+          p_after_seq: afterSeq,
+        }),
+      );
+      return (rows ?? []).map((r) => ({ seq: r.seq, toolName: r.tool_name, ref: r.ref }));
+    },
+    async finishTurn(organizationId, turn, u) {
+      const version = unwrap(
+        await db.rpc("ai_turn_finish", {
+          p_organization_id: organizationId,
+          p_turn_id: turn.turnId,
+          p_attempt: turn.attempt,
           p_state: u.state,
-          // Nullable in SQL; the generated type does not say so.
-          p_quote_id: u.quoteId as string,
+          p_quote_id: nullable(u.quoteId),
           p_messages: u.messages as unknown as Json,
           p_tool_calls: u.toolCalls,
           p_tokens: u.tokens,
           p_prompt_version: u.promptVersion,
+          p_applied_seq: u.appliedSeq,
+          p_response: u.response,
         }),
       );
-      return present(version, "ai_conversation_append");
+      return present(version, "ai_turn_finish");
+    },
+    async failTurn(organizationId, turn, f) {
+      unwrap(
+        await db.rpc("ai_turn_fail", {
+          p_organization_id: organizationId,
+          p_turn_id: turn.turnId,
+          p_attempt: turn.attempt,
+          p_error_code: f.errorCode,
+          p_state: nullable(f.state),
+          p_quote_id: nullable(f.quoteId),
+          p_applied_seq: f.appliedSeq,
+        }),
+      );
+    },
+    async beginMutation(organizationId, turn, m) {
+      const [r] = present(
+        unwrap(
+          await db.rpc("ai_mutation_begin", {
+            p_organization_id: organizationId,
+            p_turn_id: turn.turnId,
+            p_attempt: turn.attempt,
+            p_mutation_key: m.key,
+            p_tool_name: m.toolName,
+            p_tool_call_id: m.toolCallId,
+            p_pending: nullable(m.pending),
+          }),
+        ),
+        "ai_mutation_begin",
+      );
+      const row = present(r, "ai_mutation_begin");
+      return {
+        outcome: row.outcome as AiMutationClaim["outcome"],
+        mutationId: row.mutation_id,
+        pending: row.pending,
+        ref: row.ref,
+        result: row.result,
+      };
+    },
+    async commitMutation(organizationId, mutationId, ref, result) {
+      const seq = unwrap(
+        await db.rpc("ai_mutation_commit", {
+          p_organization_id: organizationId,
+          p_mutation_id: mutationId,
+          p_ref: ref,
+          p_result: result,
+        }),
+      );
+      return present(seq, "ai_mutation_commit");
+    },
+    async failMutation(organizationId, mutationId, errorCode) {
+      unwrap(
+        await db.rpc("ai_mutation_fail", {
+          p_organization_id: organizationId,
+          p_mutation_id: mutationId,
+          p_error_code: errorCode,
+        }),
+      );
     },
     async recordAction(organizationId, a) {
       unwrap(
@@ -428,10 +558,10 @@ export function systemAiStore(): AiConversationStore {
           p_conversation_id: a.conversationId,
           p_tool_name: a.toolName,
           p_status: a.status,
-          p_error_code: a.errorCode as string,
+          p_error_code: nullable(a.errorCode),
           p_duration_ms: a.durationMs,
-          p_correlation_id: a.correlationId as string,
-          p_model: a.model as string,
+          p_correlation_id: nullable(a.correlationId),
+          p_model: nullable(a.model),
         }),
       );
     },
