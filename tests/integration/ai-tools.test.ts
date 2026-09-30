@@ -3,6 +3,8 @@ import { beforeAll, expect, it } from "vitest";
 import { type AssistantState, emptyState, type ToolContext } from "@/server/ai/context";
 import { Deadline } from "@/server/ai/deadline";
 import { directJournal } from "@/server/ai/journal";
+import { sessionSealer } from "@/server/ai/seal";
+import { generateSessionToken } from "@/server/ai/session";
 import { executeTool, quoteRelation } from "@/server/ai/tools";
 import { hashQuoteToken } from "@/server/quotes/token";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
@@ -64,6 +66,7 @@ function ctxFor(
     now: () => new Date(),
     deadline: Deadline.in(60_000),
     journal: directJournal(state),
+    sealer: sessionSealer(generateSessionToken(), org.id),
   };
 }
 const run = (ctx: ToolContext, name: string, args: unknown) =>

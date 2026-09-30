@@ -40,6 +40,15 @@ export const evidenceSchema = z.discriminatedUnion("kind", [
     end: z.string().max(40),
     /** Local calendar dates the window touches (business time zone). */
     dates: z.array(isoDate).max(14),
+    /** Local clock times of the window (business time zone), "HH:MM". */
+    startLocal: z
+      .string()
+      .regex(/^\d{2}:\d{2}$/)
+      .optional(),
+    endLocal: z
+      .string()
+      .regex(/^\d{2}:\d{2}$/)
+      .optional(),
     quantity: z.int(),
     result: z.enum(["available", "unavailable", "manual_review"]),
   }),

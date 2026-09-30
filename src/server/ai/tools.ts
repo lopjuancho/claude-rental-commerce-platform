@@ -1,5 +1,5 @@
 import "server-only";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import type { Evidence, EvidenceAmount } from "@/domain/assistant/evidence";
 import { isDomainError } from "@/domain/errors";
 import { AVAILABILITY_REASONS } from "@/domain/availability/reasons";
@@ -38,6 +38,8 @@ import type {
 import {
   MAX_ITEM_QUANTITY,
   MAX_STAGED_ITEMS,
+  mutationRefSchema,
+  quoteBasisSchema,
   rememberProducts,
   requestScopedKey,
   ToolError,
@@ -160,6 +162,18 @@ function whenText(start: Date, end: Date, timeZone: string): string {
   return sameDay
     ? `${day.format(start)}, ${clock.format(start)} – ${clock.format(end)}`
     : `${day.format(start)} ${clock.format(start)} – ${day.format(end)} ${clock.format(end)}`;
+}
+
+/** "HH:MM" (24-hour) in the business's time zone. */
+export function clock24(d: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  return `${get("hour")}:${get("minute")}`;
 }
 
 /** The local calendar dates a window touches (grounding compares dates named in replies). */
@@ -328,7 +342,7 @@ export async function stagedBasis(state: AssistantState): Promise<QuoteBasis> {
 export type QuoteRelation =
   | { status: "none" }
   | { status: "current" }
-  | { status: "mismatched"; changed: ("contact" | "event" | "items")[] };
+  | { status: "mismatched"; changed: ("contact" | "event" | "items" | "recovery")[] };
 
 /**
  * Whether the active quote still matches what the customer has told the assistant since: any
@@ -339,8 +353,12 @@ export async function quoteRelation(state: AssistantState): Promise<QuoteRelatio
   const q = state.quote;
   if (!q) return { status: "none" };
   const now = await stagedBasis(state);
-  const changed = (["contact", "event", "items"] as const).filter((k) => q.basis[k] !== now[k]);
-  return changed.length ? { status: "mismatched", changed: [...changed] } : { status: "current" };
+  const changed: ("contact" | "event" | "items" | "recovery")[] = (
+    ["contact", "event", "items"] as const
+  ).filter((k) => q.basis[k] !== now[k]);
+  // A recovered quote whose database contents did not match what was recorded is never current.
+  if (!q.verified) changed.push("recovery");
+  return changed.length ? { status: "mismatched", changed } : { status: "current" };
 }
 
 /**
@@ -360,6 +378,7 @@ export async function adoptPageQuote(
     quoteNumber: page.quoteNumber,
     origin: "page",
     basis: { contact: basis.contact, event: null, items: null },
+    verified: true,
   };
 }
 
@@ -514,6 +533,8 @@ async function checkAvailabilityTool(
         start: window.start.toISOString(),
         end: window.end.toISOString(),
         dates: window.dates,
+        startLocal: clock24(window.start, ctx.tenant.timezone),
+        endLocal: clock24(window.end, ctx.tenant.timezone),
         quantity: args.quantity,
         result: status,
       },
@@ -861,6 +882,9 @@ function committedQuote(
     replaces: string | null;
   },
 ): Committed {
+  // The committed quote is the authority: the recorded basis is trusted only if the quote in the
+  // database actually has those items and that event window.
+  const verified = quoteMatchesStaged(ctx, view, q.staged);
   return {
     ref: {
       type: "quote",
@@ -870,6 +894,7 @@ function committedQuote(
       basis: q.basis,
       staged: q.staged,
       replaces: q.replaces,
+      verified,
     },
     outcome: {
       status: view.priceIsFinal ? "ok" : "manual_review",
@@ -959,50 +984,125 @@ async function quoteMutation(
     );
   }
   const { contact, event } = ctx.state as Required<AssistantState>;
-  const basis = await stagedBasis({ ...ctx.state, items });
+  // The complete input, recorded ONCE in the journal before anything is written: a retry or a
+  // recovery uses this record, never its own later view of the conversation.
   const staged = { contact, event, items };
-  const replaces = ctx.state.quote?.quoteNumber ?? null;
   const token = generateQuoteToken();
-  const tokenHash = await hashQuoteToken(token);
+  const firstInput: QuotePending = {
+    staged,
+    basis: await stagedBasis({ ...ctx.state, items }),
+    message: message ?? null,
+    replaces: ctx.state.quote?.quoteNumber ?? null,
+    tokenHash: await hashQuoteToken(token),
+    sealedToken: await ctx.sealer.seal(token),
+  };
+  const recorded = (raw: Record<string, unknown>) => quotePendingSchema.parse(raw);
   const { outcome } = await ctx.journal.run({
     toolName,
     key,
-    pending: { tokenHash },
-    recover: async (pending) => {
-      const earlier = pending?.tokenHash;
-      if (!earlier) return null;
-      const view = await viewOf(ctx, earlier);
-      return view
-        ? committedQuote(ctx, view, { tokenHash: earlier, token: null, basis, staged, replaces })
-        : null;
+    pending: firstInput,
+    sealer: ctx.sealer,
+    recover: async (raw, businessKey) => {
+      const p = recorded(raw);
+      const existing = await ctx.deps.gateway.businessObject(
+        ctx.tenant.organizationId,
+        businessKey,
+        "quote",
+      );
+      if (!existing?.tokenHash) return null;
+      const view = await viewOf(ctx, existing.tokenHash);
+      if (!view) return null;
+      const linkToken =
+        existing.tokenHash === p.tokenHash ? await ctx.sealer.open(p.sealedToken) : null;
+      return committedQuote(ctx, view, {
+        tokenHash: existing.tokenHash,
+        token: linkToken,
+        quoteId: existing.objectId,
+        basis: p.basis,
+        staged: p.staged,
+        replaces: p.replaces,
+      });
     },
-    perform: async () => {
+    perform: async (raw, businessKey) => {
+      const p = recorded(raw);
+      const recordedToken = await ctx.sealer.open(p.sealedToken);
+      if (!recordedToken) throw new Error("recorded link token unavailable");
+      const s = p.staged;
+      if (!s.contact || !s.event) throw new Error("recorded quote input incomplete");
       const created = await submitQuoteRequest(
         ctx.tenant,
         {
-          contact,
-          event: event.input,
-          items: items.map((i) => ({ variantId: i.variantId, quantity: i.quantity })),
-          delivery: event.fulfillment,
-          ...(message ? { message } : {}),
+          contact: s.contact,
+          event: s.event.input,
+          items: s.items.map((i) => ({ variantId: i.variantId, quantity: i.quantity })),
+          delivery: s.event.fulfillment,
+          ...(p.message ? { message: p.message } : {}),
         },
         ctx.meta,
         ctx.deps,
-        { token },
+        { token: recordedToken, idempotencyKey: businessKey },
       );
-      const view = await viewOf(ctx, tokenHash);
+      const view = await viewOf(ctx, created.tokenHash);
       if (!view) throw new Error("created quote not readable");
       return committedQuote(ctx, view, {
-        tokenHash,
-        token,
+        tokenHash: created.tokenHash,
+        token: created.tokenHash === p.tokenHash ? recordedToken : null,
         quoteId: created.quoteId,
-        basis,
-        staged,
-        replaces,
+        basis: p.basis,
+        staged: p.staged,
+        replaces: p.replaces,
       });
     },
   });
   return outcome;
+}
+
+/** What a quote mutation records before it runs (immutable; see quoteMutation). */
+const quotePendingSchema = z.object({
+  staged: mutationRefSchema.options[0].shape.staged,
+  basis: quoteBasisSchema,
+  message: z.string().nullable(),
+  replaces: z.string().nullable(),
+  tokenHash: z.string().regex(/^[0-9a-f]{64}$/),
+  sealedToken: z.string().max(400),
+});
+type QuotePending = z.infer<typeof quotePendingSchema>;
+
+/** Does the quote in the database have exactly the recorded items and event window? */
+function quoteMatchesStaged(
+  ctx: ToolContext,
+  view: PublicQuoteView,
+  staged: Extract<MutationRef, { type: "quote" }>["staged"],
+): boolean {
+  const key = (xs: { variantId?: string | null | undefined; quantity: number }[]) =>
+    xs
+      .map((x) => `${x.variantId ?? "?"}:${String(x.quantity)}`)
+      .sort()
+      .join(",");
+  if (key(view.items) !== key(staged.items)) return false;
+  if (!staged.event) return false;
+  const input = staged.event.input as {
+    date?: string;
+    startTime?: string;
+    endTime?: string;
+    endDate?: string;
+    timeFold?: "earlier" | "later";
+  };
+  try {
+    const period = localRentalPeriod({
+      date: input.date ?? "",
+      startTime: input.startTime ?? "",
+      endTime: input.endTime ?? "",
+      ...(input.endDate ? { endDate: input.endDate } : {}),
+      timeZone: ctx.tenant.timezone,
+      fold: input.timeFold ?? null,
+    });
+    const same = (a: string | null | undefined, b: Date) =>
+      a !== null && a !== undefined && Date.parse(a) === b.getTime();
+    return same(view.event?.startsAt, period.start) && same(view.event?.endsAt, period.end);
+  } catch {
+    return false;
+  }
 }
 
 async function createQuoteTool(
@@ -1082,8 +1182,43 @@ function committedBooking(
   ctx: ToolContext,
   quote: { tokenHash: string; quoteNumber: string },
   view: PublicQuoteView,
-  holdExpiresAt: string,
+  holdExpiresAt: string | null,
 ): Committed {
+  if (!holdExpiresAt || Date.parse(holdExpiresAt) <= ctx.now().getTime()) {
+    // The request exists but its hold is over: say so — never "being held".
+    const message = BOOKING_TEXT.awaiting_review;
+    return {
+      ref: {
+        type: "booking",
+        tokenHash: quote.tokenHash,
+        quoteNumber: quote.quoteNumber,
+        holdExpiresAt: holdExpiresAt ?? "",
+      },
+      outcome: {
+        status: "ok",
+        result: { booking: "awaiting_review", quoteNumber: quote.quoteNumber, message },
+        blocks: [
+          {
+            type: "booking",
+            status: "awaiting_review",
+            quoteNumber: quote.quoteNumber,
+            holdExpiresAt,
+            message,
+          },
+        ],
+        evidence: [
+          {
+            kind: "booking",
+            at: at(ctx),
+            quoteNumber: quote.quoteNumber,
+            status: "refused",
+            holdExpiresAt,
+            message,
+          },
+        ],
+      },
+    };
+  }
   const minutes = holdMinutes(ctx, holdExpiresAt);
   const message =
     `Your booking request has been submitted and the inventory is being held for ${String(minutes)} minutes.` +
@@ -1222,19 +1357,30 @@ async function requestBookingTool(
   // The request is journaled under this customer request: a retry of the same message replays
   // its outcome (before any state check), a new message asks the database again.
   try {
+    const recordedTarget = (raw: Record<string, unknown>) =>
+      z
+        .object({ tokenHash: z.string().regex(/^[0-9a-f]{64}$/), quoteNumber: z.string() })
+        .parse(raw);
     const { outcome } = await ctx.journal.run({
       toolName: "request_booking",
-      key: requestScopedKey(ctx, "request_booking", { tokenHash: quote.tokenHash }),
-      pending: null,
-      recover: async () => {
-        const now = await viewOf(ctx, quote.tokenHash);
-        const b = now?.booking;
-        return now && b?.status === "pending" && b.holdActive && b.holdExpiresAt
-          ? committedBooking(ctx, quote, now, b.holdExpiresAt)
-          : null;
+      key: requestScopedKey(ctx, "request_booking", {}),
+      // The quote this request is for, recorded once: a retry books the SAME quote.
+      pending: { tokenHash: quote.tokenHash, quoteNumber: quote.quoteNumber },
+      sealer: ctx.sealer,
+      recover: async (raw, businessKey) => {
+        const target = recordedTarget(raw);
+        const existing = await ctx.deps.gateway.businessObject(
+          ctx.tenant.organizationId,
+          businessKey,
+          "booking",
+        );
+        if (!existing) return null;
+        const now = await viewOf(ctx, target.tokenHash);
+        return now ? committedBooking(ctx, target, now, existing.holdExpiresAt) : null;
       },
-      perform: async () => {
-        const view = await viewOf(ctx, quote.tokenHash);
+      perform: async (raw, businessKey) => {
+        const target = recordedTarget(raw);
+        const view = await viewOf(ctx, target.tokenHash);
         if (!view) throw new ToolError("NOT_FOUND", "The quote could not be found.");
         // The quote's state must allow a request (the database enforces the same).
         const step = quoteNextStep(view);
@@ -1251,12 +1397,13 @@ async function requestBookingTool(
         if (step.kind === "holding") throw new BookingRefusal(holding(step.until));
         const hold = await requestPublicBooking(
           ctx.tenant,
-          { tokenHash: quote.tokenHash },
+          { tokenHash: target.tokenHash },
           args.message ? { message: args.message } : {},
           ctx.meta,
           ctx.deps,
+          { idempotencyKey: businessKey },
         );
-        return committedBooking(ctx, quote, view, hold.holdExpiresAt);
+        return committedBooking(ctx, target, view, hold.holdExpiresAt);
       },
     });
     return outcome;

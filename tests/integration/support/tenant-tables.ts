@@ -507,6 +507,7 @@ export const TENANT_TABLES: Record<
   ai_actions: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
   ai_turns: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
   ai_mutations: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
+  ai_business_keys: { orgColumn: "organization_id", ensureRow: ensureAiConversation },
 };
 
 /**
@@ -529,6 +530,11 @@ async function ensureAiConversation(org: TestOrg): Promise<void> {
     SYSTEM,
     "select * from public.ai_mutation_begin($1, $2, $3, $4, 'create_quote', 'fixture', null)",
     [org.id, t!.turn_id, t!.attempt, "f".repeat(64)],
+  );
+  await rpc(
+    SYSTEM,
+    "insert into public.ai_business_keys (organization_id, idempotency_key, kind, object_id) values ($1, $2, 'event', gen_random_uuid()) on conflict do nothing",
+    [org.id, "e".repeat(64)],
   );
   await rpc(SYSTEM, "select public.ai_mutation_commit($1, $2, '{}'::jsonb, '{}'::jsonb)", [
     org.id,

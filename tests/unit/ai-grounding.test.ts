@@ -24,6 +24,8 @@ const avail = (
   start: o.start ?? `${SAT}T17:00:00Z`,
   end: `${SAT}T21:00:00Z`,
   dates: o.dates ?? [SAT],
+  startLocal: "12:00",
+  endLocal: "16:00",
   quantity: 1,
   result,
 });
@@ -313,5 +315,109 @@ describe("server-written facts (fallback)", () => {
     expect(facts.join(" ")).toContain(HOLD_MESSAGE);
     expect(facts.join(" ")).toMatch(/not reserved until a booking is requested/);
     expect(ok(facts.join(" "), evidence)).toBe(true);
+  });
+});
+
+describe("Codex round-2 reproductions (complete subject and state)", () => {
+  const JAN2 = "2027-01-02"; // a Saturday
+  const partySlide: Evidence = {
+    kind: "availability",
+    at: at(),
+    productSlug: "party-slide",
+    productName: "Party Slide",
+    variantId: "v-party",
+    start: `${JAN2}T18:00:00Z`,
+    end: `${JAN2}T22:00:00Z`,
+    dates: [JAN2],
+    startLocal: "12:00",
+    endLocal: "16:00",
+    quantity: 1,
+    result: "available",
+  };
+  const known = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: ["Party Slide"],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    });
+
+  it("quantity must match: 500 units is not the 1 that was checked", () => {
+    expect(known("Party Slide is available for 500 units on 2027-01-02.", [partySlide]).ok).toBe(
+      false,
+    );
+    expect(known("Party Slide is available for 3 of them on 2027-01-02.", [partySlide]).ok).toBe(
+      false,
+    );
+    expect(known("Party Slide is available (quantity 1) on 2027-01-02.", [partySlide]).ok).toBe(
+      true,
+    );
+  });
+  it("clock times must lie in the checked window", () => {
+    expect(
+      known("Party Slide is available on 2027-01-02 from 20:00 to 23:00.", [partySlide]).ok,
+    ).toBe(false);
+    expect(known("Party Slide is available on 2027-01-02 at 8 PM.", [partySlide]).ok).toBe(false);
+    expect(
+      known("Party Slide is available on 2027-01-02 from 12:00 to 16:00.", [partySlide]).ok,
+    ).toBe(true);
+    expect(known("Party Slide is available on Jan 2 from 12 PM to 4 PM.", [partySlide]).ok).toBe(
+      true,
+    );
+  });
+  it("the claimed quote number must be the one with that booking state", () => {
+    const q1 = {
+      ...booking("confirmed", null, "This booking is confirmed by the team."),
+      quoteNumber: "Q-1",
+    };
+    expect(known("Quote Q-999 is confirmed.", [q1]).ok).toBe(false);
+    expect(known("Quote Q-999 is confirmed.", [q1]).violations).toContain(
+      "GROUNDING_QUOTE_UNKNOWN",
+    );
+    expect(known("Quote Q-1 is confirmed.", [q1]).ok).toBe(true);
+    const held = { ...booking("hold_placed", 15), quoteNumber: "Q-1" };
+    expect(known("Quote Q-1 is confirmed.", [held]).ok).toBe(false);
+  });
+  it("an expired hold's server message is no longer true — and no longer exempt", () => {
+    const expired = booking("hold_placed", -2);
+    expect(known(HOLD_MESSAGE, [expired]).ok).toBe(false);
+    // A live hold with only 5 minutes left cannot be described as held for 15 minutes.
+    const shorter = booking("hold_placed", 5);
+    expect(known(HOLD_MESSAGE, [shorter]).ok).toBe(false);
+    expect(known(HOLD_MESSAGE, [booking("hold_placed", 15)]).ok).toBe(true);
+  });
+  it('"No worries" negates nothing', () => {
+    expect(known("No worries your booking is confirmed and paid.", []).ok).toBe(false);
+    expect(known("No problem, it's reserved for you.", []).ok).toBe(false);
+    expect(known("Not to worry — you're booked.", []).ok).toBe(false);
+    expect(known("No need to worry: your booking is confirmed.", []).ok).toBe(false);
+    // Real negations still pass.
+    expect(known("Your booking is not confirmed yet.", []).ok).toBe(true);
+    expect(known("Nothing has been paid.", []).ok).toBe(true);
+    expect(known("No payment has been taken.", []).ok).toBe(true);
+  });
+  it("availability without a verb is still a claim", () => {
+    expect(known("Party Slide: available for Saturday.", []).ok).toBe(false);
+    expect(known("Available on Saturday!", []).ok).toBe(false);
+    expect(known("Party Slide — available Jan 2.", [partySlide]).ok).toBe(true);
+    // A catalog statement with no date, time or quantity is not an availability claim.
+    expect(known("We have several sizes available.", []).ok).toBe(true);
+  });
+});
+
+describe("violations carry codes only (N4)", () => {
+  it("no reply prose — names, emails, addresses — reaches the violation list", () => {
+    const reply =
+      "Jane Doe (jane.doe@example.com) at 42 Elm Street: your booking is confirmed and paid, total $999.";
+    const res = check(reply);
+    expect(res.ok).toBe(false);
+    expect(res.violations.length).toBeGreaterThan(0);
+    for (const v of res.violations) expect(v).toMatch(/^GROUNDING_[A-Z_]+$/);
+    const serialized = JSON.stringify(res);
+    for (const pii of ["Jane", "jane.doe", "Elm", "42", "999"]) {
+      expect(serialized).not.toContain(pii);
+    }
   });
 });

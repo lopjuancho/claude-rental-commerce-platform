@@ -680,3 +680,20 @@ describe("request body limit (M3)", () => {
     expect(await readBodyCapped(r, 8192)).toEqual({ ok: false });
   });
 });
+
+describe("quote links sealed to the session (N2)", () => {
+  it("only the same session (and tenant) can open a sealed link; nothing is stored in clear", async () => {
+    const { sessionSealer } = await import("@/server/ai/seal");
+    const session = generateSessionToken();
+    const org = "10000000-0000-4000-8000-000000000001";
+    const link = `/q/${"a".repeat(43)}`;
+    const sealed = await sessionSealer(session, org).seal(link);
+    expect(sealed).not.toContain("aaaa");
+    expect(await sessionSealer(session, org).open(sealed)).toBe(link);
+    expect(await sessionSealer(generateSessionToken(), org).open(sealed)).toBeNull();
+    expect(
+      await sessionSealer(session, "20000000-0000-4000-8000-000000000002").open(sealed),
+    ).toBeNull();
+    expect(await sessionSealer(session, org).open(`${sealed.slice(0, -2)}xx`)).toBeNull();
+  });
+});

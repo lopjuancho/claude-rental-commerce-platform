@@ -59,6 +59,18 @@ export interface NewQuote {
   customerNotes: string | null;
   /** What the visitor typed; kept on the quote, never merged into an existing customer. */
   submittedContact: Record<string, unknown>;
+  /** Assistant writes (ADR 0017 §11): one key → at most one quote, however many workers race. */
+  idempotencyKey?: string;
+}
+
+/** An object created under an idempotency key (the recovery lookup). */
+export interface BusinessObject {
+  objectId: string;
+  quoteNumber: string;
+  tokenHash: string | null;
+  bookingStatus: string | null;
+  holdExpiresAt: string | null;
+  holdActive: boolean | null;
 }
 
 export interface BookingHold {
@@ -96,11 +108,13 @@ export interface TrustedGateway {
     organizationId: string,
     customerId: string,
     event: Record<string, unknown>,
+    idempotencyKey?: string,
   ): Promise<EventWindow>;
+  /** `tokenHash` is the hash of the quote that exists under the key (it may predate this call). */
   createQuote(
     organizationId: string,
     quote: NewQuote,
-  ): Promise<{ quoteId: string; quoteNumber: string }>;
+  ): Promise<{ quoteId: string; quoteNumber: string; tokenHash: string | null }>;
   publicQuoteView(organizationId: string, tokenHash: string): Promise<unknown>;
   requestBookingByToken(
     organizationId: string,
@@ -109,7 +123,13 @@ export interface TrustedGateway {
     message: string | null,
     /** SHA-256 of the anonymous visitor token (never the token itself). */
     visitorHash: string,
+    idempotencyKey?: string,
   ): Promise<BookingHold>;
+  businessObject(
+    organizationId: string,
+    idempotencyKey: string,
+    kind: "quote" | "booking",
+  ): Promise<BusinessObject | null>;
   renewBookingHoldByToken(organizationId: string, tokenHash: string): Promise<string>;
   cancelBookingByToken(organizationId: string, tokenHash: string): Promise<string>;
 }
@@ -125,6 +145,9 @@ function unwrap<T>(res: { data: T; error: PostgrestError | null }): T {
   if (res.error) throw new GatewayError(res.error);
   return res.data;
 }
+
+// Nullable SQL arguments the generated types declare as non-null.
+const nullable = <T>(v: T | null | undefined): T => v as T;
 
 function present<T>(value: T | null | undefined, fn: string): T {
   if (value === null || value === undefined) throw new Error(`${fn} returned nothing`);
@@ -210,14 +233,21 @@ export function systemGateway(): TrustedGateway {
         "match_or_create_customer",
       );
     },
-    async createEvent(organizationId, customerId, event) {
+    async createEvent(organizationId, customerId, event, idempotencyKey) {
       const [row] = present(
         unwrap(
-          await db.rpc("create_event", {
-            p_organization_id: organizationId,
-            p_customer_id: customerId,
-            p_event: event as Json,
-          }),
+          idempotencyKey
+            ? await db.rpc("create_event_once", {
+                p_organization_id: organizationId,
+                p_customer_id: customerId,
+                p_event: event as Json,
+                p_key: idempotencyKey,
+              })
+            : await db.rpc("create_event", {
+                p_organization_id: organizationId,
+                p_customer_id: customerId,
+                p_event: event as Json,
+              }),
         ),
         "create_event",
       );
@@ -225,6 +255,31 @@ export function systemGateway(): TrustedGateway {
       return { eventId: row.event_id, startsAt: row.starts_at, endsAt: row.ends_at };
     },
     async createQuote(organizationId, q) {
+      if (q.idempotencyKey) {
+        const [once] = present(
+          unwrap(
+            await db.rpc("create_quote_once", {
+              p_organization_id: organizationId,
+              p_customer_id: q.customerId,
+              p_event_id: q.eventId,
+              p_calculation_id: q.calculationId,
+              p_price_request: q.priceRequest as Json,
+              p_source: q.source,
+              p_token_hash: q.tokenHash,
+              p_customer_notes: nullable(q.customerNotes),
+              p_submitted_contact: q.submittedContact as Json,
+              p_key: q.idempotencyKey,
+            }),
+          ),
+          "create_quote_once",
+        );
+        if (!once) throw new Error("create_quote_once returned no row");
+        return {
+          quoteId: once.quote_id,
+          quoteNumber: once.quote_number,
+          tokenHash: once.token_hash,
+        };
+      }
       const [row] = present(
         unwrap(
           await db.rpc("create_quote", {
@@ -242,7 +297,7 @@ export function systemGateway(): TrustedGateway {
         "create_quote",
       );
       if (!row) throw new Error("create_quote returned no row");
-      return { quoteId: row.quote_id, quoteNumber: row.quote_number };
+      return { quoteId: row.quote_id, quoteNumber: row.quote_number, tokenHash: q.tokenHash };
     },
     async publicQuoteView(organizationId, tokenHash) {
       return unwrap(
@@ -252,16 +307,25 @@ export function systemGateway(): TrustedGateway {
         }),
       );
     },
-    async requestBookingByToken(organizationId, tokenHash, source, message, visitorHash) {
+    async requestBookingByToken(organizationId, tokenHash, source, message, visitorHash, key) {
       const [row] = present(
         unwrap(
-          await db.rpc("request_booking_by_token", {
-            p_organization_id: organizationId,
-            p_token_hash: tokenHash,
-            p_source: source,
-            ...(message ? { p_message: message } : {}),
-            p_visitor_hash: visitorHash,
-          }),
+          key
+            ? await db.rpc("request_booking_by_token_once", {
+                p_organization_id: organizationId,
+                p_token_hash: tokenHash,
+                p_source: source,
+                p_message: nullable(message),
+                p_visitor_hash: visitorHash,
+                p_key: key,
+              })
+            : await db.rpc("request_booking_by_token", {
+                p_organization_id: organizationId,
+                p_token_hash: tokenHash,
+                p_source: source,
+                ...(message ? { p_message: message } : {}),
+                p_visitor_hash: visitorHash,
+              }),
         ),
         "request_booking_by_token",
       );
@@ -272,6 +336,25 @@ export function systemGateway(): TrustedGateway {
         holdExpiresAt: row.hold_expires_at,
         quoteNumber: row.quote_number,
       };
+    },
+    async businessObject(organizationId, idempotencyKey, kind) {
+      const [row] = unwrap(
+        await db.rpc("ai_business_object", {
+          p_organization_id: organizationId,
+          p_key: idempotencyKey,
+          p_kind: kind,
+        }),
+      ) ?? [undefined];
+      return row
+        ? {
+            objectId: row.object_id,
+            quoteNumber: row.quote_number,
+            tokenHash: row.token_hash,
+            bookingStatus: row.booking_status,
+            holdExpiresAt: row.hold_expires_at,
+            holdActive: row.hold_active,
+          }
+        : null;
     },
     async renewBookingHoldByToken(organizationId, tokenHash) {
       return present(
@@ -418,9 +501,6 @@ export interface AiConversationStore {
   failMutation(organizationId: string, mutationId: string, errorCode: string): Promise<void>;
   recordAction(organizationId: string, action: AiActionRecord): Promise<void>;
 }
-
-// Nullable SQL arguments the generated types declare as non-null.
-const nullable = <T>(v: T | null): T => v as T;
 
 export function systemAiStore(): AiConversationStore {
   const db = createSystemClient();

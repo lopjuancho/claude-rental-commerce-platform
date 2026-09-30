@@ -70,7 +70,7 @@ export async function submitQuoteRequest(
   raw: unknown,
   meta: RequestMeta,
   deps: PublicDeps = defaultDeps(),
-  options: { token?: string } = {},
+  options: { token?: string; idempotencyKey?: string } = {},
 ) {
   await deps.rateLimit("publicWrite", limitKey(tenant, meta));
   const input = publicQuoteRequestSchema.parse(raw);
@@ -82,7 +82,10 @@ export async function submitQuoteRequest(
     "Customer",
   );
   const window = eventWindow(
-    await mapped(deps.gateway.createEvent(org, customerId, eventRow(input.event)), "Event"),
+    await mapped(
+      deps.gateway.createEvent(org, customerId, eventRow(input.event), options.idempotencyKey),
+      "Event",
+    ),
   );
   const request = buildPriceRequest({
     items: input.items,
@@ -115,6 +118,7 @@ export async function submitQuoteRequest(
       tokenHash: await hashQuoteToken(token),
       customerNotes: input.message ?? null,
       submittedContact: input.contact,
+      ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
     }),
     "Quote",
   );
@@ -123,7 +127,14 @@ export async function submitQuoteRequest(
     items: input.items.length,
     totalCents: pricing.output.summary.total,
   });
-  return { token, quoteNumber: quote.quoteNumber, quoteId: quote.quoteId };
+  // With an idempotency key the quote may predate this call (another worker created it under the
+  // same key): its token hash is the authoritative one, and our raw token is only valid if equal.
+  return {
+    token,
+    quoteNumber: quote.quoteNumber,
+    quoteId: quote.quoteId,
+    tokenHash: quote.tokenHash ?? (await hashQuoteToken(token)),
+  };
 }
 
 const viewSchema = z.object({
@@ -212,6 +223,7 @@ export async function requestPublicBooking(
   raw: unknown,
   meta: RequestMeta,
   deps: PublicDeps = defaultDeps(),
+  options: { idempotencyKey?: string } = {},
 ) {
   await deps.rateLimit("publicWrite", limitKey(tenant, meta));
   const { message } = bookingInput.parse(raw);
@@ -228,6 +240,7 @@ export async function requestPublicBooking(
       meta.actor === "ai" ? "assistant" : "web",
       message ?? null,
       await hashVisitorToken(meta.visitorToken),
+      options.idempotencyKey,
     ),
     "Booking request",
   );

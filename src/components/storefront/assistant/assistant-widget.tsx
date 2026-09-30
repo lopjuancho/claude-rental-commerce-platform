@@ -116,11 +116,23 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
     };
   }, [open, close]);
 
+  // Chat generation: "New chat" starts a new one. A reply that arrives for an earlier generation
+  // (sent before New chat) is dropped — it can neither append to the new chat nor mark it failed.
+  const generationRef = useRef(0);
+
   const send = useCallback(
     async (text: string, retryOf?: string) => {
       const message = text.trim().slice(0, MAX_CHARS);
       if (!message || busy) return;
+      const generation = generationRef.current;
+      const current = () => generation === generationRef.current;
       const requestId = retryOf ?? newRequestId();
+      const post = () =>
+        fetch("/api/assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, requestId, page: pageContext(pathname) }),
+        });
       setBusy(true);
       setLastFailed(null);
       setDraft("");
@@ -128,16 +140,21 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
         setMessages((m) => [...m, { id: nextId(), role: "user", text: message, blocks: [] }]);
       }
       try {
-        const res = await fetch("/api/assistant", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, requestId, page: pageContext(pathname) }),
-        });
-        const data = (await res.json().catch(() => null)) as {
+        let res = await post();
+        type Reply = {
           status?: string;
+          errorCode?: string;
           reply?: string;
           blocks?: AssistantBlock[];
         } | null;
+        let data = (await res.json().catch(() => null)) as Reply;
+        if (data?.errorCode === "SESSION_REQUIRED" && current()) {
+          // No session yet (e.g. it expired): bootstrap one (runs nothing), then send once more.
+          await fetch("/api/assistant", { method: "GET" });
+          res = await post();
+          data = (await res.json().catch(() => null)) as Reply;
+        }
+        if (!current()) return;
         const failed = !res.ok || data?.status !== "ok";
         setMessages((m) => [
           ...m,
@@ -151,6 +168,7 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
         ]);
         if (failed) setLastFailed({ message, requestId });
       } catch {
+        if (!current()) return;
         setMessages((m) => [
           ...m,
           {
@@ -163,16 +181,19 @@ export function AssistantWidget({ businessName }: { businessName: string }) {
         ]);
         setLastFailed({ message, requestId });
       } finally {
-        setBusy(false);
+        if (current()) setBusy(false);
       }
     },
     [busy, pathname],
   );
 
   const newChat = useCallback(async () => {
-    await fetch("/api/assistant", { method: "DELETE" }).catch(() => undefined);
+    generationRef.current += 1;
     setMessages([]);
     setLastFailed(null);
+    setBusy(false);
+    // The server replaces this browser's session; the old conversation is left behind.
+    await fetch("/api/assistant", { method: "DELETE" }).catch(() => undefined);
     inputRef.current?.focus();
   }, []);
 

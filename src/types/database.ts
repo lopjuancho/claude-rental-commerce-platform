@@ -51,6 +51,38 @@ export type Database = {
           },
         ];
       };
+      ai_business_keys: {
+        Row: {
+          created_at: string;
+          idempotency_key: string;
+          kind: string;
+          object_id: string;
+          organization_id: string;
+        };
+        Insert: {
+          created_at?: string;
+          idempotency_key: string;
+          kind: string;
+          object_id: string;
+          organization_id: string;
+        };
+        Update: {
+          created_at?: string;
+          idempotency_key?: string;
+          kind?: string;
+          object_id?: string;
+          organization_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ai_business_keys_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       ai_conversations: {
         Row: {
           active_turn_attempt: number | null;
@@ -3287,6 +3319,17 @@ export type Database = {
         };
         Returns: undefined;
       };
+      ai_business_object: {
+        Args: { p_key: string; p_kind: string; p_organization_id: string };
+        Returns: {
+          booking_status: string;
+          hold_active: boolean;
+          hold_expires_at: string;
+          object_id: string;
+          quote_number: string;
+          token_hash: string;
+        }[];
+      };
       ai_conversation_history: {
         Args: { p_conversation_id: string; p_limit: number; p_organization_id: string };
         Returns: {
@@ -3441,6 +3484,14 @@ export type Database = {
           starts_at: string;
         }[];
       };
+      create_event_once: {
+        Args: { p_customer_id: string; p_event: Json; p_key: string; p_organization_id: string };
+        Returns: {
+          ends_at: string;
+          event_id: string;
+          starts_at: string;
+        }[];
+      };
       create_organization: {
         Args: {
           p_legal_name?: string;
@@ -3467,6 +3518,26 @@ export type Database = {
         Returns: {
           quote_id: string;
           quote_number: string;
+        }[];
+      };
+      create_quote_once: {
+        Args: {
+          p_calculation_id: string;
+          p_customer_id: string;
+          p_customer_notes: string;
+          p_event_id: string;
+          p_key: string;
+          p_organization_id: string;
+          p_price_request: Json;
+          p_source: string;
+          p_submitted_contact: Json;
+          p_token_hash: string;
+        };
+        Returns: {
+          created: boolean;
+          quote_id: string;
+          quote_number: string;
+          token_hash: string;
         }[];
       };
       delivery_area_context: {
@@ -3563,6 +3634,23 @@ export type Database = {
         };
         Returns: {
           booking_request_id: string;
+          hold_expires_at: string;
+          quote_number: string;
+          reservation_id: string;
+        }[];
+      };
+      request_booking_by_token_once: {
+        Args: {
+          p_key: string;
+          p_message: string;
+          p_organization_id: string;
+          p_source: string;
+          p_token_hash: string;
+          p_visitor_hash: string;
+        };
+        Returns: {
+          booking_request_id: string;
+          created: boolean;
           hold_expires_at: string;
           quote_number: string;
           reservation_id: string;

@@ -47,8 +47,10 @@ export type AssistantBlock =
   | {
       type: "quote";
       quoteNumber: string;
-      /** The private quote link: only in the turn that created the quote (never stored). */
+      /** The private quote link (in storage only sealed to the customer's session). */
       url: string | null;
+      /** Server-side storage only: the link sealed to the session; never sent to the browser. */
+      sealedLink?: string;
       priceIsFinal: boolean;
       total: string | null;
       replaces: string | null;

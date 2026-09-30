@@ -42,13 +42,17 @@ describe("service-role boundary", () => {
         // public quote / booking flow (M5, ADR 0015)
         "cancel_booking_by_token",
         "create_event",
+        "create_event_once",
         "create_quote",
+        "create_quote_once",
         "match_or_create_customer",
         "public_quote_view",
         "renew_booking_hold_by_token",
         "request_booking_by_token",
+        "request_booking_by_token_once",
         // assistant conversations and telemetry (M7, ADR 0017)
         "ai_action_record",
+        "ai_business_object",
         "ai_conversation_history",
         "ai_conversation_mutations",
         "ai_mutation_begin",

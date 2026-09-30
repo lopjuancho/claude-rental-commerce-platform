@@ -106,15 +106,38 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
         org,
         JSON.stringify(contact),
       ]),
-    createEvent: async (org, customerId, event) => {
+    createEvent: async (org, customerId, event, key) => {
       const v = await svc<{ event_id: string; starts_at: Date | null; ends_at: Date | null }>(
         "create_event",
-        "select row_to_json(e) as v from public.create_event($1, $2, $3) e",
-        [org, customerId, JSON.stringify(event)],
+        key
+          ? "select row_to_json(e) as v from public.create_event_once($1, $2, $3, $4) e"
+          : "select row_to_json(e) as v from public.create_event($1, $2, $3) e",
+        key
+          ? [org, customerId, JSON.stringify(event), key]
+          : [org, customerId, JSON.stringify(event)],
       );
       return { eventId: v.event_id, startsAt: iso(v.starts_at), endsAt: iso(v.ends_at) };
     },
     createQuote: async (org, q) => {
+      if (q.idempotencyKey) {
+        const o = await svc<{ quote_id: string; quote_number: string; token_hash: string | null }>(
+          "create_quote_once",
+          "select row_to_json(q) as v from public.create_quote_once($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) q",
+          [
+            org,
+            q.customerId,
+            q.eventId,
+            q.calculationId,
+            JSON.stringify(q.priceRequest),
+            q.source,
+            q.tokenHash,
+            q.customerNotes,
+            JSON.stringify(q.submittedContact),
+            q.idempotencyKey,
+          ],
+        );
+        return { quoteId: o.quote_id, quoteNumber: o.quote_number, tokenHash: o.token_hash };
+      }
       const v = await svc<{ quote_id: string; quote_number: string }>(
         "create_quote",
         "select row_to_json(q) as v from public.create_quote($1, $2, $3, $4, $5, $6, $7, $8, null, $9) q",
@@ -130,11 +153,32 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
           JSON.stringify(q.submittedContact),
         ],
       );
-      return { quoteId: v.quote_id, quoteNumber: v.quote_number };
+      return { quoteId: v.quote_id, quoteNumber: v.quote_number, tokenHash: q.tokenHash };
     },
     publicQuoteView: (org, hash) =>
       svc("public_quote_view", "select public.public_quote_view($1, $2) as v", [org, hash]),
-    requestBookingByToken: async (org, hash, source, message, visitorHash) => {
+    businessObject: async (org, key, kind) => {
+      const rows = await rpc<{
+        object_id: string;
+        quote_number: string;
+        token_hash: string | null;
+        booking_status: string | null;
+        hold_expires_at: Date | null;
+        hold_active: boolean | null;
+      }>(SYSTEM, "select * from public.ai_business_object($1, $2, $3)", [org, key, kind]);
+      const r = rows[0];
+      return r
+        ? {
+            objectId: r.object_id,
+            quoteNumber: r.quote_number,
+            tokenHash: r.token_hash,
+            bookingStatus: r.booking_status,
+            holdExpiresAt: r.hold_expires_at ? r.hold_expires_at.toISOString() : null,
+            holdActive: r.hold_active,
+          }
+        : null;
+    },
+    requestBookingByToken: async (org, hash, source, message, visitorHash, key) => {
       const v = await svc<{
         booking_request_id: string;
         reservation_id: string;
@@ -142,8 +186,12 @@ export function pgGateway(): TrustedGateway & { calls: string[] } {
         quote_number: string;
       }>(
         "request_booking_by_token",
-        "select row_to_json(b) as v from public.request_booking_by_token($1, $2, $3, $4, $5) b",
-        [org, hash, source, message, visitorHash],
+        key
+          ? "select row_to_json(b) as v from public.request_booking_by_token_once($1, $2, $3, $4, $5, $6) b"
+          : "select row_to_json(b) as v from public.request_booking_by_token($1, $2, $3, $4, $5) b",
+        key
+          ? [org, hash, source, message, visitorHash, key]
+          : [org, hash, source, message, visitorHash],
       );
       return {
         bookingRequestId: v.booking_request_id,

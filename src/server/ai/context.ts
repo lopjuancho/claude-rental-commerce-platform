@@ -5,6 +5,7 @@ import type { PublicClient } from "@/server/db/public";
 import type { PublicDeps, RequestMeta } from "@/server/public/deps";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import type { Deadline } from "./deadline";
+import type { Sealer } from "./seal";
 
 /**
  * Per-turn context handed to every tool (ADR 0017 §2). The tenant and request meta come from the
@@ -55,6 +56,8 @@ const activeQuoteSchema = z.strictObject({
   quoteId: z.uuid().optional(),
   origin: z.enum(["assistant", "page"]),
   basis: quoteBasisSchema,
+  /** False when a recovered quote's database contents did not match the recorded input. */
+  verified: z.boolean().default(true),
 });
 export type ActiveQuote = z.infer<typeof activeQuoteSchema>;
 
@@ -109,6 +112,7 @@ export const mutationRefSchema = z.discriminatedUnion("type", [
       items: z.array(stagedItem).max(MAX_STAGED_ITEMS),
     }),
     replaces: z.string().max(40).nullable(),
+    verified: z.boolean().default(true),
   }),
   z.strictObject({
     type: z.literal("booking"),
@@ -131,6 +135,7 @@ export function applyMutationRef(state: AssistantState, ref: MutationRef) {
       ...(ref.quoteId ? { quoteId: ref.quoteId } : {}),
       origin: "assistant",
       basis: ref.basis,
+      verified: ref.verified,
     };
   }
   // A booking request changes nothing in the staging: its status is read from the quote.
@@ -148,11 +153,20 @@ export interface MutationSpec {
   toolName: string;
   /** The semantic identity of the mutation (hashed with the conversation id). */
   key: unknown;
-  /** Stored before the mutation runs, to find its outcome if this attempt dies. */
-  pending: Record<string, string> | null;
-  /** An earlier attempt started this mutation without recording its outcome: did it commit? */
-  recover: (pending: Record<string, string> | null) => Promise<Committed | null>;
-  perform: () => Promise<Committed>;
+  /**
+   * The mutation's complete input (basis, staged snapshot, sealed link token…), recorded by the
+   * FIRST attempt and immutable: later attempts receive the recorded one, never their own.
+   */
+  pending: Record<string, unknown>;
+  /** To open sealed values in stored outcomes when they are replayed. */
+  sealer: Sealer;
+  /**
+   * An earlier attempt started this mutation without recording its outcome: return what exists
+   * under the business key (authoritatively, from the database), or null if nothing does.
+   */
+  recover: (pending: Record<string, unknown>, businessKey: string) => Promise<Committed | null>;
+  /** Performs the business write with the recorded input, under the business idempotency key. */
+  perform: (pending: Record<string, unknown>, businessKey: string) => Promise<Committed>;
 }
 
 export interface MutationJournal {
@@ -171,6 +185,8 @@ export interface ToolContext {
   now: () => Date;
   deadline: Deadline;
   journal: MutationJournal;
+  /** Seals quote link tokens to this browser session (never stored in clear). */
+  sealer: Sealer;
   /** The quote the customer is viewing (validated this turn), if different from the active one. */
   pageQuote?: { tokenHash: string; quoteNumber: string } | null;
   /** How many times each request-scoped mutation ran in this turn (see requestScopedKey). */

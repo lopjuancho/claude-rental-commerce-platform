@@ -221,5 +221,11 @@ Still open:
 - **Live model:** `pnpm ai:smoke` (opt-in: `AI_SMOKE_CONFIRM=live`, `AI_SMOKE_BASE_URL`) runs the
   live smoke test against a staging storefront once `OPENAI_API_KEY` is set in its server secrets.
   It has not been run yet.
-- **Residual (ADR 0017 §11):** a mutation still in flight when its turn's lease expires can race a
-  new attempt of the same request; bounded by the deadline + 30 s lease.
+- **Lease-expiry race (round 1 residual):** closed in round 2 by idempotent business writes
+  (ADR 0017 §13).
+- **Review round 2 (Codex, 40c26dd):** complete-subject grounding with code-only telemetry,
+  business-write idempotency (`*_once`), immutable recorded mutation input and verified recovery,
+  deadline re-checked before the write, session issued before any message, New Chat race, sealed
+  links on replay, no false "saved". ADR 0017 §13. The live smoke script now fails on any missing
+  tool/card/result and verifies tool calls and duplicates in the database
+  (`AI_SMOKE_DATABASE_URL`); it has not been run.

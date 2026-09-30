@@ -123,10 +123,8 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       conversation state at the start of every turn. A failed or timed-out turn saves the state
       it started from plus the references it applied — never its uncommitted staging, so retrying
       the same message cannot apply a change twice — and not its messages.
-    - Residual: if an attempt's lease expires while its mutation is still in flight and a new
-      attempt resolves "not found" before that mutation lands, both could complete. The lease
-      (deadline + 30 s) and the per-step deadline make this a timing window of an already-failed
-      request, not a normal path.
+    - (Round 1 left a window: an attempt whose lease expired mid-write could race a new attempt.
+      Round 2 closes it at the write itself — see §13, business idempotency.)
 12. **One active quote, reconciled** (M7 review, H3). The active quote records hashes of the
     contact, event (date, time, address, fulfillment, details) and items it was built from. Any
     later change makes it "mismatched": `request_booking` refuses (`DETAILS_CHANGED`) until
@@ -136,6 +134,46 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
     silently — `request_booking` asks which (`AMBIGUOUS_QUOTE`) and accepts only a quote number
     the conversation holds or the customer is viewing. Items are never clamped or dropped:
     exceeding a quantity or item-count limit is an explicit refusal.
+
+13. **Round 2 of the review (Codex, 40c26dd).**
+    - **Complete subjects (H1):** availability claims must match product, date, the clock times
+      named (inside the checked window) and the quantity named (≤ the quantity checked) of the
+      LATEST result; bare "available" is a claim (catalog phrases such as "sizes available" with no
+      date/time/quantity are not); booking and hold claims are evaluated for the quote they name,
+      and a quote number the conversation never had is a violation; a hold's server message is
+      exempt only while that hold is live and at least as long as it says. Negation is local (a
+      negator among the three words before the claim, or a condition opening its clause): "No
+      worries, your booking is confirmed" is a claim. Violations are stable codes
+      (`GROUNDING_*`); no reply prose reaches logs or `ai_actions` (N4).
+    - **Business-write idempotency (H2):** migration `20261004000100_m7_business_idempotency.sql`.
+      The journal key is also the business idempotency key and is passed INTO the writes:
+      `create_event_once`, `create_quote_once`, `request_booking_by_token_once` take a
+      transaction-scoped lock on (organization, key), return the object already created under it,
+      or run the unchanged M5 function and record key → object in the same transaction
+      (`ai_business_keys`). An old worker finishing after a takeover resolves to the same event,
+      quote and booking request. Recovery looks the object up by the key
+      (`ai_business_object`), not by anything a later attempt generated.
+    - **Immutable recorded input (H2, H3):** the first attempt records the mutation's complete
+      input in `ai_mutations.pending` — the staged snapshot, its basis hashes, the replaced quote,
+      the link token hash and the token SEALED to the session — and it is never replaced. Retries
+      and recovery use that record, never their own view of the conversation. A recovered (or
+      created) quote is compared with the database (items, quantities, event window); if they
+      differ the quote is marked unverified and is never "current": booking is refused.
+    - **Deadline (M4):** checked before the claim, again after it (and after any recovery lookup),
+      immediately before the write. Reconciling something already committed is allowed late; a new
+      write never starts after the deadline.
+    - **Session before mutation (H2-C):** `rc_ai` is issued by storefront page views (like
+      `rc_visitor`), the bootstrap `GET /api/assistant` and New Chat (`DELETE`, a fresh session).
+      A mutation-capable `POST` never creates or sets it (`409 SESSION_REQUIRED` without one), so a
+      lost first response cannot leave the retry without its conversation.
+    - **New Chat race (N1):** the widget keeps a chat generation; a reply that arrives for an
+      earlier generation is dropped, and since POST responses carry no session cookie a late reply
+      cannot restore the old session.
+    - **Working links on replay (N2):** stored replies and journal results keep quote links only
+      sealed (AES-256-GCM, key derived with HKDF from the session cookie, of which the database
+      only has a hash); the same session's replay reopens them.
+    - **No false "saved" (N3):** if the turn cannot be saved, the conversation is released with
+      only what is durable and the customer is told to resend — never that staging was saved.
 
 ## Not in M7
 

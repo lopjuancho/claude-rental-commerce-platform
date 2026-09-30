@@ -28,7 +28,8 @@ import {
   type ToolStatus,
 } from "./context";
 import { Deadline, DeadlineError } from "./deadline";
-import { durableJournal } from "./journal";
+import { durableJournal, openBlock, sealBlock } from "./journal";
+import { type Sealer, sessionSealer } from "./seal";
 import {
   checkGrounding,
   cleanReply,
@@ -193,17 +194,17 @@ function fallbackReply(evidence: Evidence[], currency: string): string {
     : SAFE_FALLBACK;
 }
 
-/** What is stored for replay: no quote link tokens. */
-function storable(result: TurnResult): Json {
+/** What is stored for replay: quote links only sealed to this session (never in clear). */
+async function storable(result: TurnResult, sealer: Sealer): Promise<Json> {
   return {
     status: result.status,
     reply: result.reply,
     ...(result.errorCode ? { errorCode: result.errorCode } : {}),
-    blocks: result.blocks.map((b) => (b.type === "quote" ? { ...b, url: null } : b)),
+    blocks: await Promise.all(result.blocks.map((b) => sealBlock(b, sealer))),
   } as unknown as Json;
 }
 
-function replayOf(stored: unknown): TurnResult {
+async function replayOf(stored: unknown, sealer: Sealer): Promise<TurnResult> {
   const r = stored as Partial<TurnResult> | null;
   if (!r || typeof r.reply !== "string") {
     return { status: "error", errorCode: "REPLAY", reply: UNAVAILABLE, blocks: [], replayed: true };
@@ -211,7 +212,10 @@ function replayOf(stored: unknown): TurnResult {
   return {
     status: r.status === "ok" ? "ok" : "error",
     reply: r.reply,
-    blocks: Array.isArray(r.blocks) ? r.blocks : [],
+    // A lost response is replayed with a working quote link (unsealed for this same session).
+    blocks: Array.isArray(r.blocks)
+      ? await Promise.all(r.blocks.map((b) => openBlock(b, sealer)))
+      : [],
     ...(r.errorCode ? { errorCode: r.errorCode } : {}),
     replayed: true,
   };
@@ -261,7 +265,8 @@ async function turn(
     ),
     "begin",
   );
-  if (claim.outcome === "replay") return replayOf(claim.response);
+  const sealer = sessionSealer(input.sessionToken, org);
+  if (claim.outcome === "replay") return replayOf(claim.response, sealer);
   if (claim.outcome === "in_progress" || claim.outcome === "busy" || !claim.turnId) {
     return {
       status: "error",
@@ -374,7 +379,9 @@ async function turn(
       ...(deps.db ? { db: deps.db } : {}),
       now,
       deadline,
+      sealer,
       journal: durableJournal({
+        sealer,
         store: deps.store,
         organizationId: org,
         conversationId,
@@ -510,16 +517,12 @@ async function turn(
     exemptSentences: [MANUAL_REVIEW_TEXT],
   });
   if (!grounding.ok) {
+    // Stable codes only: the offending prose (possibly names, emails, addresses) is never logged.
     logAssistantError(input.correlationId, "reply_guardrail", {
       name: "GuardrailViolation",
-      code: grounding.violations[0]?.slice(0, 60),
+      code: grounding.violations[0],
     });
-    await record(
-      "reply_guardrail",
-      "guardrail_violation",
-      grounding.violations[0]?.slice(0, 60),
-      0,
-    );
+    await record("reply_guardrail", "guardrail_violation", grounding.violations[0], 0);
     text = fallbackReply(turnEvidence, input.tenant.currency);
   }
   stored.push({ role: "assistant", content: text });
@@ -536,16 +539,31 @@ async function turn(
         tokens,
         promptVersion: PROMPT_VERSION,
         appliedSeq,
-        response: storable(result),
+        response: await storable(result, sealer),
       }),
       "finish",
     );
   } catch (e) {
-    // The reply is true and any mutation is in the journal (re-applied next turn); only this
-    // turn's messages are missing from the history. Release the conversation (keeping the
-    // committed references) so the next message is not refused as busy until the lease expires.
+    // The conversation could not be saved: release it keeping only what is durable (the state it
+    // started from + committed mutations) — and do NOT tell the customer that anything staged in
+    // this turn (contact, event, items) was saved. Committed quotes/bookings stay true and shown.
     logAssistantError(input.correlationId, "persist:finish", e);
     await fail("PERSIST_FAILED");
+    const committedFacts = appliedRefs.length
+      ? factSentences(
+          turnEvidence.filter((x) => x.kind === "quote" || x.kind === "booking"),
+          (c) => formatCents(c, input.tenant.currency),
+        )
+      : [];
+    return {
+      status: "error",
+      errorCode: "PERSIST_FAILED",
+      reply: [
+        "I couldn't save that part of our conversation. Please send your last message again.",
+        ...committedFacts,
+      ].join(" "),
+      blocks: blocks.filter((b) => b.type === "quote" || b.type === "booking"),
+    };
   }
   return result;
 }

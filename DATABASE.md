@@ -786,6 +786,7 @@ The storefront assistant's anonymous, tenant-scoped sessions and tool telemetry.
 | `ai_messages` | Ordered transcript (`seq`) with `role in ('user','assistant','tool')`. Assistant tool-call arguments are stored with contact details redacted; tool results are the JSON the model saw (no quote tokens). |
 | `ai_turns` | One per browser message (request id): `status processing/completed/failed/abandoned`, `attempt`, lease, the replayable response (no link tokens). A conversation has at most one active turn (`ai_conversations.active_turn_*`). |
 | `ai_mutations` | The mutation journal: one row per quote/booking creation, unique per `(conversation_id, mutation_key)` (semantic idempotency key), `status started/committed/failed`, `pending` (e.g. the quote token HASH chosen before creating it), `ref` (the committed reference re-applied to the state; for a quote it carries the staged contact/event/items it was built from — the same data the conversation state holds), `result` (the outcome as shown, no tokens). `ai_conversations.applied_mutation_seq` marks what the state already reflects. |
+| `ai_business_keys` | Business idempotency (round 2): `(organization_id, idempotency_key, kind)` → the event / quote / booking request created by an assistant write under that key. Written only by the `*_once` functions, in the same transaction as the object. |
 | `ai_actions` | Troubleshooting telemetry per tool call: `tool_name`, `status in ('ok','manual_review','rejected_validation','rejected_policy','error','guardrail_violation')`, `error_code`, `duration_ms`, `correlation_id`, `model`. **No arguments, no results, no customer data.** |
 
 Access:
@@ -801,6 +802,8 @@ Access:
 | `ai_mutation_begin(org, turn, attempt, key, tool, call_id, pending)` | Only the owning turn within its lease: `proceed` / `replay` / `unknown` (an earlier attempt's outcome was never recorded) / `in_progress`. |
 | `ai_mutation_commit(org, mutation, ref, result)` / `ai_mutation_fail(…)` | Records the outcome (commit is idempotent and not lease-fenced: a completed mutation is always recorded). |
 | `ai_conversation_mutations(org, conversation, after_seq)` | Committed references not yet reflected in the state. |
+| `create_event_once`, `create_quote_once`, `request_booking_by_token_once` | The M5 writes under an idempotency key: a transaction-scoped lock on (org, key); the object already created under the key is returned, otherwise the unchanged M5 function runs and the mapping is recorded in the same transaction. |
+| `ai_business_object(org, key, kind)` | Recovery lookup: what exists under a key (quote number and token hash; booking status and hold). |
 | `ai_conversation_history(org, conversation, limit)` | The last `limit` (1–200) messages of that organization's conversation, oldest first. |
 | `ai_action_record(...)` | Inserts one `ai_actions` row. |
 
@@ -946,3 +949,4 @@ create table import_rows (
 | `0007_customers_events_quotes` (+ counters, status trigger, booking requests) | M5 |
 | `20261002000100_m7_assistant` (ai_conversations, ai_messages, ai_actions, service-role functions) | M7 |
 | `20261003000100_m7_turns_journal` (ai_turns, ai_mutations, turn/mutation functions) | M7 review |
+| `20261004000100_m7_business_idempotency` (ai_business_keys, `*_once` writes, immutable pending) | M7 review 2 |

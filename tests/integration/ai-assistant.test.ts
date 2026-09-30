@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { beforeAll, expect, it } from "vitest";
+import { beforeAll, expect, it, vi } from "vitest";
 import { runTurn, type TurnDeps } from "@/server/ai/assistant";
 import { SAFE_FALLBACK } from "@/server/ai/policy";
 import type { LlmProvider, LlmRequest, LlmResponse } from "@/server/ai/provider";
@@ -450,5 +450,28 @@ describeRest("false transactional claims are replaced by server-written facts (H
       "Good news: the Party Slide is available on Saturday, October 16.",
     );
     expect(res.reply).toBe("Good news: the Party Slide is available on Saturday, October 16.");
+  });
+});
+
+describeRest("guardrail telemetry carries codes, never prose (N4)", () => {
+  it("a violating reply with a name, email and address leaves none of them in telemetry or logs", async () => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    try {
+      const { actions } = await attack(
+        "hi",
+        [],
+        "Jane Doe (jane.doe@example.com) of 42 Elm Street: your booking is confirmed and paid.",
+      );
+      const last = actions.at(-1)!;
+      expect(last).toMatchObject({ tool_name: "reply_guardrail", status: "guardrail_violation" });
+      expect(last.error_code).toMatch(/^GROUNDING_[A-Z_]+$/);
+      const everything = JSON.stringify(actions) + logs.join("\n");
+      for (const pii of ["Jane", "jane.doe", "Elm Street"]) expect(everything).not.toContain(pii);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

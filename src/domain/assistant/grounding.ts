@@ -29,7 +29,8 @@ export interface GroundingInput {
 
 export interface GroundingResult {
   ok: boolean;
-  violations: string[];
+  /** Stable codes only (see GROUNDING_CODES) — never text from the reply. */
+  violations: GroundingCode[];
 }
 
 // ── money ────────────────────────────────────────────────────────────────────
@@ -313,8 +314,11 @@ function unknownSubjects(sentence: string, known: string[], businessName: string
 
 // ── clause helpers ───────────────────────────────────────────────────────────
 
-const NEGATION =
-  /\b(?:not|no|never|none|nothing|cannot|can't|cant|isn't|aren't|wasn't|won't|don't|doesn't|haven't|hasn't|hadn't|until|unless|once|if|whether|pending|yet to|to be confirmed|would need|will need|needs? to|let me|i can check|i'll check|want me to|like me to|shall i|should i)\b|n't\b/i;
+/** Words that negate the claim right after them ("not available", "nothing has been paid"). */
+const NEGATOR =
+  /^(?:not|no|never|nothing|none|nor|without|cannot|can't|cant|isn't|aren't|wasn't|weren't|won't|don't|doesn't|didn't|haven't|hasn't|hadn't|yet)$/;
+/** A condition opening the clause makes its claims hypothetical ("if it's available, …"). */
+const CONDITION = /\b(?:if|unless|whether|once|until|before|pending)\b/i;
 
 function clauseAt(sentence: string, index: number): { text: string; offset: number } {
   // Not ":" — times ("12:00") would split a clause.
@@ -331,9 +335,17 @@ function clauseAt(sentence: string, index: number): { text: string; offset: numb
   return { text: sentence.slice(start, end), offset: index - start };
 }
 
+/**
+ * Negated or hypothetical — decided LOCALLY: a negator among the three words right before the
+ * claim, or a condition opening its clause. A leading "No worries" or "No problem" several words
+ * earlier negates nothing.
+ */
 function negated(sentence: string, index: number): boolean {
   const { text, offset } = clauseAt(sentence, index);
-  return NEGATION.test(text.slice(0, offset + 1));
+  const before = text.slice(0, offset);
+  if (CONDITION.test(before)) return true;
+  const words = before.toLowerCase().match(/[a-z']+/g) ?? [];
+  return words.slice(-3).some((w) => NEGATOR.test(w) || w.endsWith("n't"));
 }
 
 function sentencesOf(text: string): string[] {
@@ -343,22 +355,91 @@ function sentencesOf(text: string): string[] {
     .filter(Boolean);
 }
 
+// ── subjects: times, quantities and quote numbers named in a sentence ────────
+
+/** Clock times as minutes after midnight: "20:00", "8 PM", "8:30pm", "noon", "midnight". */
+function timeMentions(text: string): number[] {
+  const out: number[] = [];
+  for (const m of text.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])/gi)) {
+    let h = Number(m[1]) % 12;
+    if ((m[3] ?? "").toLowerCase().startsWith("p")) h += 12;
+    out.push(h * 60 + Number(m[2] ?? 0));
+  }
+  for (const m of text.matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*(?:a\.?m|p\.?m))/gi)) {
+    out.push(Number(m[1]) * 60 + Number(m[2]));
+  }
+  if (/\bnoon\b/i.test(text)) out.push(12 * 60);
+  if (/\bmidnight\b/i.test(text)) out.push(0);
+  return out;
+}
+
+const minutesOf = (hhmm: string | undefined) => {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm ?? "");
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+
+function withinWindow(t: number, start: number, end: number): boolean {
+  return end > start ? t >= start && t <= end : t >= start || t <= end;
+}
+
+/** Quantities of the item itself ("500 units", "3 of them", "quantity 2"), not guest counts. */
+function quantityMentions(text: string): number[] {
+  const out: number[] = [];
+  for (const m of text.matchAll(
+    /\b(\d{1,6})\s*(?:units?|of them|pieces?|pcs|items?|sets?|copies|×|x)(?![a-z])/gi,
+  )) {
+    out.push(Number(m[1]));
+  }
+  for (const m of text.matchAll(/\b(?:quantity|qty)\s*(?:of\s*)?:?\s*(\d{1,6})\b/gi)) {
+    out.push(Number(m[1]));
+  }
+  return out;
+}
+
+const QUOTE_NUMBER = /\b[A-Z][A-Z0-9]{0,7}-\d{1,9}\b/g;
+
 // ── claim patterns ───────────────────────────────────────────────────────────
 
+/** Positive availability wording (bare "available" included: "Party Slide: available Saturday"). */
 const AVAILABLE_CLAIM =
-  /\b(?:(?:is|are|'s|'re|be|remains?|looks?|shows? as)\s+(?:still\s+|currently\s+|definitely\s+|totally\s+|fully\s+|now\s+)?(?:available|open|in stock|bookable)|availability (?:is|looks) (?:good|fine|confirmed|clear|open|great)|(?:we|i) (?:have|got|can get) (?:it|them|one|that|this|those|these) (?:for|on|available)|(?:have|has) (?:it|them|one|that) available|in stock|(?:that date|the date|your date|that day|that time) (?:works|is open|is free))\b/gi;
+  /\b(?:available|in stock|bookable|(?:is|are|'s|'re|remains?|looks?)\s+(?:still\s+|currently\s+|now\s+)?open(?!\s+(?:the|a|an|your|this|that))|availability (?:is|looks) (?:good|fine|confirmed|clear|open|great)|(?:we|i) (?:have|got|can get) (?:it|them|one|that|this|those|these) (?:for|on)|(?:that date|the date|your date|that day|that time) (?:works|is open|is free))\b/gi;
+/** "Options/sizes available" describes the catalog, not a date — unless a date/time/quantity is named. */
+const CATALOG_AVAILABLE =
+  /\b(?:options?|products?|rentals?|items?|choices?|sizes?|colou?rs?|variants?|add-ons?|models?|themes?)\s+(?:\w+\s+){0,2}$/i;
 const GUARANTEE_CLAIM =
   /\b(?:guarantee[ds]?|guaranteeing|promise[ds]?|100% (?:available|sure)|definitely yours)\b/gi;
 const BOOKED_CLAIM =
   /\b(?:(?:is|are|'s|'re|been|be|now|all|got|get)\s+(?:now\s+|officially\s+|fully\s+|already\s+)?(?:booked|confirmed|reserved|secured|locked in|finali[sz]ed|all set)|you(?:'re| are) (?:all )?set|(?:i|we)(?:'ve| have)?\s+(?:booked|reserved|secured|locked in|locked)|(?:i|we)(?:'ve| have)? confirmed (?:your|the) (?:booking|reservation|date|event|rental|order)|(?:booking|reservation|order|rental) (?:is |has been )?(?:complete|completed|done|confirmed|finali[sz]ed|secured|locked)|(?:date|slot|spot|event) (?:is |has been )(?:reserved|secured|saved|locked|booked|confirmed)|reserved for you|it'?s (?:all )?yours|(?:booked|reserved|secured) (?:for|on|it|them|everything))\b/gi;
 const HOLD_CLAIM =
-  /\b(?:(?:is|are|being|been|now|temporarily)\s+(?:temporarily\s+)?(?:held|on hold)|holding (?:it|them|the items|your|everything)|placed (?:a|the) hold|hold (?:is|has been|was) placed|held for (?:you|\d+))\b/gi;
+  /\b(?:(?:is|are|being|been|now|temporarily)\s+(?:temporarily\s+)?(?:held|on hold)|holding (?:it|them|the items|your|everything|the inventory)|placed (?:a|the) hold|hold (?:is|has been|was) placed|held for (?:you|\d+)|held until)\b/gi;
 const DELIVERY_CLAIM =
   /\b(?:(?:we|i|they)\s+(?:can |will |do |'ll )?deliver\b(?!y)|deliver(?:y|ing)? (?:to|at) (?:your|that|the|this) (?:address|area|location|place|home|park|venue)|(?:in|within|inside) (?:our|the|their) (?:service|delivery) (?:area|zone|radius)|delivery is (?:available|possible|fine|no problem)|(?:we|they) (?:serve|cover) (?:your|that|the)|(?:your|that|the) (?:address|area|zip|location) is (?:covered|served|serviceable|in range))/gi;
 const TAX_CLAIM =
   /\b(?:tax(?:es)? (?:is |are )?(?:already )?(?:included|includes|in there|built in|covered|waived|zero)|including (?:all )?tax(?:es)?|tax(?:es)? inclusive|tax[- ]free|(?:no|without) (?:sales )?tax(?:es)?)\b/gi;
 const PAYMENT_CLAIM =
   /\b(?:paid|payment (?:is |has been |was )?(?:received|complete|completed|processed|made|taken|confirmed|successful|done)|charged (?:your|the) card|card (?:has been|was|is) charged|(?:you(?:'ve| have)|you were) (?:been )?(?:charged|billed)|deposit (?:has been |was |is )?(?:received|taken|collected)|prepaid)\b/gi;
+
+/**
+ * Stable violation codes. Telemetry and logs carry ONLY these — never the reply's prose, which can
+ * contain names, emails or addresses.
+ */
+export const GROUNDING_CODES = [
+  "GROUNDING_PAYMENT_UNSUPPORTED",
+  "GROUNDING_GUARANTEE_UNSUPPORTED",
+  "GROUNDING_DEPOSIT_UNSUPPORTED",
+  "GROUNDING_CURRENCY_MISMATCH",
+  "GROUNDING_SUBJECT_UNKNOWN",
+  "GROUNDING_AMOUNT_UNSUPPORTED",
+  "GROUNDING_AMOUNT_ROLE_MISMATCH",
+  "GROUNDING_AVAILABILITY_UNSUPPORTED",
+  "GROUNDING_AVAILABILITY_SCOPE_MISMATCH",
+  "GROUNDING_QUOTE_UNKNOWN",
+  "GROUNDING_BOOKING_STATUS_UNSUPPORTED",
+  "GROUNDING_HOLD_UNSUPPORTED",
+  "GROUNDING_DELIVERY_UNSUPPORTED",
+  "GROUNDING_TAX_UNSUPPORTED",
+] as const;
+export type GroundingCode = (typeof GROUNDING_CODES)[number];
 
 // ── evidence selection ───────────────────────────────────────────────────────
 
@@ -415,35 +496,60 @@ function catalogAmounts(input: GroundingInput, products: string[]) {
     .flatMap((e) => e.amounts.map((a) => ({ ...a, currency: e.currency })));
 }
 
+/** A hold's server message is trustworthy only while the hold itself is live and long enough. */
+function liveHold(b: EvidenceOf<"booking">, now: Date): boolean {
+  if (b.status !== "hold_placed" && b.status !== "holding") return false;
+  if (!b.holdExpiresAt) return false;
+  const remaining = (Date.parse(b.holdExpiresAt) - now.getTime()) / 60_000;
+  if (!(remaining > 0)) return false;
+  const stated = /\bfor (\d+) minutes?\b/i.exec(b.message);
+  return !stated || Number(stated[1]) <= Math.ceil(remaining) + 1;
+}
+
 // ── the check ────────────────────────────────────────────────────────────────
 
 export function checkGrounding(input: GroundingInput): GroundingResult {
+  // Exempt verbatim: the fixed manual-review sentence, and typed booking messages whose state is
+  // still true now (a refusal/confirmation as recorded; a hold only while it is actually live).
   const exempt = [
     ...(input.exemptSentences ?? []),
-    ...fresh(input, "booking").map((b) => b.message),
+    ...fresh(input, "booking")
+      .filter((b) => b.status === "refused" || b.status === "confirmed" || liveHold(b, input.now))
+      .map((b) => b.message),
   ].filter((s) => s.length > 0);
   // Typographic apostrophes and quotes behave like plain ones ("you’re booked").
-  let text = input.reply.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+  let text = input.reply.replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
   for (const s of exempt.sort((a, b) => b.length - a.length)) text = text.split(s).join(" ");
 
-  const violations: string[] = [];
-  const flag = (what: string, sentence: string) => {
-    violations.push(`${what}: "${sentence.slice(0, 80)}"`);
+  const violations = new Set<GroundingCode>();
+  const flag = (code: GroundingCode) => {
+    violations.add(code);
   };
+  const knownQuotes = new Set(
+    fresh(input, "quote")
+      .map((q) => q.quoteNumber)
+      .concat(fresh(input, "booking").map((b) => b.quoteNumber)),
+  );
 
   for (const sentence of sentencesOf(text)) {
     const question = sentence.endsWith("?");
     const products = productsNamed(sentence, input.knownProducts);
     const dates = dateMentions(sentence);
+    const times = timeMentions(sentence);
+    const quantities = quantityMentions(sentence);
+    const quoteNumbers = [...sentence.matchAll(QUOTE_NUMBER)].map((m) => m[0]);
     const unknown = unknownSubjects(sentence, input.knownProducts, input.businessName);
+
+    // A quote number the conversation never had is an invented reference.
+    if (quoteNumbers.some((n) => !knownQuotes.has(n))) flag("GROUNDING_QUOTE_UNKNOWN");
 
     // Payments: never in M7.
     for (const m of sentence.matchAll(PAYMENT_CLAIM)) {
-      if (!negated(sentence, m.index)) flag("payment claim", sentence);
+      if (!negated(sentence, m.index)) flag("GROUNDING_PAYMENT_UNSUPPORTED");
     }
     // Guarantees: availability is never guaranteed before the team confirms.
     for (const m of sentence.matchAll(GUARANTEE_CLAIM)) {
-      if (!negated(sentence, m.index)) flag("guarantee", sentence);
+      if (!negated(sentence, m.index)) flag("GROUNDING_GUARANTEE_UNSUPPORTED");
     }
 
     // Amounts (questions too: "Would $300 work?" still states a number).
@@ -456,25 +562,29 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       const { text: clause, offset } = clauseAt(sentence, a.index);
       const role = roleOf(clause, offset);
       if (role === "deposit") {
-        flag("deposit amount", sentence);
+        flag("GROUNDING_DEPOSIT_UNSUPPORTED");
         continue;
       }
       if (a.currency && a.currency !== input.currency.toUpperCase()) {
-        flag(`amount in ${a.currency}`, sentence);
+        flag("GROUNDING_CURRENCY_MISMATCH");
         continue;
       }
       if (unknown.length) {
-        flag(`amount for an unrecognised subject (${unknown[0] ?? ""})`, sentence);
+        flag("GROUNDING_SUBJECT_UNKNOWN");
         continue;
       }
-      const pool =
+      const all =
         role === "starting_price"
           ? catalogAmounts(input, products)
-          : pricedAmounts(input, products, dates).filter(
-              (x) => role === "any" || x.role === role || (role === "total" && x.role === "total"),
-            );
+          : pricedAmounts(input, products, dates);
+      const pool =
+        role === "any" || role === "starting_price" ? all : all.filter((x) => x.role === role);
       if (!pool.some((x) => x.cents === a.cents)) {
-        flag(`unsupported ${role === "any" ? "" : `${role} `}amount ${a.text.trim()}`, sentence);
+        flag(
+          all.some((x) => x.cents === a.cents)
+            ? "GROUNDING_AMOUNT_ROLE_MISMATCH"
+            : "GROUNDING_AMOUNT_UNSUPPORTED",
+        );
       }
     }
 
@@ -482,10 +592,20 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
 
     for (const m of sentence.matchAll(AVAILABLE_CLAIM)) {
       if (negated(sentence, m.index)) continue;
+      const { text: clause, offset } = clauseAt(sentence, m.index);
+      const specific = dates.length > 0 || times.length > 0 || quantities.length > 0;
+      if (
+        /^available$/i.test(m[0]) &&
+        !specific &&
+        CATALOG_AVAILABLE.test(clause.slice(0, offset))
+      ) {
+        continue; // "options available": a catalog statement, not an availability claim
+      }
       if (unknown.length) {
-        flag(`availability for an unrecognised subject (${unknown[0] ?? ""})`, sentence);
+        flag("GROUNDING_SUBJECT_UNKNOWN");
         break;
       }
+      // The COMPLETE subject must match the latest result: product, date, time window, quantity.
       const subjects = products.length ? products : [null];
       const ok = subjects.every((p) => {
         const e = latest(
@@ -493,39 +613,55 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
           "availability",
           (x) =>
             (p === null || norm(x.productName) === norm(p)) &&
-            dates.every((d) => dateMatches(d, x.dates)),
+            dates.every((d) => dateMatches(d, x.dates)) &&
+            times.every((t) => {
+              const start = minutesOf(x.startLocal);
+              const end = minutesOf(x.endLocal);
+              return start !== null && end !== null && withinWindow(t, start, end);
+            }),
         );
-        return e?.result === "available";
+        return e?.result === "available" && quantities.every((q) => q <= e.quantity);
       });
       if (!ok) {
-        flag("availability claim without a current available result", sentence);
+        const anyForProduct = fresh(input, "availability").some(
+          (x) => products.length === 0 || products.some((p) => norm(p) === norm(x.productName)),
+        );
+        flag(
+          anyForProduct
+            ? "GROUNDING_AVAILABILITY_SCOPE_MISMATCH"
+            : "GROUNDING_AVAILABILITY_UNSUPPORTED",
+        );
         break;
       }
     }
 
+    // Booking and hold claims are about ONE quote: the one named, or the latest one.
+    const bookingFor = () =>
+      latest(
+        input,
+        "booking",
+        (b) => quoteNumbers.length === 0 || quoteNumbers.includes(b.quoteNumber),
+      );
+
     for (const m of sentence.matchAll(BOOKED_CLAIM)) {
       if (negated(sentence, m.index)) continue;
-      const b = latest(input, "booking");
-      if (b?.status !== "confirmed") {
-        flag("booking/reservation claim without a confirmed booking", sentence);
+      if (bookingFor()?.status !== "confirmed") {
+        flag("GROUNDING_BOOKING_STATUS_UNSUPPORTED");
         break;
       }
     }
 
     for (const m of sentence.matchAll(HOLD_CLAIM)) {
       if (negated(sentence, m.index)) continue;
-      const b = latest(input, "booking");
-      const active =
-        b &&
-        (b.status === "hold_placed" || b.status === "holding") &&
-        b.holdExpiresAt !== null &&
-        Date.parse(b.holdExpiresAt) > input.now.getTime();
+      const b = bookingFor();
       const minutes = /\bfor (\d+) minutes?\b/i.exec(sentence);
-      const remaining = active
-        ? (Date.parse(b.holdExpiresAt ?? "") - input.now.getTime()) / 60_000
+      const remaining = b?.holdExpiresAt
+        ? (Date.parse(b.holdExpiresAt) - input.now.getTime()) / 60_000
         : 0;
-      if (!active || (minutes && Number(minutes[1]) > Math.ceil(remaining) + 1)) {
-        flag("hold claim without a current hold", sentence);
+      const live =
+        b !== null && (b.status === "hold_placed" || b.status === "holding") && remaining > 0;
+      if (!live || (minutes && Number(minutes[1]) > Math.ceil(remaining) + 1)) {
+        flag("GROUNDING_HOLD_UNSUPPORTED");
         break;
       }
     }
@@ -538,7 +674,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
         area?.status === "serviceable" ||
         (area === null && price?.status === "priced" && price.delivery === "priced");
       if (!ok) {
-        flag("delivery/service-area claim without a current serviceable result", sentence);
+        flag("GROUNDING_DELIVERY_UNSUPPORTED");
         break;
       }
     }
@@ -553,12 +689,12 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       const taxCents = amountsOf.filter((a) => a.role === "tax").reduce((s, a) => s + a.cents, 0);
       const ok = (price ?? quote) !== null && (saysNoTax ? taxCents === 0 : true);
       if (!ok) {
-        flag("tax claim without a current priced result", sentence);
+        flag("GROUNDING_TAX_UNSUPPORTED");
         break;
       }
     }
   }
-  return { ok: violations.length === 0, violations };
+  return { ok: violations.size === 0, violations: [...violations] };
 }
 
 // ── server-written facts (used when the model's prose cannot be trusted) ─────

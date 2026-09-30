@@ -135,8 +135,13 @@ export async function handleAssistantPost(request: Request): Promise<Response> {
 
   const correlationId = (await getRequestId()) ?? crypto.randomUUID();
   const jar = await cookies();
-  const existing = jar.get(AI_SESSION_COOKIE)?.value;
-  const sessionToken = isWellFormedSessionToken(existing) ? existing : generateSessionToken();
+  // The session must exist BEFORE a message can change anything (ADR 0017 §11): it is issued by
+  // storefront page views, the bootstrap GET and New Chat — never by this mutation-capable POST,
+  // whose response (and Set-Cookie) could be lost after a quote was created.
+  const sessionToken = jar.get(AI_SESSION_COOKIE)?.value;
+  if (!isWellFormedSessionToken(sessionToken)) {
+    return fail(409, "SESSION_REQUIRED", "Please reload the page to start the assistant.");
+  }
   const perSession = await limited(
     "assistantSession",
     `${tenant.organizationId}:${await hashSessionToken(sessionToken)}`,
@@ -183,23 +188,40 @@ export async function handleAssistantPost(request: Request): Promise<Response> {
     );
   }
   const status = result.errorCode === "IN_PROGRESS" || result.errorCode === "BUSY" ? 409 : 200;
-  const response = NextResponse.json({ ...result, correlationId }, { status, headers: noStore });
-  if (sessionToken !== existing) {
+  return NextResponse.json({ ...result, correlationId }, { status, headers: noStore });
+}
+
+/**
+ * GET /api/assistant — session bootstrap: issues the opaque session cookie if this browser has
+ * none. It runs nothing, so a lost response costs nothing; the POST that follows reads it.
+ */
+export async function handleAssistantGet(): Promise<Response> {
+  const config = getAiConfig();
+  const tenant = await getRequestTenant();
+  if (!config || !tenant) return fail(404, "NOT_FOUND", "Not found.");
+  const existing = (await cookies()).get(AI_SESSION_COOKIE)?.value;
+  const response = new NextResponse(null, { status: 204, headers: noStore });
+  if (!isWellFormedSessionToken(existing)) {
     response.cookies.set(
       AI_SESSION_COOKIE,
-      sessionToken,
+      generateSessionToken(),
       sessionCookieOptions(process.env.NODE_ENV === "production"),
     );
   }
   return response;
 }
 
-/** DELETE /api/assistant — "New chat": forget this browser's conversation cookie. */
+/**
+ * DELETE /api/assistant — "New chat": replaces this browser's session with a fresh one. The old
+ * conversation is not reachable from the browser any more; a reply still in flight for it cannot
+ * bring it back (POST responses never set the session cookie).
+ */
 export function handleAssistantDelete(): Response {
   const response = new NextResponse(null, { status: 204, headers: noStore });
-  response.cookies.set(AI_SESSION_COOKIE, "", {
-    ...sessionCookieOptions(process.env.NODE_ENV === "production"),
-    maxAge: 0,
-  });
+  response.cookies.set(
+    AI_SESSION_COOKIE,
+    generateSessionToken(),
+    sessionCookieOptions(process.env.NODE_ENV === "production"),
+  );
   return response;
 }

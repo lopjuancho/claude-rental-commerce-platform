@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import { expect, type Page, test } from "@playwright/test";
 import pg from "pg";
@@ -198,19 +198,27 @@ test("mobile: the assistant is a bottom sheet that fits the screen and closes wi
   await expect(page.getByRole("button", { name: "Ask our assistant" })).toBeFocused();
 });
 
-test("the API accepts only a JSON message and page context from the browser", async ({
+test("the API accepts only a JSON message and page context; the session exists before any message", async ({
   request,
 }) => {
   const ip = testIp();
+  const headers = { host: `acme.localhost:${port}`, "cf-connecting-ip": ip };
   const post = (data: string, contentType = "application/json") =>
     request.post(`http://localhost:${port}/api/assistant`, {
-      headers: {
-        host: `acme.localhost:${port}`,
-        "content-type": contentType,
-        "cf-connecting-ip": ip,
-      },
+      headers: { ...headers, "content-type": contentType },
       data,
     });
+  // H2-C: a mutation-capable POST never creates the session (its Set-Cookie could be lost after a
+  // quote was made). Without one it is refused before anything runs.
+  const noSession = await post(JSON.stringify({ message: "Do you have a castle?" }));
+  expect(noSession.status()).toBe(409);
+  expect(((await noSession.json()) as { errorCode: string }).errorCode).toBe("SESSION_REQUIRED");
+  expect(noSession.headers()["set-cookie"] ?? "").not.toMatch(/rc_ai=/);
+  // The bootstrap GET (and every storefront page view) issues it; it runs nothing.
+  const boot = await request.get(`http://localhost:${port}/api/assistant`, { headers });
+  expect(boot.status()).toBe(204);
+  expect(boot.headers()["set-cookie"]).toMatch(/rc_ai=[A-Za-z0-9_-]{43}; .*HttpOnly/i);
+
   expect((await post("message=hi", "application/x-www-form-urlencoded")).status()).toBe(415);
   expect((await post(JSON.stringify({ message: "x".repeat(9000) }))).status()).toBe(413);
   expect((await post(JSON.stringify({ message: "x".repeat(1001) }))).status()).toBe(400);
@@ -222,7 +230,7 @@ test("the API accepts only a JSON message and page context from the browser", as
   const res = await post(JSON.stringify({ message: "Do you have a castle?" }));
   expect(res.status()).toBe(200);
   expect(res.headers()["cache-control"]).toBe("no-store");
-  expect(res.headers()["set-cookie"]).toMatch(/rc_ai=[A-Za-z0-9_-]{43}; .*HttpOnly/i);
+  expect(res.headers()["set-cookie"] ?? "").not.toMatch(/rc_ai=/);
   const body = (await res.json()) as { status: string; reply: string; correlationId: string };
   expect(body.status).toBe("ok");
   expect(body.correlationId).toBeTruthy();
@@ -232,6 +240,127 @@ test("the API accepts only a JSON message and page context from the browser", as
     data: JSON.stringify({ message: "hi" }),
   });
   expect(none.status()).toBe(404);
+});
+
+const sessionHash = (token: string) => createHash("sha256").update(`ai:${token}`).digest("hex");
+
+test("New Chat while a reply is in flight: the old reply and session never come back (N1)", async ({
+  page,
+  context,
+}) => {
+  test.skip(!process.env.DATABASE_URL, "needs DATABASE_URL to verify the database");
+  const aiCookie = async () => (await context.cookies()).find((c) => c.name === "rc_ai")?.value;
+  await page.goto(`${ACME}/`);
+  const before = await aiCookie();
+  expect(before).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  await openAssistant(page);
+
+  // The POST reaches the server now; the browser only gets the answer later.
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  let lateSetCookie: string | undefined;
+  let delivered = false;
+  await page.route("**/api/assistant", async (route) => {
+    const req = route.request();
+    if (req.method() !== "POST") return route.continue();
+    // Forwarded from Node, which cannot resolve *.localhost: same request, tenant Host header.
+    const response = await route.fetch({
+      url: req.url().replace("//acme.localhost:", "//127.0.0.1:"),
+      headers: { ...(await req.allHeaders()), host: `acme.localhost:${port}` },
+    });
+    lateSetCookie = response.headers()["set-cookie"];
+    await held;
+    await route.fulfill({ response });
+    delivered = true;
+  });
+  await panel(page).getByLabel("Message the assistant").fill("Do you have a water slide?");
+  await panel(page).getByRole("button", { name: "Send" }).click();
+  await expect(panel(page).getByText("Checking…")).toBeVisible();
+
+  await panel(page).getByRole("button", { name: "New chat" }).click();
+  await expect.poll(aiCookie).not.toBe(before);
+  const after = await aiCookie();
+  release();
+  await expect.poll(() => delivered).toBe(true);
+  await page.waitForTimeout(300);
+
+  // The old reply was dropped; the chat is new and empty; the old session did not come back.
+  await expect(panel(page).locator("p", { hasText: /^Assistant: / })).toHaveCount(0);
+  await expect(panel(page).getByText("Do you have a water slide?")).toHaveCount(0);
+  expect(lateSetCookie ?? "").not.toMatch(/rc_ai=/);
+  expect(await aiCookie()).toBe(after);
+  await page.unroute("**/api/assistant");
+
+  // The next message uses the new session.
+  await ask(page, "Do you have a castle?");
+  const db = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await db.connect();
+  try {
+    const messages = async (token: string) =>
+      (
+        await db.query<{ content: string }>(
+          `select m.content from public.ai_messages m join public.ai_conversations c on c.id = m.conversation_id
+           where c.session_hash = $1 and m.role = 'user' order by m.seq`,
+          [sessionHash(token)],
+        )
+      ).rows.map((r) => r.content);
+    expect(await messages(after!)).toEqual(["Do you have a castle?"]);
+    expect(await messages(before!)).toEqual(["Do you have a water slide?"]);
+  } finally {
+    await db.end();
+  }
+});
+
+test("the first mutation-capable reply is lost: retrying the same message gives the same quote with a working link", async ({
+  page,
+  request,
+}) => {
+  test.skip(!process.env.DATABASE_URL, "needs DATABASE_URL to verify the database");
+  const ip = testIp();
+  const headers = { host: `acme.localhost:${port}`, "cf-connecting-ip": ip };
+  // The storefront page view issues the session (as in a browser).
+  const home = await request.get(`http://localhost:${port}/`, { headers });
+  expect(home.headers()["set-cookie"]).toMatch(/rc_ai=/);
+  const email = `lost-${randomUUID().slice(0, 8)}@example.test`;
+  const say = async (message: string, requestId = randomUUID().replace(/-/g, "")) =>
+    (await (
+      await request.post(`http://localhost:${port}/api/assistant`, {
+        headers: { ...headers, "content-type": "application/json" },
+        data: JSON.stringify({ message, requestId }),
+      })
+    ).json()) as {
+      status: string;
+      replayed?: boolean;
+      blocks: { type: string; url?: string | null; quoteNumber?: string }[];
+    };
+  await say("Do you have a water slide?");
+  await say(`Is it available on ${randomSaturday()} from 12:00 to 16:00?`);
+  await say(`My name is Robin and my email is ${email}`);
+  const requestId = randomUUID().replace(/-/g, "");
+  const first = await say("Please create my quote", requestId); // …this response is "lost"
+  expect(first.status).toBe("ok");
+  const retry = await say("Please create my quote", requestId);
+  expect(retry).toMatchObject({ status: "ok", replayed: true });
+  const card = retry.blocks.find((b) => b.type === "quote");
+  expect(card?.url).toMatch(/^\/q\/[A-Za-z0-9_-]{43}$/);
+  // The replayed link works and there is exactly one quote.
+  await page.goto(`${ACME}${card!.url!}`);
+  await expect(
+    page.getByRole("heading", { level: 1, name: new RegExp(card!.quoteNumber!) }),
+  ).toBeVisible();
+  const db = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await db.connect();
+  try {
+    const { rows } = await db.query<{ n: string }>(
+      "select count(*)::text n from public.quotes q join public.customers c on c.id = q.customer_id where c.email = $1",
+      [email],
+    );
+    expect(rows[0]!.n).toBe("1");
+  } finally {
+    await db.end();
+  }
 });
 
 /** A random future Saturday (reruns and parallel projects never compete for units). */
