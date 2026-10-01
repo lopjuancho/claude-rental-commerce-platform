@@ -17,6 +17,7 @@ import {
   reconcileSmokeBookings,
   modelCalls,
   removeSmokeAvailabilityBlock,
+  requestTerminality,
   storedTurn,
   countForCustomer,
   currentSessionToken,
@@ -25,6 +26,7 @@ import {
   quoteByLink,
   resolveOrganization,
 } from "../../scripts/ai-smoke-db.mjs";
+import { smokeExitCode } from "../../scripts/ai-smoke-checks.mjs";
 import { pgAiStore } from "./support/ai";
 import { makeProduct, rpc } from "./support/availability";
 import { admin, createOrg, pool, type TestOrg } from "./support/db";
@@ -345,33 +347,6 @@ describeRest(
       await setAllocations("released", "null");
     });
 
-    it("a booking committed while its response is still in flight is found and released on SIGTERM", async () => {
-      const q = await smokeQuote(false);
-      const client = await pool.connect();
-      try {
-        const cleanup = createSmokeCleanup(client, newTag());
-        cleanup.state.organizationId = orgA.id;
-        // Intent registered BEFORE the mutation is sent (the response will never be read).
-        cleanup.state.quoteIds.add(q.quoteId);
-        cleanup.state.customerEmails.add(q.email);
-        let committed = false;
-        cleanup.state.inFlight = q.commit().then(async () => {
-          committed = true;
-          await new Promise((r) => setTimeout(r, 300)); // the response is delayed
-        });
-        // SIGTERM: stop, let the in-flight request settle (bounded), reconcile by exact quote.
-        cleanup.state.stopping = true;
-        const state = await cleanup.run({ waitForInFlightMs: 10_000 });
-        expect(committed).toBe(true);
-        expect(state.bookingCleanup).toBe("succeeded (released; 1 cancelled now)");
-        expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
-        expect((await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations).toBe(0);
-        expect(cleanup.recovery()).toEqual([]); // recovery output only when not proven
-      } finally {
-        client.release();
-      }
-    });
-
     it("found through the smoke customer even when the quote id was never registered", async () => {
       const q = await smokeQuote(true);
       const client = await pool.connect();
@@ -397,7 +372,8 @@ describeRest(
       cleanup.state.organizationId = orgA.id;
       cleanup.state.quoteIds.add(q.quoteId);
       const state = await cleanup.run();
-      expect(state.bookingCleanup).toBe("succeeded (no booking request was committed)");
+      expect(state.bookingOutcome).toBe("reconciled_no_booking_terminal");
+      expect(state.bookingCleanup).toMatch(/^succeeded \(no booking request was committed/);
       expect(cleanup.recovery()).toEqual([]);
     });
 
@@ -471,6 +447,259 @@ describeRest(
       again.state.block = { id: randomUUID(), productId: p.productId };
       expect((await again.run()).blockCleanup).toBe("failed (not found)");
       expect(again.recovery().length).toBeGreaterThan(0);
+    });
+
+    /**
+     * A REAL assistant request on the server (runTurn → ai_turns journal). Its model call waits on
+     * `open()`; then, if `book`, the booking commits — i.e. LATE, after the smoke stopped waiting.
+     */
+    function serverRequest(q: Awaited<ReturnType<typeof smokeQuote>>, book: boolean) {
+      const session = generateSessionToken();
+      const requestKey = `smoke-${randomUUID()}`;
+      let open!: () => void;
+      const gate = new Promise<void>((r) => {
+        open = r;
+      });
+      let entered!: () => void;
+      const started = new Promise<void>((r) => {
+        entered = r;
+      });
+      const provider: LlmProvider = {
+        id: "plan",
+        model: "plan-test",
+        complete: async () => {
+          entered();
+          await gate;
+          if (book) await q.commit();
+          return { text: "Done.", toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+        },
+      };
+      const done = runTurn(
+        {
+          tenant: tenantOf(orgA),
+          sessionToken: session,
+          requestKey,
+          message: "Please request the booking.",
+          meta: { ip: "198.51.100.67" },
+          correlationId: `c-${randomUUID()}`,
+        },
+        turnDeps(provider),
+      );
+      return { session, requestKey, open, started, done };
+    }
+    function smokeCleanup(q: Awaited<ReturnType<typeof smokeQuote>>) {
+      const tag = newTag();
+      const cleanup = createSmokeCleanup(pool, tag);
+      cleanup.state.organizationId = orgA.id;
+      cleanup.state.quoteIds.add(q.quoteId);
+      cleanup.state.quoteNumbers.set(q.quoteId, q.quoteNumber);
+      cleanup.state.customerEmails.add(q.email);
+      return { tag, cleanup };
+    }
+    const exitCode = (s: { bookingCleanup: string; blockCleanup: string }, recovery: string[]) =>
+      smokeExitCode({
+        failedChecks: 0,
+        bookingCleanup: s.bookingCleanup,
+        blockCleanup: s.blockCleanup,
+        recovery,
+      });
+
+    it("CASE 1: wait timed out, no booking yet, the request commits LATE — never success before; recovery names it", async () => {
+      const q = await smokeQuote(false);
+      const s = serverRequest(q, true);
+      const { tag, cleanup } = smokeCleanup(q);
+      const h = cleanup.beginRequest(s.requestKey, s.session);
+      cleanup.state.inFlight = s.done.then(h.responded, h.failed);
+      await s.started; // the server is executing the request
+      cleanup.state.stopping = true; // SIGTERM
+      const first = await cleanup.run({ waitForInFlightMs: 200 });
+      expect(h.intent.state).toBe("wait_timed_out_unknown");
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBeNull(); // nothing committed YET…
+      expect(first.bookingOutcome).toBe("unresolved"); // …and still not "no booking committed"
+      expect(first.bookingCleanup).toMatch(/^unresolved/);
+      expect(first.unresolved.join(" ")).toMatch(/live lease/);
+      const recovery = cleanup.recovery();
+      expect(exitCode(first, recovery)).toBe(1);
+      const text = recovery.join("\n");
+      for (const id of [orgA.id, q.quoteId, q.quoteNumber, s.requestKey, tag])
+        expect(text).toContain(id);
+      expect(text).not.toContain(s.session);
+      expect(text).not.toMatch(/[0-9a-f]{64}|\/q\/|postgres:|service_role/);
+      // The request commits late; once the journal shows it terminal, cleanup completes.
+      s.open();
+      await s.done;
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("pending");
+      const second = await cleanup.run();
+      expect(h.intent.state).toBe("response_completed");
+      expect(second.bookingOutcome).toBe("reconciled_booking_cancelled");
+      expect(second.bookingCleanup).toBe("succeeded (released; 1 cancelled now)");
+      expect((await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations).toBe(0);
+      expect(cleanup.recovery()).toEqual([]);
+    });
+
+    it("CASE 2: the transport failed, the server commits later — unresolved until the journal is terminal", async () => {
+      const q = await smokeQuote(false);
+      const { cleanup } = smokeCleanup(q);
+      // (a) The connection failed before the server recorded anything: unknown, not "nothing".
+      const lost = cleanup.beginRequest(`smoke-${randomUUID()}`, generateSessionToken());
+      lost.failed();
+      const none = await cleanup.run();
+      expect(none.bookingOutcome).toBe("unresolved");
+      expect(none.unresolved.join(" ")).toMatch(/no turn recorded yet/);
+      expect(cleanup.recovery().join("\n")).toContain(lost.intent.requestId);
+      cleanup.state.requests.delete(lost.intent.requestId);
+      // (b) The connection failed while the server keeps executing; it commits afterwards.
+      const s = serverRequest(q, true);
+      const h = cleanup.beginRequest(s.requestKey, s.session);
+      h.failed();
+      await s.started;
+      const first = await cleanup.run();
+      expect(h.intent.state).toBe("transport_failed_unknown");
+      expect(first.bookingOutcome).toBe("unresolved");
+      expect(first.bookingCleanup).not.toMatch(/succeeded/);
+      s.open();
+      await s.done;
+      const second = await cleanup.run();
+      expect(second.bookingOutcome).toBe("reconciled_booking_cancelled");
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+    });
+
+    it("CASE 3: the request failed terminally before any booking (response lost) — a safe no-op", async () => {
+      const q = await smokeQuote(false);
+      const { cleanup } = smokeCleanup(q);
+      const session = generateSessionToken();
+      const requestKey = `smoke-${randomUUID()}`;
+      const h = cleanup.beginRequest(requestKey, session);
+      await runTurn(
+        {
+          tenant: tenantOf(orgA),
+          sessionToken: session,
+          requestKey,
+          message: "Please request the booking.",
+          meta: { ip: "198.51.100.68" },
+          correlationId: `c-${randomUUID()}`,
+        },
+        turnDeps(fail),
+      );
+      h.failed(); // the smoke never saw the response
+      expect((await storedTurn(pool, orgA.id, session, requestKey))?.status).toBe("failed");
+      const state = await cleanup.run();
+      expect(state.bookingOutcome).toBe("reconciled_no_booking_terminal");
+      expect(state.bookingCleanup).toMatch(/^succeeded \(no booking request was committed/);
+      expect(cleanup.recovery()).toEqual([]);
+    });
+
+    it("CASE 4: a definitive answer without a booking — success", async () => {
+      const q = await smokeQuote(false);
+      const { cleanup } = smokeCleanup(q);
+      const session = generateSessionToken();
+      const requestKey = `smoke-${randomUUID()}`;
+      const h = cleanup.beginRequest(requestKey, session);
+      await runTurn(
+        {
+          tenant: tenantOf(orgA),
+          sessionToken: session,
+          requestKey,
+          message: "Please request the booking.",
+          meta: { ip: "198.51.100.69" },
+          correlationId: `c-${randomUUID()}`,
+        },
+        turnDeps(sayModel("I can't request that booking yet.")),
+      );
+      h.responded();
+      const state = await cleanup.run();
+      expect(state.bookingOutcome).toBe("reconciled_no_booking_terminal");
+      expect(exitCode(state, cleanup.recovery())).toBe(0);
+    });
+
+    it("CASE 5: a committed pending booking of a finished request — cancelled, released, success", async () => {
+      const q = await smokeQuote(false);
+      const s = serverRequest(q, true);
+      const { cleanup } = smokeCleanup(q);
+      const h = cleanup.beginRequest(s.requestKey, s.session);
+      cleanup.state.inFlight = s.done.then(h.responded, h.failed);
+      s.open();
+      cleanup.state.stopping = true;
+      const state = await cleanup.run({ waitForInFlightMs: 10_000 });
+      expect(h.intent.state).toBe("response_completed");
+      expect(state.bookingOutcome).toBe("reconciled_booking_cancelled");
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+      expect((await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations).toBe(0);
+      expect(exitCode(state, cleanup.recovery())).toBe(0);
+    });
+
+    it("an expired lease is terminal only when no business mutation is still 'started'", async () => {
+      const q = await smokeQuote(false);
+      const s = serverRequest(q, false);
+      await s.started;
+      const expireLease = () =>
+        admin(
+          `update public.ai_turns set lease_expires_at = now() - interval '5 minutes' where request_key = $1`,
+          [s.requestKey],
+        );
+      expect(
+        await requestTerminality(pool, orgA.id, s.session, s.requestKey, "wait_timed_out_unknown"),
+      ).toMatchObject({ terminal: false });
+      await admin(
+        `insert into public.ai_mutations (organization_id, conversation_id, turn_id, attempt, tool_name, mutation_key, status)
+         select t.organization_id, t.conversation_id, t.id, t.attempt, 'request_booking', repeat('b', 64), 'started'
+         from public.ai_turns t where t.request_key = $1`,
+        [s.requestKey],
+      );
+      await expireLease();
+      const started = await requestTerminality(
+        pool,
+        orgA.id,
+        s.session,
+        s.requestKey,
+        "wait_timed_out_unknown",
+      );
+      expect(started).toMatchObject({ terminal: false });
+      expect(started.reason).toMatch(/mutation is still in progress/);
+      await admin(
+        `update public.ai_mutations set status = 'failed' where turn_id = (select id from public.ai_turns where request_key = $1)`,
+        [s.requestKey],
+      );
+      expect(
+        await requestTerminality(pool, orgA.id, s.session, s.requestKey, "wait_timed_out_unknown"),
+      ).toMatchObject({ terminal: true });
+      // Another tenant's scope never sees the turn (and so never calls it terminal).
+      expect(
+        await requestTerminality(pool, orgB.id, s.session, s.requestKey, "wait_timed_out_unknown"),
+      ).toMatchObject({ terminal: false });
+      s.open();
+      await s.done;
+    });
+
+    it("recovery after a database failure still names the exact known identifiers, and no secret", async () => {
+      const q = await smokeQuote(false);
+      const tag = newTag();
+      const broken = { query: () => Promise.reject(new Error("connection refused")) };
+      const cleanup = createSmokeCleanup(broken, tag);
+      cleanup.state.organizationId = orgA.id;
+      cleanup.state.quoteIds.add(q.quoteId);
+      cleanup.state.quoteNumbers.set(q.quoteId, q.quoteNumber);
+      const session = generateSessionToken();
+      const h = cleanup.beginRequest("smoke-request-1", session);
+      h.failed();
+      cleanup.state.block = { id: randomUUID(), productId: randomUUID() };
+      const state = await cleanup.run();
+      expect(state.bookingCleanup).toBe("failed (database error during reconciliation)");
+      expect(state.blockCleanup).toBe("failed (database error)");
+      const text = cleanup.recovery().join("\n");
+      for (const id of [
+        orgA.id,
+        q.quoteId,
+        q.quoteNumber,
+        "smoke-request-1",
+        tag,
+        state.block!.id,
+        state.block!.productId,
+      ])
+        expect(text).toContain(id);
+      expect(text).not.toContain(session);
+      expect(text).not.toMatch(/[0-9a-f]{64}|\/q\/|connection refused/);
+      expect(exitCode(state, cleanup.recovery())).toBe(1);
     });
 
     it("storedTurn / conversationCounters: scoped, hash-free, and unchanged by a replay", async () => {

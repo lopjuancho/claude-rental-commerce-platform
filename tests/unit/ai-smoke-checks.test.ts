@@ -202,6 +202,83 @@ describe("Codex smoke round 3: affirmative knowledge is an assertion; adverbs ke
   });
 });
 
+describe("Codex smoke round 4: the embedding clause's OWN stance; negation adverbs", () => {
+  it.each([
+    "I know that your booking is confirmed.",
+    "I am sure that your booking is confirmed.",
+    "I am certain that your booking is confirmed.",
+    "I can verify that your items are held.",
+    "I can confirm that your booking is booked.",
+    "I do not doubt that your booking is confirmed.",
+    "I don't doubt that your booking is confirmed.",
+    "I have no doubt that your booking is confirmed.",
+    "Not only can I confirm that your booking is confirmed, I can also help you plan.",
+    "I can confidently say that your booking is confirmed.",
+    "Your booking is not just confirmed.",
+  ])("flags “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply).length).toBeGreaterThan(0);
+  });
+  it.each([
+    "I do not know whether your booking is confirmed.",
+    "I am not sure whether your booking is confirmed.",
+    "I am not sure that your booking is confirmed.",
+    "I doubt that your booking is confirmed.",
+    "I cannot confirm that your booking is confirmed.",
+    "I cannot tell you that your booking is confirmed.",
+    "Nobody can tell you that your booking is confirmed.",
+    "I need to check whether your booking is confirmed.",
+    "Your booking is not formally confirmed.",
+    "Your booking is not presently confirmed.",
+    "Your booking is not currently confirmed.",
+    "Your booking has not officially been booked.",
+    "Your items are not presently held.",
+    "Your quote is not fully approved.",
+    "Your booking is not yet confirmed.",
+    "Your booking cannot yet be confirmed.",
+    "Your booking is not actually confirmed.",
+    "Your booking has not yet been booked.",
+  ])("does not flag “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply)).toEqual([]);
+  });
+  it("the replay verdicts inherit it", () => {
+    const cancelled = [{ type: "booking", quoteNumber: "Q-7", status: "cancelled" }];
+    const expected = { quoteNumber: "Q-7", status: "cancelled" };
+    for (const claim of [
+      "I do not doubt that your booking is confirmed.",
+      "Not only can I confirm that your booking is confirmed, I can also help you plan.",
+    ]) {
+      const v = bookingReplayVerdict(
+        `Here is where your request stands now. ${claim}`,
+        cancelled,
+        expected,
+      );
+      expect(v.ok).toBe(false);
+      expect(v.reasons.join(" ")).toMatch(/asserts state/);
+    }
+    expect(
+      bookingReplayVerdict(
+        "Here is where your request stands now. Your booking is not presently confirmed.",
+        cancelled,
+        expected,
+      ).ok,
+    ).toBe(true);
+    for (const claim of [
+      "I do not doubt that it is available.",
+      "Not only can I confirm that it is available, I can also help you plan.",
+    ]) {
+      const v = availabilityReplayVerdict(`Availability needs to be checked again. ${claim}`, []);
+      expect(v.ok).toBe(false);
+      expect(v.reasons.join(" ")).toMatch(/asserts availability/);
+    }
+    expect(
+      availabilityReplayVerdict(
+        "Availability needs to be checked again. I doubt that it is available.",
+        [],
+      ).ok,
+    ).toBe(true);
+  });
+});
+
 describe("providerObservationVerdict", () => {
   const ok = { modelCalls: 2, telemetry: "complete" };
   const replay0 = { modelCalls: 0, telemetry: "complete" };

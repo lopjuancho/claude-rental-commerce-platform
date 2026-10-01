@@ -37,6 +37,25 @@ const CHAIN_ADVERBS = new Set(
 );
 const NEGATORS = new Set(["not", "never", "no", "cannot"]);
 const isNegator = (t) => NEGATORS.has(t) || /n't$/.test(t);
+/**
+ * Focus particles: "not only / not just / not merely …" is an EMPHASIS construction, not a
+ * negation of what follows ("Not only can I confirm that …" affirms it).
+ */
+const FOCUS = new Set(["only", "just", "merely", "simply", "solely"]);
+/** Words ending in -ly that are not manner/time adverbs. */
+const NOT_ADVERBS = new Set(
+  "only early family apply reply supply rely ally rally fly belly jelly holy ugly".split(" "),
+);
+/**
+ * An adverb inside a verb chain: the listed ones, or any -ly adverb ("not formally/presently
+ * confirmed"). Focus particles are excluded.
+ */
+const isChainAdverb = (t) =>
+  CHAIN_ADVERBS.has(t) || (/^[a-z]{3,}ly$/.test(t) && !NOT_ADVERBS.has(t) && !FOCUS.has(t));
+/** A negator that negates (not the "not only/just …" emphasis construction). */
+const negates = (tokens, i) => isNegator(tokens[i]) && !FOCUS.has(tokens[i + 1] ?? "");
+const isChainWord = (t) =>
+  AUX.has(t) || MODALS.has(t) || isContractedAux(t) || isNegator(t) || isChainAdverb(t);
 const isContractedAux = (t) => /'(?:re|s|ve|ll|d|m)$/.test(t);
 /** Words a subordinate clause's subject may consist of ("before [the booking] is…"). */
 const SUBJECT_WORDS = new Set(
@@ -67,7 +86,41 @@ const SUBORDINATORS = new Set([
  * that", "I can confirm that") is an ASSERTION, not uncertainty.
  */
 const UNCERTAIN_MATRIX =
-  /\b(?:need|needs|needed|have to|has to|got to|going to|let me|want to|try to|trying to|will|'ll)\b.*\b(?:check|verify|confirm|find out|see|ask|look)\b|\b(?:unsure|unclear|uncertain|wonder|wondering)\b/;
+  /\b(?:need|needs|needed|have to|has to|got to|going to|let me|want to|try to|trying to|will|'ll)\b.*\b(?:check|verify|confirm|find out|see|ask|look)\b/;
+/**
+ * Matrix predicates that are themselves NEGATIVE toward their "that" clause: "I doubt that X"
+ * does not assert X, while "I do not doubt that X" does (two negatives).
+ */
+const DOUBT_PREDICATES = new Set(
+  "doubt doubts doubted doubting doubtful unsure uncertain unclear deny denies denied question wonder wondering".split(
+    " ",
+  ),
+);
+const OBJECT_WORDS = new Set(["you", "me", "us", "them", "him", "her"]);
+const NEGATIVE_SUBJECTS = new Set(["nothing", "none", "nobody", "neither", "noone"]);
+
+/**
+ * The stance of the clause that embeds "that <proposition>", from its OWN predicate: the word
+ * governing the clause (past an object pronoun and adverbs), the negation in that predicate's
+ * verb chain or its negative subject, and whether the predicate itself is negative (doubt…).
+ * Negation elsewhere ("Not only can I confirm that …") does not reach the proposition.
+ *   "affirmative" → the proposition is asserted · "negative" → denied · "uncertain" → not established
+ */
+function matrixStance(matrix) {
+  let p = matrix.length - 1;
+  while (p >= 0 && (OBJECT_WORDS.has(matrix[p]) || isChainAdverb(matrix[p]))) p--;
+  if (p < 0) return "affirmative";
+  let negated = false;
+  let k = p - 1;
+  for (; k >= 0 && isChainWord(matrix[k]); k--) if (negates(matrix, k)) negated = !negated;
+  // A negative subject of the matrix ("Nobody can tell you that …", "No one can confirm that …").
+  if (NEGATIVE_SUBJECTS.has(matrix[k] ?? "") || (matrix[k] === "one" && matrix[k - 1] === "no"))
+    negated = !negated;
+  const doubt = DOUBT_PREDICATES.has(matrix[p]);
+  if (negated !== doubt) return doubt ? "uncertain" : "negative";
+  if (!negated && UNCERTAIN_MATRIX.test(matrix.join(" "))) return "uncertain";
+  return "affirmative";
+}
 const QUESTION_OPENER =
   /^(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|may|might|what|which|when|where|who|how|why|whether)\b/;
 const TRAILING_CONDITION =
@@ -108,10 +161,9 @@ export function classifyState(sentence, at, stateLength) {
   while (i >= 0) {
     const t = tokens[i];
     if (MODALS.has(t) || /'(?:ll|d)$/.test(t)) modal = true;
-    if (isNegator(t)) negatedChain = true;
-    if (AUX.has(t) || MODALS.has(t) || isContractedAux(t) || isNegator(t) || CHAIN_ADVERBS.has(t)) {
-      i--;
-    } else break;
+    if (negates(tokens, i)) negatedChain = true;
+    if (isChainWord(t)) i--;
+    else break;
   }
   const chainStart = i + 1;
   // B — negated in its own chain ("is not confirmed", "hasn't been booked").
@@ -132,7 +184,7 @@ export function classifyState(sentence, at, stateLength) {
   const head = subject[0];
   if (
     head !== undefined &&
-    (["nothing", "none", "nobody", "neither", "noone"].includes(head) ||
+    (NEGATIVE_SUBJECTS.has(head) ||
       (head === "no" && subject.length > 1 && subject.slice(1).every((t) => SUBJECT_WORDS.has(t))))
   ) {
     return "B";
@@ -146,9 +198,12 @@ export function classifyState(sentence, at, stateLength) {
     // C — "whether it is confirmed" is not established.
     if (word === "whether" && ownClause) return "C";
     if (word === "that" && ownClause) {
-      // B/C — embedded under a negated or uncertain matrix ("I cannot tell you that …").
-      if (matrix.some(isNegator)) return "B";
-      if (UNCERTAIN_MATRIX.test(matrix.join(" "))) return "C";
+      // B/C — embedded under a matrix that denies it ("I cannot tell you that …") or leaves it
+      //       open ("I doubt that …", "I need to check that …"). An affirming matrix ("I know
+      //       that", "I do not doubt that", "Not only can I confirm that") asserts it.
+      const stance = matrixStance(matrix);
+      if (stance === "negative") return "B";
+      if (stance === "uncertain") return "C";
     }
     // D — inside a condition/time clause of its own ("before it is confirmed", "if the quote
     //     is confirmed"); only when nothing but a subject stands between it and the chain.

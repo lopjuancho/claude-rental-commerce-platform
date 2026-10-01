@@ -119,13 +119,25 @@ const sleep = (ms) =>
 async function turn(message, { requestId = newId(), page, jar = cookies } = {}) {
   for (let attempt = 0; ; attempt++) {
     if (cleanup.state.stopping) throw new Error("stopping");
-    // The request in progress is known to cleanup: an interrupt lets it settle (bounded) before
-    // reconciling what it may have committed.
+    // Mutation intent BEFORE the request is sent: its exact id and session. An interrupt lets it
+    // settle (bounded); if it does not — or the transport fails — its completion is UNKNOWN until
+    // the server's turn journal shows it terminal (scripts/ai-smoke-db.mjs requestTerminality).
+    const intent = cleanup.beginRequest(requestId, currentSessionToken(jar));
     const sent = fetch(new URL("/api/assistant", base), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
       body: JSON.stringify({ message, requestId, ...(page ? { page } : {}) }),
-    }).then(async (r) => ({ r, raw: await r.text() }));
+    }).then(
+      async (r) => {
+        const raw = await r.text();
+        intent.responded();
+        return { r, raw };
+      },
+      (e) => {
+        intent.failed();
+        throw e;
+      },
+    );
     cleanup.state.inFlight = sent;
     const { r: res, raw } = await sent.finally(() => {
       if (cleanup.state.inFlight === sent) cleanup.state.inFlight = null;
@@ -149,6 +161,15 @@ async function turn(message, { requestId = newId(), page, jar = cookies } = {}) 
     }
     return { http: res.status, requestId, blocks: [], ...body, raw, observed };
   }
+}
+
+/** Every smoke quote resolved from its private link is known to cleanup (id and number). */
+function known(q) {
+  if (q) {
+    cleanup.state.quoteIds.add(q.id);
+    cleanup.state.quoteNumbers.set(q.id, q.quoteNumber);
+  }
+  return q;
 }
 
 function check(name, ok, detail = "") {
@@ -287,8 +308,8 @@ async function main() {
     qB.url !== q3.url;
   check("two distinct quotes: A active in this chat, B from another session", distinct);
   // The exact quotes of THIS tenant (primary keys), never a quote number alone.
-  const quoteA = await quoteByLink(db, org, q3?.url);
-  const quoteB = await quoteByLink(db, org, qB?.url);
+  const quoteA = known(await quoteByLink(db, org, q3?.url));
+  const quoteB = known(await quoteByLink(db, org, qB?.url));
   check("both quotes resolve to this tenant's exact quotes", quoteA !== null && quoteB !== null);
   if (distinct && quoteA && quoteB) {
     const ambiguous = await turn("Please request the booking.", {
@@ -302,8 +323,8 @@ async function main() {
     );
   }
 
-  // Mutation intent BEFORE the request: whatever it commits, cleanup reconciles by exact quote.
-  if (quoteA) cleanup.state.quoteIds.add(quoteA.id);
+  // The quote is registered (known()) BEFORE the booking request: whatever it commits, cleanup
+  // reconciles by exact quote — and only once the request is provably terminal.
   // 9. booking request → pending hold, never confirmed.
   const booking = await turn(`Please request the booking for quote ${q3?.quoteNumber ?? ""}.`);
   const b = one(booking, "booking");
@@ -428,7 +449,7 @@ async function main() {
   const expiredQuote = await turn(
     `Please create a quote for one ${name} on ${saturday(12)} from 10:00 to 12:00, pickup.`,
   );
-  const qe = await quoteByLink(db, org, one(expiredQuote, "quote")?.url);
+  const qe = known(await quoteByLink(db, org, one(expiredQuote, "quote")?.url));
   if (qe && (await expireQuote(db, org, qe.id)) === 1) {
     const r = await turn("Please request the booking for this quote.");
     check(
@@ -439,7 +460,7 @@ async function main() {
   const staleQuote = await turn(
     `Please create a quote for one ${name} on ${saturday(13)} from 10:00 to 12:00, pickup.`,
   );
-  const qs = await quoteByLink(db, org, one(staleQuote, "quote")?.url);
+  const qs = known(await quoteByLink(db, org, one(staleQuote, "quote")?.url));
   if (qs && (await makeQuoteStale(db, org, qs.id)) === 1) {
     const r = await turn("Please request the booking for this quote.");
     check(

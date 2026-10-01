@@ -92,7 +92,29 @@ export function reconcileSmokeBookings(
   organizationId: string,
   quoteIds: Iterable<string>,
   emails: Iterable<string>,
-): Promise<{ quotes: number; requests: number; cancelled: number; unresolved: string[] }>;
+): Promise<{
+  quotes: number;
+  quoteList: { id: string; quoteNumber: string }[];
+  requests: number;
+  cancelled: number;
+  unresolved: string[];
+}>;
+export const LEASE_GRACE_SECONDS: number;
+export type RequestTransport =
+  "in_flight" | "response_completed" | "transport_failed_unknown" | "wait_timed_out_unknown";
+export function requestTerminality(
+  db: Queryable,
+  organizationId: string,
+  sessionToken: string | null,
+  requestKey: string,
+  transport: RequestTransport,
+): Promise<{ terminal: boolean; reason: string }>;
+export interface SmokeRequestIntent {
+  requestId: string;
+  sessionToken: string | null;
+  state: RequestTransport;
+  resolution: "terminal" | "unknown" | null;
+}
 export function modelCalls(
   db: Queryable,
   organizationId: string,
@@ -102,7 +124,14 @@ export interface SmokeCleanupState {
   tag: string;
   organizationId: string | null;
   quoteIds: Set<string>;
+  quoteNumbers: Map<string, string>;
   customerEmails: Set<string>;
+  requests: Map<string, SmokeRequestIntent>;
+  bookingOutcome:
+    | "not_started"
+    | "reconciled_no_booking_terminal"
+    | "reconciled_booking_cancelled"
+    | "unresolved";
   block: SmokeBlock | null;
   bookingCleanup: string;
   blockCleanup: string;
@@ -117,4 +146,8 @@ export function createSmokeCleanup(
   state: SmokeCleanupState;
   run(options?: { waitForInFlightMs?: number }): Promise<SmokeCleanupState>;
   recovery(): string[];
+  beginRequest(
+    requestId: string,
+    sessionToken: string | null,
+  ): { intent: SmokeRequestIntent; responded: () => void; failed: () => void };
 };
