@@ -157,3 +157,44 @@ describe("preTurnRefusal: only the application's own pre-turn refusals", () => {
     );
   });
 });
+
+describe("the live smoke's interrupt path always asks for a FULL cleanup", () => {
+  it("finish() (SIGINT, SIGTERM, abort) runs cleanup without blockOnly; blockOnly is the mid-run block removal only", () => {
+    const src = readFileSync("scripts/ai-live-smoke.mjs", "utf8");
+    const finish = /async function finish\([^)]*\) \{[\s\S]*?\n\}/.exec(src)?.[0] ?? "";
+    expect(finish).toMatch(/cleanup\.run\(\{ waitForInFlightMs: 20_000 \}\)/);
+    expect(finish).not.toMatch(/blockOnly/);
+    expect(src.match(/blockOnly/g)).toHaveLength(1);
+    for (const signal of ["SIGINT", "SIGTERM"]) expect(src).toContain(`["${signal}", `);
+  });
+
+  it("a FULL run started while a block-only run is in progress waits for and runs B+C (fake journal)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const db = {
+      async query(sql: string) {
+        if (/delete from public\.availability_blocks/.test(sql)) {
+          await gate;
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    const cleanup = createSmokeCleanup(db, TAG);
+    cleanup.state.organizationId = ORG;
+    cleanup.state.block = { id: "b-1", productId: "p-1" };
+    cleanup.beginRequest("req-1", "s").failed();
+    const partial = cleanup.run({ blockOnly: true });
+    const full = cleanup.run({ waitForInFlightMs: 10 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cleanup.state.phaseRuns).toEqual({ block: 1, requests: 0, bookings: 0 });
+    release();
+    await partial;
+    const state = await full;
+    expect(state.phaseRuns).toEqual({ block: 1, requests: 1, bookings: 1 });
+    expect(state.bookingOutcome).toBe("unresolved");
+    expect(cleanup.recovery().join("\n")).toContain("req-1");
+  });
+});

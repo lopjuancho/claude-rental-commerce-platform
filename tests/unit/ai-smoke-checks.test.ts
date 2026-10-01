@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  availabilityClaims,
   availabilityReplayVerdict,
   bookingReplayVerdict,
   expectedWhen,
@@ -338,6 +339,81 @@ describe("Codex smoke round 5: composed polarity (nested and repeated negation f
         "Availability needs to be checked again. It is not true that it is available.",
         [],
       ).ok,
+    ).toBe(true);
+  });
+});
+
+describe("Codex smoke round 6: negative subjects compose outward like any negation", () => {
+  it.each([
+    "It is not true that nothing is booked.",
+    "It is false that no booking is confirmed.",
+    "It is not true that none of the bookings are confirmed.",
+    "It is not true that no quote is held.",
+    "It is false that none of the items are reserved.",
+    "It is not false that nothing is booked.",
+    "It is not true that no one has booked it.",
+    "It is not true that nobody has booked it.",
+    "It is not true that neither quote is confirmed.",
+    // three levels
+    "I know that it is not true that nothing is booked.",
+    "It is not true that I know that no booking is confirmed.",
+    "It is not true that I doubt that nothing is booked.",
+    "I am sure it is false that none of the quotes are confirmed.",
+  ])("flags “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply).length).toBeGreaterThan(0);
+  });
+  it.each([
+    "Nothing is booked.",
+    "Nothing has been booked.",
+    "No booking is confirmed.",
+    "None of the bookings are confirmed.",
+    "None of the quotes are confirmed.",
+    "No quote is held.",
+    "None of the items are reserved.",
+    "No one has booked it.",
+    "Nobody has booked it.",
+    "Neither quote is confirmed.",
+    // three levels that keep the denial
+    "I know that I am sure that nothing is booked.",
+    "It is true that I know that no booking is confirmed.",
+    "I know that it is true that none of the bookings are confirmed.",
+  ])("does not flag “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply)).toEqual([]);
+  });
+  it("a negative-headed subject of an unknown shape fails closed", () => {
+    expect(unsupportedStateClaims("No matter what happens your booking is confirmed.").length).toBe(
+      1,
+    );
+    expect(
+      unsupportedStateClaims("It is not true that none of my friends' bookings are confirmed.")
+        .length,
+    ).toBe(1);
+  });
+  it("the replay verdicts compose the same way", () => {
+    const cancelled = [{ type: "booking", quoteNumber: "Q-7", status: "cancelled" }];
+    const expected = { quoteNumber: "Q-7", status: "cancelled" };
+    for (const claim of [
+      "It is not true that nothing is booked.",
+      "It is false that no booking is confirmed.",
+    ]) {
+      const v = bookingReplayVerdict(
+        `Here is where your request stands now. ${claim}`,
+        cancelled,
+        expected,
+      );
+      expect(v.ok).toBe(false);
+      expect(v.reasons.join(" ")).toMatch(/asserts state/);
+    }
+    const v = availabilityReplayVerdict(
+      "Availability needs to be checked again. It is not true that nothing is available.",
+      [],
+    );
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join(" ")).toMatch(/asserts availability/);
+    expect(availabilityClaims("Nothing is available.")).toEqual([]);
+    expect(
+      availabilityReplayVerdict("Availability needs to be checked again. Nothing is available.", [])
+        .ok,
     ).toBe(true);
   });
 });

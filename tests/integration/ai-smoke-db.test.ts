@@ -872,6 +872,223 @@ describeRest(
       }
     });
 
+    // ── cleanup phases: a FULL cleanup is never satisfied by a block-only one ──
+    /** One connection whose block DELETE waits until released (the rest passes straight through). */
+    function gatedDb(c: PoolClient) {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      let reached!: () => void;
+      const atDelete = new Promise<void>((r) => {
+        reached = r;
+      });
+      const db = {
+        async query(sql: string, params?: unknown[]) {
+          if (/delete from public\.availability_blocks/.test(sql)) {
+            reached();
+            await gate;
+          }
+          return c.query(sql, params);
+        },
+      };
+      return { db, release, atDelete };
+    }
+    async function smokeBlock(tag: string) {
+      const p = await makeProduct(orgA, { units: 1 });
+      const slug = (
+        await admin<{ slug: string }>("select slug from public.products where id = $1", [
+          p.productId,
+        ])
+      ).rows[0]!.slug;
+      return (await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2031-03-01", tag))!;
+    }
+    const tick = () => new Promise((r) => setTimeout(r, 50));
+
+    it("block-only cleanup in progress, then FULL cleanup: the full one escalates through B+C (Codex race)", async () => {
+      const q = await smokeQuote(true); // a pending booking that can be reconciled
+      const client = await pool.connect();
+      try {
+        const g = gatedDb(client);
+        const tag = newTag();
+        const cleanup = createSmokeCleanup(g.db, tag);
+        cleanup.state.organizationId = orgA.id;
+        cleanup.state.quoteIds.add(q.quoteId);
+        cleanup.state.quoteNumbers.set(q.quoteId, q.quoteNumber);
+        cleanup.state.block = await smokeBlock(tag);
+        const key = `smoke-${randomUUID()}`;
+        cleanup.beginRequest(key, generateSessionToken()).failed(); // unresolved request
+        // 1. Block-only cleanup starts; its DELETE is held.
+        const partial = cleanup.run({ blockOnly: true });
+        await g.atDelete;
+        // 2. The FULL cleanup (as SIGINT/SIGTERM/abort request it) starts meanwhile.
+        let fullDone = false;
+        const full = cleanup.run({ waitForInFlightMs: 100 }).then((s) => {
+          fullDone = true;
+          return s;
+        });
+        await tick();
+        expect(fullDone).toBe(false); // it does not return on the block-only promise
+        expect(cleanup.state.bookingOutcome).toBe("not_started");
+        // 3. The block deletion finishes.
+        g.release();
+        await partial;
+        const state = await full;
+        expect(state.phaseRuns).toEqual({ block: 1, requests: 1, bookings: 1 });
+        expect(state.blockCleanup).toBe("succeeded");
+        expect(state.requests.get(key)!.resolution).toBe("unknown"); // terminality was checked
+        expect(state.bookingOutcome).toBe("unresolved"); // …and the request is still unresolved
+        expect(state.bookingOutcome).not.toBe("not_started");
+        // Booking reconciliation ran: the pending booking is cancelled and released.
+        expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+        expect((await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations).toBe(0);
+        const recovery = cleanup.recovery();
+        expect(recovery.join("\n")).toContain(key);
+        expect(recovery.join("\n")).toContain(q.quoteId);
+        expect(exitCode(state, recovery)).toBe(1);
+      } finally {
+        client.release();
+      }
+    });
+
+    it("two simultaneous FULL cleanups share one pass; FULL then block-only does not rerun or downgrade", async () => {
+      const q = await smokeQuote(true);
+      const client = await pool.connect();
+      try {
+        const g = gatedDb(client);
+        const tag = newTag();
+        const cleanup = createSmokeCleanup(g.db, tag);
+        cleanup.state.organizationId = orgA.id;
+        cleanup.state.quoteIds.add(q.quoteId);
+        cleanup.state.block = await smokeBlock(tag);
+        const a = cleanup.run();
+        await g.atDelete;
+        const b = cleanup.run();
+        // A block-only call during a full pass waits for that whole pass.
+        let partialDone = false;
+        const partial = cleanup.run({ blockOnly: true }).then(() => {
+          partialDone = true;
+        });
+        await tick();
+        expect(partialDone).toBe(false);
+        g.release();
+        const [sa, sb] = await Promise.all([a, b, partial]);
+        expect(sa).toBe(sb);
+        expect(sa.phaseRuns).toEqual({ block: 1, requests: 1, bookings: 1 }); // one pass
+        expect(sa.bookingCleanup).toBe("succeeded (released; 1 cancelled now)");
+        expect(sa.blockCleanup).toBe("succeeded");
+        // A block-only call afterwards changes nothing: no booking phase, no downgrade.
+        await cleanup.run({ blockOnly: true });
+        expect(cleanup.state.phaseRuns).toEqual({ block: 1, requests: 1, bookings: 1 });
+        expect(cleanup.state.bookingOutcome).toBe("reconciled_booking_cancelled");
+        expect(cleanup.state.bookingCleanup).toBe("succeeded (released; 1 cancelled now)");
+        expect(exitCode(cleanup.state, cleanup.recovery())).toBe(0);
+      } finally {
+        client.release();
+      }
+    });
+
+    // ── the fence, directly: the OLD attempt can no longer finish, fail or mutate ──
+    it("after fencing attempt N, its old owner's real ai_turn_finish / ai_turn_fail / ai_mutation_begin change nothing", async () => {
+      const session = generateSessionToken();
+      const key = `smoke-${randomUUID()}`;
+      // Attempt 1 claimed through the app's own function; its owner is still "alive".
+      const c = await pool.connect();
+      let turn: { turn_id: string; attempt: number };
+      try {
+        turn = await beginRetry(c, session, key);
+        await c.query("commit");
+      } finally {
+        c.release();
+      }
+      expect(turn.attempt).toBe(1);
+      // Its lease runs out (the owner stalled); nothing started.
+      await admin(
+        `update public.ai_turns set lease_expires_at = now() - interval '5 minutes' where id = $1;
+         update public.ai_conversations set active_turn_expires_at = now() - interval '5 minutes'
+          where active_turn_id = $1`.replace(/\$1/g, `'${turn.turn_id}'`),
+      );
+      const fenced = await requestTerminality(pool, orgA.id, session, key, [{ refusal: null }]);
+      expect(fenced).toMatchObject({ terminal: true });
+      expect(fenced.reason).toMatch(/fenced/);
+      const asOwner = async (sql: string, params: unknown[]) => {
+        const o = await pool.connect();
+        try {
+          await o.query("begin");
+          await o.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+          await o.query(sql, params);
+          await o.query("commit");
+          return null;
+        } catch (e) {
+          await o.query("rollback");
+          return (e as { code?: string }).code ?? "error";
+        } finally {
+          o.release();
+        }
+      };
+      const row = async () =>
+        (
+          await admin<{ status: string; attempt: number; error_code: string; fence: string }>(
+            `select status, attempt, error_code, response ->> 'errorCode' as fence
+             from public.ai_turns where id = $1`,
+            [turn.turn_id],
+          )
+        ).rows[0];
+      const FENCED = {
+        status: "completed",
+        attempt: 1,
+        error_code: "SMOKE_FENCED",
+        fence: "SMOKE_FENCED",
+      };
+      expect(await row()).toEqual(FENCED);
+      // The old owner tries to finish with its late reply: refused (it no longer owns it).
+      expect(
+        await asOwner(
+          `select public.ai_turn_finish($1, $2, $3, '{}'::jsonb, null, '[]'::jsonb, 0, 0, 'v',
+                                        0, '{"status":"ok","reply":"late reply","blocks":[]}'::jsonb)`,
+          [orgA.id, turn.turn_id, turn.attempt],
+        ),
+      ).toBe("RA010");
+      expect(await row()).toEqual(FENCED);
+      // …or to fail: a no-op (the fence is no longer 'processing').
+      expect(
+        await asOwner("select public.ai_turn_fail($1, $2, $3, 'LATE', null, null, null)", [
+          orgA.id,
+          turn.turn_id,
+          turn.attempt,
+        ]),
+      ).toBeNull();
+      expect(await row()).toEqual(FENCED);
+      // …or to begin a business mutation: refused; no mutation row exists.
+      expect(
+        await asOwner(
+          `select * from public.ai_mutation_begin($1, $2, $3, repeat('c', 64), 'request_booking', 'tc-1', '{}'::jsonb)`,
+          [orgA.id, turn.turn_id, turn.attempt],
+        ),
+      ).toBe("RA010");
+      expect(
+        (
+          await admin<{ n: number }>(
+            "select count(*)::int as n from public.ai_mutations where turn_id = $1",
+            [turn.turn_id],
+          )
+        ).rows[0]!.n,
+      ).toBe(0);
+      expect(await row()).toEqual(FENCED);
+      // A later delivery of the same key replays the fence; no attempt 2 starts.
+      const late = await pool.connect();
+      try {
+        expect(await beginRetry(late, session, key)).toMatchObject({
+          outcome: "replay",
+          attempt: 1,
+        });
+        await late.query("rollback");
+      } finally {
+        late.release();
+      }
+      expect(await row()).toEqual(FENCED);
+    });
+
     it("recovery after a database failure still names the exact known identifiers, and no secret", async () => {
       const q = await smokeQuote(false);
       const tag = newTag();

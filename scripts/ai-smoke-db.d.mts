@@ -154,6 +154,7 @@ export interface SmokeCleanupState {
   unresolved: string[];
   stopping: boolean;
   inFlight: Promise<unknown> | null;
+  phaseRuns: { block: number; requests: number; bookings: number };
 }
 export function createSmokeCleanup(
   db: Queryable,

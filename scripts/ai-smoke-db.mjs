@@ -528,6 +528,8 @@ export function createSmokeCleanup(db, tag) {
     unresolved: [],
     stopping: false,
     inFlight: null, // the HTTP exchange in progress, if any
+    /** How many times each phase actually ran (A, B, C). */
+    phaseRuns: { block: 0, requests: 0, bookings: 0 },
   };
   /** Registers one delivery of a request BEFORE it is sent. */
   function beginRequest(requestId, sessionToken) {
@@ -559,11 +561,23 @@ export function createSmokeCleanup(db, tag) {
       failed: () => set("transport_failed_unknown"),
     };
   }
-  let running = null;
+  /*
+   * Cleanup phases, each with its OWN promise (never one shared promise for both strengths):
+   *   A  remove the exact maintenance block;
+   *   B  request terminality / journal fencing   ┐ reconcileBookings()
+   *   C  booking reconciliation, cancel, release ┘
+   *   D  report: bookingOutcome / bookingCleanup / recovery() derive from A–C's results.
+   * A block-only call runs (or joins) A only. A FULL call joins an A already in progress and then
+   * ALWAYS runs B+C — it is never satisfied by a block-only run, and never downgraded. Concurrent
+   * full calls share one A→B→C pass; a later call starts a new one.
+   */
+  let blockPhase = null;
+  let fullPass = null;
   async function reconcileBookings() {
     const org = state.organizationId;
     // 1. Can any request still mutate, now or in a later attempt? (Before looking at bookings.)
     const unknown = [];
+    state.phaseRuns.requests++;
     for (const r of state.requests.values()) {
       const t = await requestTerminality(db, org, r.sessionToken, r.requestId, r.sends);
       r.resolution = t.terminal ? "terminal" : "unknown";
@@ -571,6 +585,7 @@ export function createSmokeCleanup(db, tag) {
         unknown.push(`request ${r.requestId}: completion not established — ${t.reason}`);
     }
     // 2. The bookings themselves, by exact quote and smoke customer.
+    state.phaseRuns.bookings++;
     const r = await reconcileSmokeBookings(db, org, state.quoteIds, state.customerEmails);
     for (const q of r.quoteList) state.quoteNumbers.set(q.id, q.quoteNumber);
     state.unresolved = [...unknown, ...r.unresolved];
@@ -585,64 +600,80 @@ export function createSmokeCleanup(db, tag) {
       state.bookingCleanup = `succeeded (released; ${String(r.cancelled)} cancelled now)`;
     }
   }
+  function phaseA() {
+    blockPhase ??= (async () => {
+      const org = state.organizationId;
+      if (!org || !state.block) return;
+      state.phaseRuns.block++;
+      try {
+        const removed = await removeSmokeAvailabilityBlock(db, org, state.block, tag);
+        state.blockCleanup = removed === 1 ? "succeeded" : "failed (not found)";
+        if (removed === 1) state.block = null;
+      } catch {
+        state.blockCleanup = "failed (database error)";
+      }
+    })().finally(() => {
+      blockPhase = null;
+    });
+    return blockPhase;
+  }
+  async function phasesBC() {
+    const org = state.organizationId;
+    if (org && (state.quoteIds.size > 0 || state.customerEmails.size > 0 || state.requests.size)) {
+      try {
+        await reconcileBookings();
+      } catch {
+        state.bookingOutcome = "unresolved";
+        state.bookingCleanup = "failed (database error during reconciliation)";
+      }
+    } else if (!org && state.requests.size > 0) {
+      state.bookingOutcome = "unresolved";
+      state.bookingCleanup = "unresolved (organization unknown)";
+    }
+  }
+  function fullCleanup() {
+    fullPass ??= (async () => {
+      await phaseA(); // joins a block-only A already running — then continues regardless
+      await phasesBC();
+    })().finally(() => {
+      fullPass = null;
+    });
+    return fullPass;
+  }
+  /** On an interrupt, let an exchange already sent settle (bounded); if not, it is UNKNOWN. */
+  async function settleInFlight(waitForInFlightMs) {
+    if (!state.inFlight) return;
+    let timer;
+    const settled = await Promise.race([
+      Promise.resolve(state.inFlight).then(
+        () => true,
+        () => true,
+      ),
+      new Promise((r) => {
+        timer = setTimeout(() => r(false), waitForInFlightMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!settled) {
+      for (const r of state.requests.values()) {
+        for (const s of r.sends) if (s.state === "in_flight") s.state = "wait_timed_out_unknown";
+        if (r.state === "in_flight") r.state = "wait_timed_out_unknown";
+      }
+    }
+  }
   /**
-   * `waitForInFlightMs`: on an interrupt, first let an exchange already sent settle (bounded). If it
-   * does not, its completion is UNKNOWN — the journal, not this wait, decides. `blockOnly`: remove
-   * the maintenance block only (mid-run), leaving requests and bookings for the final cleanup.
+   * FULL cleanup (the default — the normal end, a thrown error, SIGINT and SIGTERM): phases A, B, C.
+   * `waitForInFlightMs`: first let an exchange already sent settle (bounded); if it does not, its
+   * completion is UNKNOWN — the journal, not this wait, decides.
+   * `blockOnly` (mid-run only): phase A; while a full pass is running it waits for that pass.
    */
   async function run({ waitForInFlightMs = 0, blockOnly = false } = {}) {
-    if (state.inFlight) {
-      let timer;
-      const settled = await Promise.race([
-        Promise.resolve(state.inFlight).then(
-          () => true,
-          () => true,
-        ),
-        new Promise((r) => {
-          timer = setTimeout(() => r(false), waitForInFlightMs);
-        }),
-      ]);
-      clearTimeout(timer);
-      if (!settled) {
-        for (const r of state.requests.values()) {
-          for (const s of r.sends) if (s.state === "in_flight") s.state = "wait_timed_out_unknown";
-          if (r.state === "in_flight") r.state = "wait_timed_out_unknown";
-        }
-      }
+    if (blockOnly) {
+      await (fullPass ?? phaseA());
+      return state;
     }
-    running ??= (async () => {
-      const org = state.organizationId;
-      if (blockOnly) {
-        // (requests and bookings are reconciled by the final cleanup)
-      } else if (
-        org &&
-        (state.quoteIds.size > 0 || state.customerEmails.size > 0 || state.requests.size)
-      ) {
-        try {
-          await reconcileBookings();
-        } catch {
-          state.bookingOutcome = "unresolved";
-          state.bookingCleanup = "failed (database error during reconciliation)";
-        }
-      } else if (!org && state.requests.size > 0) {
-        state.bookingOutcome = "unresolved";
-        state.bookingCleanup = "unresolved (organization unknown)";
-      }
-      if (org && state.block) {
-        try {
-          const removed = await removeSmokeAvailabilityBlock(db, org, state.block, tag);
-          state.blockCleanup = removed === 1 ? "succeeded" : "failed (not found)";
-          if (removed === 1) state.block = null;
-        } catch {
-          state.blockCleanup = "failed (database error)";
-        }
-      }
-    })();
-    try {
-      await running;
-    } finally {
-      running = null;
-    }
+    await settleInFlight(waitForInFlightMs);
+    await fullCleanup();
     return state;
   }
   /**

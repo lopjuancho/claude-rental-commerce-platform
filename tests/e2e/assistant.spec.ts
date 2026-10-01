@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import { type BrowserContext, expect, type Page, type Route, test } from "@playwright/test";
 import pg from "pg";
+import { preTurnRefusal } from "../../scripts/ai-smoke-db.mjs";
 
 /**
  * M7 storefront assistant (ADR 0017) on the seeded tenants, with the scripted test-double model
@@ -933,4 +934,138 @@ test("a replayed availability answer shows no old Available/Unavailable card (R3
   expect(replay.blocks.some((b) => b.type === "availability")).toBe(false);
   expect(replay.reply).toMatch(/Availability needs to be checked again/);
   expect(replay.reply).not.toMatch(/is available|not available|unavailable/i);
+});
+
+test("pre-turn refusals the smoke trusts: real handler, no turn, no model call, no mutation (L1)", async ({
+  playwright,
+}) => {
+  test.skip(!process.env.DATABASE_URL, "needs DATABASE_URL to verify the database");
+  const api = `http://localhost:${port}/api/assistant`;
+  const host = `acme.localhost:${port}`;
+  const db = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await db.connect();
+  // A context that holds this session's cookie, and one that never had a session.
+  const withSession = await playwright.request.newContext();
+  const noSession = await playwright.request.newContext();
+  try {
+    const boot = await withSession.get(api, { headers: { host, "cf-connecting-ip": testIp() } });
+    const token = /rc_ai_1=([A-Za-z0-9_-]{43})/.exec(boot.headers()["set-cookie"] ?? "")?.[1];
+    expect(token).toBeTruthy();
+    const hash = sessionHash(token!);
+    const org = (
+      await db.query<{ id: string }>("select id from public.organizations where slug = 'acme'")
+    ).rows[0]!.id;
+    /** What this session's journal holds: turns for a key, all actions and mutations. */
+    const journal = async (key: string) =>
+      (
+        await db.query<{ keyTurns: number; turns: number; actions: number; mutations: number }>(
+          `select (select count(*)::int from public.ai_turns t where t.request_key = $1) as "keyTurns",
+                  (select count(*)::int from public.ai_turns t join public.ai_conversations c on c.id = t.conversation_id
+                    where c.session_hash = $2) as turns,
+                  (select count(*)::int from public.ai_actions a join public.ai_conversations c on c.id = a.conversation_id
+                    where c.session_hash = $2) as actions,
+                  (select count(*)::int from public.ai_mutations m join public.ai_conversations c on c.id = m.conversation_id
+                    where c.session_hash = $2) as mutations`,
+          [key, hash],
+        )
+      ).rows[0]!;
+    const message = (requestId: string, text = "Please request the booking for my quote.") =>
+      JSON.stringify({ message: text, requestId });
+
+    /** One refused delivery: the exact pair, recognized by the smoke, and NOTHING in the journal. */
+    async function refused(
+      expected: { status: number; errorCode: string },
+      send: (requestId: string) => Promise<{
+        status(): number;
+        json(): Promise<unknown>;
+        headers(): Record<string, string>;
+      }>,
+      modelCallsHeader?: string,
+    ) {
+      const requestId = randomUUID().replace(/-/g, "");
+      const before = await journal(requestId);
+      const res = await send(requestId);
+      const body = (await res.json()) as { status: string; errorCode: string };
+      expect(res.status(), expected.errorCode).toBe(expected.status);
+      expect(body).toMatchObject({ status: "error", errorCode: expected.errorCode });
+      // The smoke's recognizer accepts exactly what the handler really returned.
+      expect(preTurnRefusal(res.status(), body)).toBe(expected.errorCode);
+      // No provider call reported for this delivery.
+      expect(res.headers()["x-assistant-model-calls"]).toBe(modelCallsHeader);
+      // No turn for this request, no new action (model_call or tool) and no business mutation.
+      const after = await journal(requestId);
+      expect(after.keyTurns).toBe(0);
+      expect(after).toEqual({ ...before, keyTurns: 0 });
+    }
+    const post = (
+      ctx: typeof withSession,
+      data: string,
+      ip = testIp(),
+      contentType = "application/json",
+    ) =>
+      ctx.post(api, {
+        headers: { host, "content-type": contentType, "cf-connecting-ip": ip },
+        data,
+      });
+
+    await refused({ status: 415, errorCode: "UNSUPPORTED" }, (id) =>
+      post(withSession, message(id), testIp(), "text/plain"),
+    );
+    await refused({ status: 413, errorCode: "TOO_LARGE" }, (id) =>
+      post(withSession, message(id, "x".repeat(20_000))),
+    );
+    await refused({ status: 400, errorCode: "INVALID_MESSAGE" }, (id) =>
+      post(withSession, message(id, "x".repeat(1001))),
+    );
+    await refused({ status: 409, errorCode: "SESSION_REQUIRED" }, (id) =>
+      post(noSession, message(id)),
+    );
+    // 429: this address's per-IP budget is spent first (by malformed bodies, from no session).
+    const spent = testIp();
+    for (let i = 0; i < 30; i++) await post(noSession, "{not json", spent);
+    await refused({ status: 429, errorCode: "RATE_LIMITED" }, (id) =>
+      post(withSession, message(id), spent),
+    );
+
+    // BUSY: another message of this session holds the conversation (a live lease), claimed through
+    // the app's own ai_turn_begin. The refused delivery creates no turn and no new attempt.
+    const holdKey = `hold-${randomUUID()}`;
+    await db.query("begin");
+    await db.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+    const hold = (
+      await db.query<{ outcome: string; turn_id: string; attempt: number }>(
+        "select outcome, turn_id, attempt from public.ai_turn_begin($1, $2, $3, 120, 'e2e-hold')",
+        [org, hash, holdKey],
+      )
+    ).rows[0]!;
+    await db.query("commit");
+    expect(hold).toMatchObject({ outcome: "started", attempt: 1 });
+    try {
+      await refused(
+        { status: 409, errorCode: "BUSY" },
+        (id) => post(withSession, message(id)),
+        "0", // it went through runTurn's claim: zero provider calls
+      );
+      const held = (
+        await db.query<{ status: string; attempt: number }>(
+          "select status, attempt from public.ai_turns where id = $1",
+          [hold.turn_id],
+        )
+      ).rows[0];
+      expect(held).toEqual({ status: "processing", attempt: 1 }); // untouched by the refusal
+    } finally {
+      await db.query("begin");
+      await db.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+      await db.query("select public.ai_turn_fail($1, $2, $3, 'E2E_HOLD', null, null, null)", [
+        org,
+        hold.turn_id,
+        hold.attempt,
+      ]);
+      await db.query("commit");
+    }
+  } finally {
+    await withSession.dispose();
+    await noSession.dispose();
+    await db.end();
+  }
 });

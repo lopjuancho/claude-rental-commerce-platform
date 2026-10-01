@@ -103,13 +103,32 @@ const DENIAL_PREDICATES = new Set(
 const OBJECT_WORDS = new Set(["you", "me", "us", "them", "him", "her"]);
 const NEGATIVE_SUBJECTS = new Set(["nothing", "none", "nobody", "neither", "noone"]);
 
+/** Pronoun subjects that may follow a negative head word ("none of them", "nothing of yours"). */
+const NEGATIVE_HEADS = new Set(["nothing", "nobody", "noone", "none", "neither", "no"]);
+/**
+ * Whether a subject is negative: "nothing", "nobody", "no one", "no <noun…>", "none (of the
+ * <noun…>)", "neither (<noun…>)" — with only ordinary subject words after the head. A subject
+ * headed by a negative word in any other shape is "ambiguous" (the caller fails closed); any other
+ * subject is "none".
+ */
+function subjectNegativity(subject) {
+  const head = subject[0];
+  if (head === undefined || !NEGATIVE_HEADS.has(head)) return "none";
+  const rest = subject.slice(1);
+  if (head === "no" && rest.length === 1 && rest[0] === "one") return "negative";
+  if (head === "no" && rest.length === 0) return "ambiguous";
+  return rest.every((t) => SUBJECT_WORDS.has(t) || OBJECT_WORDS.has(t) || t === "yours")
+    ? "negative"
+    : "ambiguous";
+}
+
 /**
  * One embedding level ("<matrix> that|whether <clause>"): the stance of the matrix's OWN predicate
  * toward the clause, and where the matrix's subject/chain begins (the next level is looked for
  * before it). The predicate is the word governing the clause (past an object pronoun and adverbs);
  * its polarity counts the negators in ITS verb chain and a negative subject — "not only/just" is
  * emphasis, and a negator elsewhere in the sentence does not reach it.
- *   "affirm" · "negate" · "uncertain" · "ambiguous" (two or more negators: fail closed)
+ *   "affirm" · "affirmByNegation" · "negate" · "uncertain" · "ambiguous" (two or more negators)
  */
 function embeddingLevel(matrix, word) {
   let p = matrix.length - 1;
@@ -126,34 +145,42 @@ function embeddingLevel(matrix, word) {
   if (word === "whether") return { stance: "uncertain", start };
   if (negators >= 2) return { stance: "ambiguous", start };
   const negated = negators === 1;
-  if (DENIAL_PREDICATES.has(matrix[p])) return { stance: negated ? "affirm" : "negate", start };
-  if (DOUBT_PREDICATES.has(matrix[p])) return { stance: negated ? "affirm" : "uncertain", start };
+  // A negated denial/doubt ("not false", "cannot deny", "do not doubt") affirms only by cancelling
+  // two negatives: it asserts a positive clause, but is never trusted to keep a negative one.
+  if (DENIAL_PREDICATES.has(matrix[p]))
+    return { stance: negated ? "affirmByNegation" : "negate", start };
+  if (DOUBT_PREDICATES.has(matrix[p]))
+    return { stance: negated ? "affirmByNegation" : "uncertain", start };
   if (negated) return { stance: "negate", start };
   if (UNCERTAIN_MATRIX.test(matrix.join(" "))) return { stance: "uncertain", start };
   return { stance: "affirm", start };
 }
 
 /**
- * Composes a proposition's polarity ("pos" | "neg") with one embedding stance. Only results that
- * POSITIVELY deny ("neg") or leave open ("unc") the transactional state are safe; anything the
- * composition cannot establish — a negated denial, an uncertain or denied negation, two negators —
- * is "pos" (FAIL CLOSED: treated as an assertion).
+ * Composes a proposition's polarity ("pos" | "neg" | "unc") with one embedding stance. Only results
+ * that POSITIVELY deny ("neg") or leave open ("unc") the transactional state are safe. Anything the
+ * composition cannot establish — a denied or uncertain negation, a double-negative affirmation of
+ * a negation, two negators — is "fail": an ABSORBING fail-closed value (treated as an assertion
+ * whatever the outer levels say), so an outer negation can never turn it back into a denial.
  */
 function compose(value, stance) {
+  if (value === "fail") return "fail";
   if (stance === "affirm") return value;
-  if (stance === "negate") return value === "pos" ? "neg" : "pos";
-  if (stance === "uncertain") return value === "pos" || value === "unc" ? "unc" : "pos";
-  return "pos"; // ambiguous
+  if (stance === "affirmByNegation") return value === "pos" ? "pos" : "fail";
+  if (stance === "negate") return value === "pos" ? "neg" : "fail";
+  if (stance === "uncertain") return value === "pos" || value === "unc" ? "unc" : "fail";
+  return "fail"; // ambiguous
 }
 
 /**
  * The final polarity of a proposition at `sub` (its "that"/"whether"), composed outward through
  * every embedding level of the clause ("It is not true that I doubt that …" composes twice).
+ * "fail" is reported as "pos" (an assertion).
  */
 function composedPolarity(tokens, sub, polarity) {
   let value = polarity;
   let s = sub;
-  while (s >= 0) {
+  while (s >= 0 && value !== "fail") {
     const level = embeddingLevel(tokens.slice(0, s), tokens[s]);
     value = compose(value, level.stance);
     let outer = -1;
@@ -161,7 +188,7 @@ function composedPolarity(tokens, sub, polarity) {
       if (tokens[k] === "that" || tokens[k] === "whether") outer = k;
     s = outer;
   }
-  return value;
+  return value === "fail" ? "pos" : value;
 }
 const QUESTION_OPENER =
   /^(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|may|might|what|which|when|where|who|how|why|whether)\b/;
@@ -218,17 +245,13 @@ export function classifyState(sentence, at, stateLength) {
     tokens.slice(0, chainStart).findLastIndex((t) => /^(?:and|or|but|so)$/.test(t)) + 1,
   );
   const subject = tokens.slice(subjectStart, chainStart);
-  // A negative subject OF THIS proposition: the negative word heads the subject itself —
-  // "Nothing has been booked", "No booking is confirmed", "None of the quotes are…".
-  // ("No matter what happens your booking is confirmed" is not one.)
-  const head = subject[0];
-  if (
-    head !== undefined &&
-    (NEGATIVE_SUBJECTS.has(head) ||
-      (head === "no" && subject.length > 1 && subject.slice(1).every((t) => SUBJECT_WORDS.has(t))))
-  ) {
-    negators++;
-  }
+  // A negative subject OF THIS proposition ("Nothing has been booked", "No booking is confirmed",
+  // "None of the quotes are…", "No one", "Neither quote") counts as one negator and composes
+  // outward like a verb negation. A negative-headed subject of any other shape is ambiguous:
+  // fail closed. ("No matter what happens your booking is confirmed" is such a shape.)
+  const negativeSubject = subjectNegativity(subject);
+  if (negativeSubject === "ambiguous") return "A";
+  if (negativeSubject === "negative") negators++;
   // A — two negators on one proposition ("is not not confirmed", "Nothing is not booked") are
   //     not a safe denial: fail closed.
   if (negators >= 2) return "A";
@@ -236,11 +259,17 @@ export function classifyState(sentence, at, stateLength) {
 
   const word = sub >= 0 ? tokens[sub] : null;
   const between = tokens.slice(sub + 1, chainStart);
-  const ownClause = sub >= 0 && between.length > 0 && between.every((t) => SUBJECT_WORDS.has(t));
+  // The clause starts right after its subordinator: only its subject stands before its chain —
+  // ordinary subject words, or a negative subject ("that nothing is booked").
+  const ownClause =
+    sub >= 0 &&
+    between.length > 0 &&
+    (between.every((t) => SUBJECT_WORDS.has(t)) || subjectNegativity(between) === "negative");
   if (ownClause && (word === "that" || word === "whether")) {
     // The proposition's polarity composed with EVERY embedding level: "I know that …" keeps it,
     // "I cannot tell you that …" denies it, "I doubt that …" / "whether …" leaves it open, and
-    // "It is not true that … is not confirmed" composes back to an assertion.
+    // "It is not true that … is not confirmed" / "… that nothing is booked" compose back to an
+    // assertion.
     const final = composedPolarity(tokens, sub, polarity);
     return final === "neg" ? "B" : final === "unc" ? "C" : "A";
   }
