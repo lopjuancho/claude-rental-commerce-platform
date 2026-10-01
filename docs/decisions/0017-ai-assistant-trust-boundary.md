@@ -272,6 +272,24 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       only when they open its clause; inside a subject ("all pending quotes are booked") they no
       longer hide the claim.
 
+19. **Round 8 of the review (Codex, 055b62f).**
+    - **Conditional grammar, not first words:** a claim is hypothetical only when its own clause
+      opens with a subordinating condition ("if", "unless", "once", "when", "provided",
+      "assuming"…), or when it is the modal/future consequence ("will", "can", "would"…) of a
+      condition fronted earlier in the sentence ("Once confirmed, the booking will be held.",
+      "Pending confirmation, the booking will be held."). Words that are also adjectives
+      ("pending", "before", "after") never make a clause hypothetical on their own: "Pending
+      bookings are confirmed." is an assertion and must be grounded; "If you're wondering, your
+      booking is confirmed." (present tense) is an assertion too.
+    - **Post-verb quantifier spans:** for every claim, the words between its auxiliary verb and
+      its state word ("are [all of the eleven quotes] confirmed", "are [all umpteen] booked") are
+      parsed whole like a subject; with quantifier or count material, each token must be read or
+      the subject is unresolved. Counts from the subject and the span must agree.
+    - **One state vocabulary:** `BOOKING_STATE_WORDS` (booked/confirmed/reserved/secured/
+      finalized/finalised/locked in; held/on hold; declined/cancelled/pending/released/awaiting/
+      expired) builds BOTH grounding's state predicates and replay's time-sensitivity, so every
+      state grounding accepts stores server-side booking references and is re-read on replay.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

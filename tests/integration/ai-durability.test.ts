@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { beforeAll, expect, it } from "vitest";
+import { BOOKING_STATE_WORDS } from "@/domain/assistant/grounding";
 import { runTurn, type TurnDeps, type TurnInput } from "@/server/ai/assistant";
 import { emptyState } from "@/server/ai/context";
 import { Deadline } from "@/server/ai/deadline";
@@ -1576,4 +1577,69 @@ describeRest("availability is never replayed as current (R3-M1, round 5)", () =>
     expect(legacyReplay.reply).toMatch(RECHECK);
     expect(legacyReplay.reply).not.toMatch(/unavailable/);
   });
+});
+
+// ── round 8 (Codex review of 055b62f) ───────────────────────────────────────
+
+describeRest("every booking/hold state grounding accepts is refreshed on replay (M-REPLAY)", () => {
+  /** A gateway that counts every call: the replay's authoritative reads. */
+  function countingGateway() {
+    const base = pgGateway();
+    const calls = { n: 0 };
+    const gateway = new Proxy(base, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver) as unknown;
+        if (typeof v !== "function") return v;
+        return (...args: unknown[]) => {
+          calls.n++;
+          return (v as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+    return { gateway, calls };
+  }
+
+  it.each([...BOOKING_STATE_WORDS.booked, ...BOOKING_STATE_WORDS.held])(
+    "“%s”: refs stored server-side, replay re-reads the booking, stale prose never repeated",
+    async (word) => {
+      const isHeld = (BOOKING_STATE_WORDS.held as readonly string[]).includes(word);
+      const { c, booking } = await booked();
+      if (!isHeld) {
+        // Confirmed by the team, and the conversation has seen it (current typed evidence).
+        await change("confirm", booking);
+        await c.turn(
+          "what is the status?",
+          deps(model([tool("request_booking"), { say: "I checked the status." }])),
+        );
+      }
+      const prose = isHeld ? `Your items are ${word} right now.` : `Your booking is ${word}.`;
+      const key = randomUUID();
+      const said = await c.turn("is it done?", deps(model([{ say: prose }])), key);
+      expect(said.reply).toBe(prose); // grounded when written
+      // The stored turn carries the server-side booking reference.
+      const stored = await turnResponse(c.session, key);
+      expect(stored).toMatchObject({ refs: { bookings: [{ quoteRef: booking.token_hash }] } });
+      // Replay: the model is never called; the booking IS read again.
+      const counted = countingGateway();
+      const replay = await c.turn(
+        "is it done?",
+        deps(model([{ fail: true }]), {
+          publicDeps: {
+            gateway: counted.gateway,
+            rateLimit: () => Promise.resolve(),
+            provider: fakeProvider(3),
+          },
+        }),
+        key,
+      );
+      expect(replay.replayed).toBe(true);
+      expect(counted.calls.n).toBeGreaterThan(0);
+      expect(replay.reply).not.toBe(prose);
+      expect(replay.reply).toMatch(/^Here is where your request stands now\./);
+      expect(replay.blocks.find((b) => b.type === "booking")).toMatchObject({
+        status: isHeld ? "holding" : "confirmed",
+      });
+      expect(httpBody(replay)).not.toContain(booking.token_hash);
+    },
+  );
 });

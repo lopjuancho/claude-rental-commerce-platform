@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { addEvidence, type Evidence, type EvidenceOf } from "@/domain/assistant/evidence";
 import {
+  BOOKING_STATE_WORDS,
   checkGrounding,
   factSentences,
   type GroundingInput,
+  hypothetical,
+  predicateSpan,
   parseQuantity,
   subjectShape,
   timeSensitiveClaims,
@@ -1008,5 +1011,136 @@ describe("Codex round-7: claims and conditions are found without word windows", 
     expect(run("If the team approves, all eleven quotes are booked.", two)).toBe(false); // separate clause
     expect(run("If your booking is confirmed you will get an email.", [])).toBe(true);
     expect(run("Pending the team's review, your booking is not confirmed yet.", [])).toBe(true);
+  });
+});
+
+describe("Codex round-8", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const refusedQ = (n: string): Evidence => ({
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const many = (make: (n: string) => Evidence, n: number) =>
+    Array.from({ length: n }, (_, i) => make(`Q-${String(i + 1)}`));
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+
+  describe("H-COND: a subject modifier never makes a claim hypothetical", () => {
+    it.each([
+      "Pending bookings are confirmed.",
+      "Pending quotes are held.",
+      "Confirmed quotes are reserved.",
+      "Active bookings are held.",
+      "The pending quotes are held.",
+      "Before bookings are confirmed.",
+    ])("“%s” — rejected without evidence", (reply) => {
+      expect(run(reply, [])).toBe(false);
+    });
+    it("rejected with refused evidence, in both orders", () => {
+      const ev = [refusedQ("Q-1"), refusedQ("Q-2")];
+      for (const e of [ev, [...ev].reverse()]) {
+        expect(run("Pending bookings are confirmed.", e)).toBe(false);
+        expect(run("Pending quotes are held.", e)).toBe(false);
+      }
+    });
+    it("passes only with matching evidence", () => {
+      expect(run("Pending bookings are confirmed.", many(confirmedQ, 2))).toBe(true);
+      expect(run("Pending quotes are held.", many(heldQ, 2))).toBe(true);
+      expect(run("Pending quotes are held.", many(confirmedQ, 2))).toBe(false);
+    });
+  });
+
+  describe("L-COND: a fronted condition scopes over its modal consequence", () => {
+    it.each([
+      "Once confirmed, the booking will be held.",
+      "If the quote is confirmed, it will be booked.",
+      "If available, it can be booked.",
+      "Pending confirmation, the booking will be held.",
+      "When the team approves it, your booking will be confirmed.",
+      "Provided the team approves, the items would be held.",
+      "If the quote is confirmed it will be booked.",
+    ])("“%s” — hypothetical, no evidence needed", (reply) => {
+      expect(run(reply, [])).toBe(true);
+    });
+    it.each([
+      "If you're wondering, your booking is confirmed.",
+      "Once again, your booking is confirmed.",
+      "Pending bookings are confirmed, and they will be held.",
+    ])("“%s” — a present-tense assertion is still checked", (reply) => {
+      expect(run(reply, [])).toBe(false);
+    });
+    it("the condition parser", () => {
+      const s = "Once confirmed, the booking will be held.";
+      expect(hypothetical(s, s.indexOf("held"))).toBe(true);
+      const t = "Pending bookings are confirmed.";
+      expect(hypothetical(t, t.indexOf("confirmed"))).toBe(false);
+    });
+  });
+
+  describe("H1: the post-verb quantifier span is parsed or rejected", () => {
+    const orders = (make: (n: string) => Evidence) => [many(make, 2), many(make, 2).reverse()];
+    it.each([
+      ["They are all umpteen booked.", "They are all umpteen held."],
+      ["They are all eleven booked.", "They are all eleven held."],
+      ["They are all 11 booked.", "They are all 11 held."],
+      ["They are all of the eleven quotes confirmed.", "They are all of the eleven quotes held."],
+      ["They are all of the 11 quotes confirmed.", "They are all of the 11 quotes held."],
+      ["They are all of the umpteen quotes confirmed.", "They are all of the umpteen quotes held."],
+    ])("“%s” / “%s” — rejected with two quotes, both orders", (booked, held) => {
+      for (const e of orders(confirmedQ)) expect(run(booked, e), booked).toBe(false);
+      for (const e of orders(heldQ)) expect(run(held, e), held).toBe(false);
+    });
+    it("readable spans are read, unreadable ones are unresolved — never an absent count", () => {
+      const at = (s: string, w: string) => predicateSpan(s, s.lastIndexOf(w));
+      expect(at("They are all of the eleven quotes confirmed.", "confirmed")).toMatchObject({
+        count: 11,
+        unresolved: false,
+      });
+      expect(at("They are all of the 11 quotes confirmed.", "confirmed")).toMatchObject({
+        count: 11,
+        unresolved: false,
+      });
+      expect(at("They are all umpteen booked.", "booked")).toMatchObject({ unresolved: true });
+      expect(at("They are now officially booked.", "booked")).toMatchObject({
+        count: null,
+        unresolved: false,
+      });
+    });
+    it("positives", () => {
+      expect(run("They are all eleven booked.", many(confirmedQ, 11))).toBe(true);
+      expect(run("They are all eleven booked.", many(confirmedQ, 11).reverse())).toBe(true);
+      expect(run("They are all of the 11 quotes confirmed.", many(confirmedQ, 11))).toBe(true);
+      expect(run("They are all eleven held.", many(heldQ, 11))).toBe(true);
+      expect(run("They are both booked.", many(confirmedQ, 2))).toBe(true);
+    });
+  });
+
+  describe("M-REPLAY: one state vocabulary for grounding and replay", () => {
+    const claimWords = [...BOOKING_STATE_WORDS.booked, ...BOOKING_STATE_WORDS.held];
+    it.each(claimWords)("“%s”: grounding checks it and replay treats it as time-sensitive", (w) => {
+      const reply = `They are all eleven ${w}.`;
+      const isHeld = (BOOKING_STATE_WORDS.held as readonly string[]).includes(w);
+      // Grounding recognises it as a claim: rejected with two quotes, accepted with eleven.
+      expect(run(reply, many(isHeld ? heldQ : confirmedQ, 2))).toBe(false);
+      expect(run(reply, many(isHeld ? heldQ : confirmedQ, 11))).toBe(true);
+      expect(run(`Your booking is ${w}.`, [])).toBe(false);
+      // …and the same word marks the reply time-sensitive.
+      expect(timeSensitiveClaims(reply).booking).toBe(true);
+      expect(timeSensitiveClaims(`Your booking is ${w}.`).booking).toBe(true);
+    });
+    it.each(BOOKING_STATE_WORDS.status)("“%s” is time-sensitive", (w) => {
+      expect(timeSensitiveClaims(`The request is ${w}.`).booking).toBe(true);
+    });
   });
 });

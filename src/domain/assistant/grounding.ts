@@ -318,12 +318,21 @@ function unknownSubjects(sentence: string, known: string[], businessName: string
 const NEGATOR =
   /^(?:not|no|never|nothing|none|nor|without|cannot|can't|cant|isn't|aren't|wasn't|weren't|won't|don't|doesn't|didn't|haven't|hasn't|hadn't|yet)$/;
 /**
- * Only a condition that OPENS the clause ("if it's available, …", "once the team confirms it is
- * booked") — a word like "pending" or "before" inside a subject ("all pending quotes are booked")
- * makes nothing hypothetical.
+ * Conditional grammar (ADR 0017 §19). A claim is hypothetical only when:
+ * - its OWN clause opens with a subordinating condition ("if the quote is confirmed", "once
+ *   booked", "when it is held", "provided…", "assuming…", "unless…"); or
+ * - it is the CONSEQUENCE of a condition fronted earlier in the sentence ("Once confirmed, the
+ *   booking will be held."; "Pending confirmation, the booking will be held.") AND its clause is
+ *   modal/future ("will", "can", "would"…) — a present-tense consequence ("If you're wondering,
+ *   your booking is confirmed.") is a real assertion.
+ * Words that can also be adjectives ("pending", "before", "after", "until") are conditions only as
+ * a fronted phrase followed by its consequence: "Pending bookings are confirmed." is an assertion.
  */
-const CONDITION =
-  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:if|unless|whether|once|until|before|pending)\b/i;
+const STRONG_CONDITION =
+  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:if|unless|whether|once|when|whenever|provided(?:\s+that)?|assuming(?:\s+that)?|as soon as|in case)\b/i;
+const WEAK_CONDITION =
+  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:pending|before|after|until|upon)\b/i;
+const MODAL = /\b(?:will|would|can|could|may|might|shall|should)\b|'ll\b|'d\b/i;
 
 function clauseAt(sentence: string, index: number): { text: string; offset: number } {
   // Not ":" — times ("12:00") would split a clause.
@@ -356,10 +365,21 @@ export function blankFillers(text: string): string {
   return text.replace(FILLER, (m) => " ".repeat(m.length));
 }
 
+export function hypothetical(sentence: string, index: number): boolean {
+  const { text, offset } = clauseAt(sentence, index);
+  if (STRONG_CONDITION.test(text.slice(0, offset))) return true;
+  const clauseStart = index - offset;
+  if (clauseStart > 0 && MODAL.test(text)) {
+    const fronted = sentence.slice(0, clauseStart);
+    if (STRONG_CONDITION.test(fronted) || WEAK_CONDITION.test(fronted)) return true;
+  }
+  return false;
+}
+
 function negated(sentence: string, index: number): boolean {
+  if (hypothetical(sentence, index)) return true;
   const { text, offset } = clauseAt(sentence, index);
   const before = text.slice(0, offset);
-  if (CONDITION.test(before)) return true;
   const words = before.toLowerCase().match(/[a-z']+/g) ?? [];
   return words.slice(-3).some((w) => NEGATOR.test(w) || w.endsWith("n't"));
 }
@@ -605,6 +625,71 @@ export function subjectShape(sentence: string): SubjectShape {
   return { plural: plural || (count ?? 0) >= 2 || unresolved, count, unresolved };
 }
 
+/** Adverbs that may sit between the verb and the state ("are now all officially booked"). */
+const PREDICATE_WORDS = new Set(
+  "now officially fully already also definitely still currently temporarily just".split(" "),
+);
+
+/**
+ * The span between a claim's auxiliary verb and its state word — "They are [all of the eleven
+ * quotes] confirmed", "They are [all umpteen] booked" — parsed whole. When it carries quantifier
+ * or count material, every token must be understood (a count read by the canonical parser, a
+ * quote number, a known determiner/modifier/noun/adverb); otherwise the subject is UNRESOLVED.
+ */
+export function predicateSpan(sentence: string, stateAt: number): SubjectShape {
+  const tokens = sentence.slice(0, stateAt).match(TOKEN) ?? [];
+  let aux = -1;
+  tokens.forEach((t, i) => {
+    const l = t.toLowerCase();
+    if (VERBS.has(l) || l.endsWith("'re") || l.endsWith("'s")) aux = i;
+  });
+  const span = aux < 0 ? [] : tokens.slice(aux + 1);
+  const lower = span.map((t) => t.toLowerCase());
+  const material = lower.some((t) => QUANTIFIERS.has(t)) || span.some(isNumberToken);
+  if (!material) return { plural: false, count: null, unresolved: false };
+  const counts: number[] = [];
+  let unresolved = false;
+  if (lower.includes("both")) counts.push(2);
+  for (let i = 0; i < span.length; i++) {
+    const t = span[i] ?? "";
+    if (isNumberToken(t)) {
+      let j = i + 1;
+      while (
+        j < span.length &&
+        (isNumberToken(span[j] ?? "") ||
+          (/^(?:and|a)$/i.test(span[j] ?? "") && isNumberToken(span[j + 1] ?? "")))
+      ) {
+        j++;
+      }
+      const n = parseQuantity(span.slice(i, j).join(" "));
+      if (n === null) unresolved = true;
+      else counts.push(n);
+      i = j - 1;
+    } else if (
+      !isQuoteNumberToken(t) &&
+      !SUBJECT_WORDS.has(t.toLowerCase()) &&
+      !PREDICATE_WORDS.has(t.toLowerCase())
+    ) {
+      unresolved = true;
+    }
+  }
+  const distinct = [...new Set(counts)];
+  if (distinct.length > 1) unresolved = true;
+  const count = distinct[0] ?? null;
+  if (lower.some((t) => QUANTIFIERS.has(t)) && count !== null && count < 2) unresolved = true;
+  return { plural: true, count, unresolved };
+}
+
+/** Two readings of the same claim: plurality and unresolved-ness add up; counts must agree. */
+function mergeShapes(a: SubjectShape, b: SubjectShape): SubjectShape {
+  const counts = [...new Set([a.count, b.count].filter((c): c is number => c !== null))];
+  return {
+    plural: a.plural || b.plural,
+    count: counts[0] ?? null,
+    unresolved: a.unresolved || b.unresolved || counts.length > 1,
+  };
+}
+
 // ── claim patterns ───────────────────────────────────────────────────────────
 
 /** Positive availability wording (bare "available" included: "Party Slide: available Saturday"). */
@@ -627,19 +712,46 @@ const PAYMENT_CLAIM =
   /\b(?:paid|payment (?:is |has been |was )?(?:received|complete|completed|processed|made|taken|confirmed|successful|done)|charged (?:your|the) card|card (?:has been|was|is) charged|(?:you(?:'ve| have)|you were) (?:been )?(?:charged|billed)|deposit (?:has been |was |is )?(?:received|taken|collected)|prepaid)\b/gi;
 
 /**
- * Booking/hold STATE predicates, found without any word window: a state word with a form of "be"
- * anywhere before it in the sentence ("they are all eleven booked", "the quotes are, as of now,
- * all confirmed"). These complement the phrase patterns above, which are bounded.
+ * THE booking/hold state vocabulary (ADR 0017 §19). Grounding's state predicates and replay's
+ * time-sensitivity are both built from this one table, so a state grounding accepts can never be
+ * replayed as stored prose: `booked` and `held` words are claims checked against evidence; every
+ * word of every list marks a reply time-sensitive.
  */
-const BOOKED_STATE = /\b(?:booked|confirmed|reserved|secured|finali[sz]ed|locked in)\b/gi;
-const HELD_STATE = /\b(?:held|on hold)\b/gi;
+export const BOOKING_STATE_WORDS = {
+  booked: ["booked", "confirmed", "reserved", "secured", "finalized", "finalised", "locked in"],
+  held: ["held", "on hold"],
+  status: ["declined", "cancelled", "canceled", "pending", "released", "awaiting", "expired"],
+} as const;
+const wordsRegex = (list: readonly string[], flags: string) =>
+  new RegExp(`\\b(?:${list.map((w) => w.replace(/ /g, "\\s+")).join("|")})\\b`, flags);
+const BOOKED_STATE = wordsRegex(BOOKING_STATE_WORDS.booked, "gi");
+const HELD_STATE = wordsRegex(BOOKING_STATE_WORDS.held, "gi");
 const BE_VERB = /\b(?:is|are|was|were|be|been|being)\b|'s\b|'re\b/i;
-function statePredicates(sentence: string, state: RegExp, phrases: RegExp): number[] {
-  const at = new Set<number>([...sentence.matchAll(phrases)].map((m) => m.index));
-  for (const m of sentence.matchAll(state)) {
-    if (BE_VERB.test(sentence.slice(0, m.index))) at.add(m.index);
+
+/**
+ * Booking/hold STATE predicates, found without any word window: every phrase-pattern match, and
+ * every state word with a form of "be" anywhere before it in the sentence ("they are all eleven
+ * booked"). `at` is where negation is judged; `stateAt` is the state word itself (where the
+ * post-verb span ends).
+ */
+function statePredicates(
+  sentence: string,
+  state: RegExp,
+  phrases: RegExp,
+): { at: number; stateAt: number }[] {
+  const out = new Map<number, { at: number; stateAt: number }>();
+  const single = new RegExp(state.source, "i");
+  for (const m of sentence.matchAll(phrases)) {
+    const inner = single.exec(m[0]);
+    const stateAt = m.index + (inner ? inner.index : 0);
+    out.set(stateAt, { at: m.index, stateAt });
   }
-  return [...at].sort((a, b) => a - b);
+  for (const m of sentence.matchAll(state)) {
+    if (BE_VERB.test(sentence.slice(0, m.index)) && !out.has(m.index)) {
+      out.set(m.index, { at: m.index, stateAt: m.index });
+    }
+  }
+  return [...out.values()].sort((x, y) => x.stateAt - y.stateAt);
 }
 
 /**
@@ -909,7 +1021,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     // "they") with nothing named means every quote of this conversation — and must match any
     // stated count. One confirmed quote never authorises a claim about several; a plural claim
     // that cannot be resolved exactly is rejected (null subject).
-    const subjectsOf = (): (EvidenceOf<"booking"> | null)[] => {
+    const subjectsOf = (stateAt: number): (EvidenceOf<"booking"> | null)[] => {
       // Resolution order (a null subject means UNRESOLVED, and the claim is rejected):
       //   1. quote numbers named in this sentence;
       //   2. quote numbers named in the nearest earlier sentence naming any;
@@ -917,7 +1029,9 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       //   4. the latest single booking — ONLY for a singular claim.
       // An explicitly plural claim never resolves to one booking: it needs 2+ concrete subjects,
       // an exact match with any stated count, and no unreadable count.
-      const shape = subjectShape(sentence);
+      // The sentence's subjects AND the claim's own post-verb span ("are [all of the eleven
+      // quotes] confirmed"): neither can remove what the other found.
+      const shape = mergeShapes(subjectShape(sentence), predicateSpan(sentence, stateAt));
       const bookingOf = (n: string) => latest(input, "booking", (b) => b.quoteNumber === n);
       if (shape.unresolved) return [null];
       const named = [...new Set(quoteNumbers.length ? quoteNumbers : earlier)];
@@ -933,18 +1047,18 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       return all.map(bookingOf);
     };
 
-    for (const index of statePredicates(sentence, BOOKED_STATE, BOOKED_CLAIM)) {
-      if (negated(sentence, index)) continue;
-      if (!subjectsOf().every((b) => b?.status === "confirmed")) {
+    for (const p of statePredicates(sentence, BOOKED_STATE, BOOKED_CLAIM)) {
+      if (negated(sentence, p.at)) continue;
+      if (!subjectsOf(p.stateAt).every((b) => b?.status === "confirmed")) {
         flag("GROUNDING_BOOKING_STATUS_UNSUPPORTED");
         break;
       }
     }
 
-    for (const index of statePredicates(sentence, HELD_STATE, HOLD_CLAIM)) {
-      if (negated(sentence, index)) continue;
+    for (const p of statePredicates(sentence, HELD_STATE, HOLD_CLAIM)) {
+      if (negated(sentence, p.at)) continue;
       const minutes = /\bfor (\d+) minutes?\b/i.exec(sentence);
-      const ok = subjectsOf().every((b) => {
+      const ok = subjectsOf(p.stateAt).every((b) => {
         const remaining = b?.holdExpiresAt
           ? (Date.parse(b.holdExpiresAt) - input.now.getTime()) / 60_000
           : 0;
@@ -991,9 +1105,27 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
 
 // ── time-sensitive prose (replay) ────────────────────────────────────────────
 
-/** Any mention of a booking's status, in either polarity ("not confirmed yet" can become false). */
-const BOOKING_STATUS_MENTION =
-  /\b(?:book(?:ed|ing)|confirm(?:ed|ation)|reserv(?:ed|ation)|held|holds?|holding|on hold|declined|cancel(?:l)?ed|awaiting|pending|locked in|secured|all set)\b/i;
+/**
+ * Any mention of a booking's status, in either polarity ("not confirmed yet" can become false):
+ * EVERY word of the shared state table (so every state grounding recognises), plus the nouns.
+ */
+const BOOKING_STATUS_MENTION = wordsRegex(
+  [
+    ...BOOKING_STATE_WORDS.booked,
+    ...BOOKING_STATE_WORDS.held,
+    ...BOOKING_STATE_WORDS.status,
+    "booking",
+    "bookings",
+    "confirmation",
+    "reservation",
+    "reservations",
+    "hold",
+    "holds",
+    "holding",
+    "all set",
+  ],
+  "i",
+);
 
 /**
  * Any availability statement, in either polarity ("available", "unavailable", "not available",
