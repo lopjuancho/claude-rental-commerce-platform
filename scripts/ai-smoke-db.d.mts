@@ -39,3 +39,36 @@ export function countForCustomer(
   email: string,
   kind: "quotes" | "bookings",
 ): Promise<number>;
+export function storedTurn(
+  db: Queryable,
+  organizationId: string,
+  sessionToken: string | null,
+  requestKey: string,
+): Promise<{ status: string; attempt: number; bookingRefs: number } | null>;
+export function conversationCounters(
+  db: Queryable,
+  organizationId: string,
+  sessionToken: string | null,
+): Promise<{ messages: number; actions: number; attempts: number } | null>;
+export function cancelSmokeBooking(
+  client: Queryable,
+  organizationId: string,
+  quoteId: string,
+): Promise<string | null>;
+export function bookingStatus(
+  db: Queryable,
+  organizationId: string,
+  quoteId: string,
+): Promise<string | null>;
+export function addSmokeAvailabilityBlock(
+  db: Queryable,
+  organizationId: string,
+  productSlug: string,
+  isoDate: string,
+  tag: string,
+): Promise<string | null>;
+export function removeSmokeAvailabilityBlocks(
+  db: Queryable,
+  organizationId: string,
+  tag: string,
+): Promise<number>;

@@ -91,3 +91,106 @@ export async function countForCustomer(db, organizationId, email, kind) {
   const { rows } = await db.query(sql, [organizationId, email]);
   return rows[0].n;
 }
+
+// ── final-gate checks (replay after a state change) ─────────────────────────────
+
+const sessionHashOf = (sessionToken) => sha256(`ai:${sessionToken ?? ""}`);
+
+/**
+ * What the server stored for one turn of THIS session in this organization — without returning
+ * any hash: its status and attempt, and whether its stored response carries server-side booking
+ * references (refs or booking cards with a reference).
+ */
+export async function storedTurn(db, organizationId, sessionToken, requestKey) {
+  const { rows } = await db.query(
+    `select t.status, t.attempt,
+            coalesce(jsonb_array_length(t.response -> 'refs' -> 'bookings'), 0) as refs,
+            (select count(*)::int from jsonb_array_elements(coalesce(t.response -> 'blocks', '[]'::jsonb)) b
+              where b ->> 'type' = 'booking' and b ? 'quoteRef') as booking_cards
+     from public.ai_turns t join public.ai_conversations c on c.id = t.conversation_id
+     where c.organization_id = $1 and c.session_hash = $2 and t.request_key = $3`,
+    [organizationId, sessionHashOf(sessionToken), requestKey],
+  );
+  const r = rows[0];
+  return r
+    ? {
+        status: r.status,
+        attempt: r.attempt,
+        bookingRefs: Number(r.refs) + Number(r.booking_cards),
+      }
+    : null;
+}
+
+/** Counters that change whenever the model runs or anything is appended for this session. */
+export async function conversationCounters(db, organizationId, sessionToken) {
+  const { rows } = await db.query(
+    `select c.message_count,
+            (select count(*)::int from public.ai_actions a where a.conversation_id = c.id) as actions,
+            (select coalesce(sum(t.attempt), 0)::int from public.ai_turns t where t.conversation_id = c.id) as attempts
+     from public.ai_conversations c where c.organization_id = $1 and c.session_hash = $2`,
+    [organizationId, sessionHashOf(sessionToken)],
+  );
+  const r = rows[0];
+  return r ? { messages: r.message_count, actions: r.actions, attempts: r.attempts } : null;
+}
+
+/**
+ * Smoke-only state change: cancel the pending booking request of THIS organization's exact quote
+ * through the same function the quote page uses (it releases the hold). The quote's token hash is
+ * looked up inside the statement and never leaves the database. `client` must be a single
+ * connection (a pg Client), since the service-role claim is set for this transaction only.
+ */
+export async function cancelSmokeBooking(client, organizationId, quoteId) {
+  await client.query("begin");
+  try {
+    await client.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+    const { rows } = await client.query(
+      `select public.cancel_booking_by_token($1,
+         (select q.token_hash from public.quotes q where q.organization_id = $1 and q.id = $2)) as id`,
+      [organizationId, quoteId],
+    );
+    await client.query("commit");
+    return rows[0]?.id ?? null;
+  } catch (e) {
+    await client.query("rollback");
+    throw e;
+  }
+}
+
+/** The current status of THIS organization's exact quote's booking request. */
+export async function bookingStatus(db, organizationId, quoteId) {
+  const { rows } = await db.query(
+    `select b.status::text as status from public.booking_requests b
+     where b.organization_id = $1 and b.quote_id = $2 order by b.created_at desc limit 1`,
+    [organizationId, quoteId],
+  );
+  return rows[0]?.status ?? null;
+}
+
+/**
+ * Smoke-only availability change: a maintenance block for ONE product of this organization on
+ * one (far-future) date, tagged so it can be removed exactly. The window spans the whole local
+ * day in any timezone. Returns the block id.
+ */
+export async function addSmokeAvailabilityBlock(db, organizationId, productSlug, isoDate, tag) {
+  const { rows } = await db.query(
+    `insert into public.availability_blocks (organization_id, product_id, period, reason, notes)
+     select $1, p.id,
+            tstzrange(($3::date - interval '14 hours')::timestamptz, ($3::date + interval '38 hours')::timestamptz),
+            'maintenance', $4
+     from public.products p where p.organization_id = $1 and p.slug = $2
+     returning id`,
+    [organizationId, productSlug, isoDate, tag],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/** Removes exactly the smoke's tagged blocks of this organization. Returns how many. */
+export async function removeSmokeAvailabilityBlocks(db, organizationId, tag) {
+  if (!/^ai-smoke-[0-9a-f]{8,}$/.test(tag)) throw new Error("refusing to remove untagged blocks");
+  const r = await db.query(
+    "delete from public.availability_blocks where organization_id = $1 and notes = $2",
+    [organizationId, tag],
+  );
+  return r.rowCount;
+}

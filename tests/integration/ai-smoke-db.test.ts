@@ -1,10 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, expect, it } from "vitest";
+import { runTurn } from "@/server/ai/assistant";
+import type { LlmProvider } from "@/server/ai/provider";
+import { generateSessionToken } from "@/server/ai/session";
 import { requestPublicBooking, submitQuoteRequest } from "@/server/public/quotes";
 import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { generateVisitorToken } from "@/server/visitor";
 import {
+  addSmokeAvailabilityBlock,
   bookingRequestsFor,
+  bookingStatus,
+  cancelSmokeBooking,
+  conversationCounters,
+  removeSmokeAvailabilityBlocks,
+  storedTurn,
   countForCustomer,
   currentSessionToken,
   expireQuote,
@@ -12,6 +21,7 @@ import {
   quoteByLink,
   resolveOrganization,
 } from "../../scripts/ai-smoke-db.mjs";
+import { pgAiStore } from "./support/ai";
 import { makeProduct } from "./support/availability";
 import { admin, createOrg, pool, type TestOrg } from "./support/db";
 import { fakeProvider, pgGateway } from "./support/pricing";
@@ -164,3 +174,110 @@ describeRest("smoke-test database checks are tenant-scoped (R4-L1)", () => {
     expect(currentSessionToken(new Map())).toBeNull();
   });
 });
+
+describeRest(
+  "final-gate smoke helpers are tenant-scoped and leak nothing (live replay checks)",
+  () => {
+    const sayModel = (text: string): LlmProvider => ({
+      id: "plan",
+      model: "plan-test",
+      complete: () =>
+        Promise.resolve({
+          text,
+          toolCalls: [],
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }),
+    });
+    const fail: LlmProvider = {
+      id: "plan",
+      model: "plan-test",
+      complete: () => Promise.reject(Object.assign(new Error("down"), { code: "HTTP" })),
+    };
+    const turnDeps = (provider: LlmProvider) => ({
+      provider,
+      store: pgAiStore(),
+      maxOutputTokens: 200,
+      publicDeps: deps(),
+    });
+
+    it("cancelSmokeBooking cancels only this organization's exact quote's request", async () => {
+      const email = `gate-${randomUUID().slice(0, 8)}@example.test`;
+      const a = await quote(orgA, email);
+      await requestPublicBooking(
+        tenantOf(orgA),
+        { tokenHash: a.tokenHash },
+        {},
+        { ip: "198.51.100.63", visitorToken: generateVisitorToken() },
+        deps(),
+      );
+      const qa = await quoteByLink(pool, orgA.id, a.url);
+      expect(await bookingStatus(pool, orgA.id, qa!.id)).toBe("pending");
+      // Another tenant's scope cannot touch it.
+      const other = await pool.connect();
+      try {
+        await expect(cancelSmokeBooking(other, orgB.id, qa!.id)).rejects.toThrow();
+      } finally {
+        other.release();
+      }
+      expect(await bookingStatus(pool, orgA.id, qa!.id)).toBe("pending");
+      expect(await bookingStatus(pool, orgB.id, qa!.id)).toBeNull();
+      const client = await pool.connect();
+      try {
+        expect(await cancelSmokeBooking(client, orgA.id, qa!.id)).toMatch(/^[0-9a-f-]{36}$/);
+      } finally {
+        client.release();
+      }
+      expect(await bookingStatus(pool, orgA.id, qa!.id)).toBe("cancelled");
+    });
+
+    it("availability blocks: added for one product, removed exactly by tag, scoped to the org", async () => {
+      const p = await makeProduct(orgA, { units: 1 });
+      const slug = (
+        await admin<{ slug: string }>("select slug from public.products where id = $1", [
+          p.productId,
+        ])
+      ).rows[0]!.slug;
+      const tag = `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      expect(await addSmokeAvailabilityBlock(pool, orgB.id, slug, "2030-06-01", tag)).toBeNull();
+      expect(await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-06-01", tag)).toMatch(
+        /^[0-9a-f-]{36}$/,
+      );
+      expect(await removeSmokeAvailabilityBlocks(pool, orgB.id, tag)).toBe(0);
+      expect(await removeSmokeAvailabilityBlocks(pool, orgA.id, tag)).toBe(1);
+      await expect(removeSmokeAvailabilityBlocks(pool, orgA.id, "")).rejects.toThrow();
+    });
+
+    it("storedTurn / conversationCounters: scoped, hash-free, and unchanged by a replay", async () => {
+      const session = generateSessionToken();
+      const key = randomUUID();
+      const input = {
+        tenant: tenantOf(orgA),
+        sessionToken: session,
+        requestKey: key,
+        message: "hello",
+        meta: { ip: "198.51.100.64" },
+        correlationId: `c-${randomUUID()}`,
+      };
+      await runTurn(input, turnDeps(sayModel("Hi there!")));
+      const t = await storedTurn(pool, orgA.id, session, key);
+      expect(t).toEqual({ status: "completed", attempt: 1, bookingRefs: 0 });
+      expect(JSON.stringify(t)).not.toMatch(/[0-9a-f]{64}/);
+      expect(await storedTurn(pool, orgB.id, session, key)).toBeNull();
+      const before = await conversationCounters(pool, orgA.id, session);
+      const replay = await runTurn(input, turnDeps(fail));
+      expect(replay.replayed).toBe(true);
+      expect(await conversationCounters(pool, orgA.id, session)).toEqual(before);
+      // References count, without being returned.
+      await admin(
+        `update public.ai_turns t set response = response || jsonb_build_object(
+         'refs', jsonb_build_object('bookings', jsonb_build_array(jsonb_build_object('quoteRef', repeat('a', 64), 'quoteNumber', 'Q-1'))),
+         'blocks', jsonb_build_array(jsonb_build_object('type', 'booking', 'quoteRef', repeat('a', 64))))
+       from public.ai_conversations c where c.id = t.conversation_id and t.request_key = $1 and c.organization_id = $2`,
+        [key, orgA.id],
+      );
+      const withRefs = await storedTurn(pool, orgA.id, session, key);
+      expect(withRefs?.bookingRefs).toBe(2);
+      expect(JSON.stringify(withRefs)).not.toContain("a".repeat(64));
+    });
+  },
+);
