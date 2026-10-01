@@ -290,6 +290,23 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       expired) builds BOTH grounding's state predicates and replay's time-sensitivity, so every
       state grounding accepts stores server-side booking references and is re-read on replay.
 
+20. **Round 9 of the review (Codex, bd78ff6).** Scope is decided per claim, not per sentence.
+    - **Per-predicate conditional scope:** each state word's own auxiliary chain (the verbs,
+      modals and adverbs immediately governing it) is found. The claim is hypothetical only if it
+      is the antecedent's own predicate (its clause opens with a condition and no other verb
+      stands between the marker and that chain: "If the quote is confirmed"), or if a condition
+      was opened earlier AND its own chain is modal/future ("it WILL BE booked"). A later
+      predicate's modal ("…is confirmed and you can relax", "…and I will send details") never
+      reaches back; "once again"/"once more" are not conditions.
+    - **Outer counts survive inner clauses:** the post-verb span is anchored at the clause's first
+      verb and only the claim's own trailing auxiliaries are stripped. Count material together
+      with a relative pronoun or another verb inside the span ("are all of the eleven quotes that
+      have been confirmed") cannot be bound to the claim and fails closed.
+    - **Replay tests change the authoritative state** between storing a prose-only reply and
+      replaying it, for every grounded state word (held → expired/cancelled/declined/released/
+      confirmed; confirmed → cancelled), and assert the new state, an authoritative read, no old
+      prose and no server-only reference in the HTTP body.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

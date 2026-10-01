@@ -318,21 +318,61 @@ function unknownSubjects(sentence: string, known: string[], businessName: string
 const NEGATOR =
   /^(?:not|no|never|nothing|none|nor|without|cannot|can't|cant|isn't|aren't|wasn't|weren't|won't|don't|doesn't|didn't|haven't|hasn't|hadn't|yet)$/;
 /**
- * Conditional grammar (ADR 0017 §19). A claim is hypothetical only when:
- * - its OWN clause opens with a subordinating condition ("if the quote is confirmed", "once
- *   booked", "when it is held", "provided…", "assuming…", "unless…"); or
- * - it is the CONSEQUENCE of a condition fronted earlier in the sentence ("Once confirmed, the
- *   booking will be held."; "Pending confirmation, the booking will be held.") AND its clause is
- *   modal/future ("will", "can", "would"…) — a present-tense consequence ("If you're wondering,
- *   your booking is confirmed.") is a real assertion.
- * Words that can also be adjectives ("pending", "before", "after", "until") are conditions only as
- * a fronted phrase followed by its consequence: "Pending bookings are confirmed." is an assertion.
+ * Conditional grammar, decided PER CLAIM (ADR 0017 §19–20). A claim is hypothetical only when:
+ * - it is the antecedent's own predicate: its clause opens with a subordinating condition ("if",
+ *   "unless", "whether", "once" — not "once again/more" —, "when", "provided", "assuming", "as
+ *   soon as", "in case") and no other verb stands between that marker and the claim's own
+ *   auxiliary chain ("If the quote is confirmed"; NOT "If you're wondering your booking is…"); or
+ * - it is a consequence of a condition opened earlier in the sentence AND its OWN auxiliary chain
+ *   — the verbs immediately governing the state word — is modal/future ("it WILL BE booked",
+ *   "it CAN BE booked"). A modal of another, later predicate ("…is confirmed and you can relax")
+ *   never reaches back to an earlier present-tense claim.
+ * Words that are also adjectives ("pending", "before", "after") are conditions only as a fronted
+ * phrase: "Pending bookings are confirmed." is an assertion.
  */
-const STRONG_CONDITION =
-  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:if|unless|whether|once|when|whenever|provided(?:\s+that)?|assuming(?:\s+that)?|as soon as|in case)\b/i;
-const WEAK_CONDITION =
-  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:pending|before|after|until|upon)\b/i;
-const MODAL = /\b(?:will|would|can|could|may|might|shall|should)\b|'ll\b|'d\b/i;
+const STRONG_MARKER =
+  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:if|unless|whether|once(?!\s+(?:again|more)\b)|when|whenever|provided(?:\s+that)?|assuming(?:\s+that)?|as\s+soon\s+as|in\s+case)\b/i;
+const WEAK_MARKER = /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:pending|before|after|until|upon)\b/i;
+const AUX_WORDS = new Set(
+  "am is are was were be been being have has had do does did get gets got getting".split(" "),
+);
+const MODAL_WORDS = new Set("will would can could may might shall should must".split(" "));
+/** Words that may sit inside an auxiliary chain without ending it. */
+const CHAIN_FILLER = new Set(
+  "not never now already also still just officially fully definitely currently temporarily all both each".split(
+    " ",
+  ),
+);
+const isContractedVerb = (t: string) => /'(?:re|s|ve|ll|d|m)$/i.test(t);
+const isVerbToken = (t: string) => {
+  const l = t.toLowerCase();
+  return AUX_WORDS.has(l) || MODAL_WORDS.has(l) || isContractedVerb(l) || /ing$/.test(l);
+};
+
+/**
+ * The auxiliary chain governing the state word at the end of `tokens` (walking back over verbs,
+ * modals, negators/adverbs and count material): where it starts, and whether it is modal/future.
+ */
+function auxChain(tokens: string[]): { start: number; modal: boolean } {
+  let i = tokens.length - 1;
+  let modal = false;
+  while (i >= 0) {
+    const l = (tokens[i] ?? "").toLowerCase();
+    if (MODAL_WORDS.has(l) || /'(?:ll|d)$/.test(l)) {
+      modal = true;
+      i--;
+    } else if (AUX_WORDS.has(l) || isContractedVerb(l) || CHAIN_FILLER.has(l) || isCountToken(l)) {
+      i--;
+    } else break;
+  }
+  return { start: i + 1, modal };
+}
+const isCountToken = (t: string) =>
+  /^\d{1,3}(?:,\d{3})+$|^\d+$/.test(t) ||
+  t
+    .toLowerCase()
+    .split("-")
+    .every((w) => w in UNITS || w in SCALES);
 
 function clauseAt(sentence: string, index: number): { text: string; offset: number } {
   // Not ":" — times ("12:00") would split a clause.
@@ -367,11 +407,22 @@ export function blankFillers(text: string): string {
 
 export function hypothetical(sentence: string, index: number): boolean {
   const { text, offset } = clauseAt(sentence, index);
-  if (STRONG_CONDITION.test(text.slice(0, offset))) return true;
   const clauseStart = index - offset;
-  if (clauseStart > 0 && MODAL.test(text)) {
+  const before = text.slice(0, offset);
+  const tokens = before.match(/[A-Za-z0-9][A-Za-z0-9'-]*(?:,\d{3})*/g) ?? [];
+  const chain = auxChain(tokens);
+  const marker = STRONG_MARKER.exec(before);
+  if (marker) {
+    // The antecedent's own predicate: nothing verbal between the marker and the claim's chain.
+    const markerTokens = (marker[0].match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? []).length;
+    if (!tokens.slice(markerTokens, chain.start).some(isVerbToken)) return true;
+    // A consequence in the same clause ("If the quote is confirmed it will be booked").
+    return chain.modal;
+  }
+  // The consequence of a condition fronted in an earlier clause — only with its own modal chain.
+  if (clauseStart > 0 && chain.modal) {
     const fronted = sentence.slice(0, clauseStart);
-    if (STRONG_CONDITION.test(fronted) || WEAK_CONDITION.test(fronted)) return true;
+    if (STRONG_MARKER.test(fronted) || WEAK_MARKER.test(fronted)) return true;
   }
   return false;
 }
@@ -637,16 +688,43 @@ const PREDICATE_WORDS = new Set(
  * quote number, a known determiner/modifier/noun/adverb); otherwise the subject is UNRESOLVED.
  */
 export function predicateSpan(sentence: string, stateAt: number): SubjectShape {
-  const tokens = sentence.slice(0, stateAt).match(TOKEN) ?? [];
-  let aux = -1;
-  tokens.forEach((t, i) => {
+  // The claim's clause, from its start (after the last separator) to the state word.
+  let clauseStart = 0;
+  for (const m of sentence.slice(0, stateAt).matchAll(CLAUSE_SEPARATOR)) {
+    clauseStart = m.index + m[0].length;
+  }
+  const tokens = sentence.slice(clauseStart, stateAt).match(TOKEN) ?? [];
+  // Anchored at the clause's FIRST verb (the outer assertion's), never a later one: a relative
+  // clause's "have been" must not erase "all of the eleven quotes" before it.
+  const first = tokens.findIndex((t) => {
     const l = t.toLowerCase();
-    if (VERBS.has(l) || l.endsWith("'re") || l.endsWith("'s")) aux = i;
+    return VERBS.has(l) || l.endsWith("'re") || l.endsWith("'s");
   });
-  const span = aux < 0 ? [] : tokens.slice(aux + 1);
+  let span = first < 0 ? [] : tokens.slice(first + 1);
+  // Drop the claim's own trailing auxiliary chain ("… quotes that HAVE NOW BEEN confirmed").
+  let end = span.length;
+  while (end > 0) {
+    const l = (span[end - 1] ?? "").toLowerCase();
+    if (
+      AUX_WORDS.has(l) ||
+      MODAL_WORDS.has(l) ||
+      isContractedVerb(l) ||
+      PREDICATE_WORDS.has(l) ||
+      l === "not" ||
+      l === "never"
+    ) {
+      end--;
+    } else break;
+  }
+  span = span.slice(0, end);
   const lower = span.map((t) => t.toLowerCase());
   const material = lower.some((t) => QUANTIFIERS.has(t)) || span.some(isNumberToken);
   if (!material) return { plural: false, count: null, unresolved: false };
+  // Count material with a relative clause or another verb inside ("are all of the eleven quotes
+  // THAT HAVE been confirmed"): the parser cannot bind the count to the claim — fail closed.
+  if (span.some((t) => /^(?:that|which|who|whom|whose)$/i.test(t) || isVerbToken(t))) {
+    return { plural: true, count: null, unresolved: true };
+  }
   const counts: number[] = [];
   let unresolved = false;
   if (lower.includes("both")) counts.push(2);

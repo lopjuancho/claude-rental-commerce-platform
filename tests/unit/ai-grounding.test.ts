@@ -1144,3 +1144,108 @@ describe("Codex round-8", () => {
     });
   });
 });
+
+describe("Codex round-9: conditional scope and spans are decided per claim", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const refusedQ = (n: string): Evidence => ({
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const many = (make: (n: string) => Evidence, n: number) =>
+    Array.from({ length: n }, (_, i) => make(`Q-${String(i + 1)}`));
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+  const refused = [refusedQ("Q-1"), refusedQ("Q-2")];
+  const evidenceSets: [string, Evidence[]][] = [
+    ["no evidence", []],
+    ["refused", refused],
+    ["refused, reversed", [...refused].reverse()],
+  ];
+
+  describe.each(evidenceSets)("H-COND current assertions are checked (%s)", (_l, evidence) => {
+    it.each([
+      "If you're wondering, your booking is confirmed and you can relax.",
+      "If you're wondering, your booking is confirmed and I will send details.",
+      "Once again your booking is confirmed.",
+      "Once again, your booking is confirmed.",
+      "Once more, your booking is confirmed.",
+      "Your booking is confirmed and I can send the receipt.",
+      "Your booking is confirmed and we will contact you.",
+      "If you're wondering your booking is confirmed.",
+      "If you asked, the items are held and we'll deliver on Saturday.",
+    ])("“%s” → rejected", (reply) => {
+      expect(run(reply, evidence)).toBe(false);
+    });
+  });
+
+  it.each([
+    "Once confirmed, the booking will be held.",
+    "If confirmed, the booking will be held.",
+    "If the quote is confirmed, it will be booked.",
+    "If the quote is confirmed it will be booked.",
+    "If available, it can be booked.",
+    "When approved, the booking will be secured.",
+    "When approved, the booking can be confirmed.",
+    "Provided the quote is accepted, it may be reserved.",
+    "Pending confirmation, the booking will be held.",
+  ])("real hypothetical: “%s” → no evidence needed", (reply) => {
+    expect(run(reply, [])).toBe(true);
+  });
+
+  it("the modal must govern THIS claim", () => {
+    const s = "If you're wondering, your booking is confirmed and you can relax.";
+    expect(hypothetical(s, s.indexOf("confirmed"))).toBe(false);
+    const t = "Once confirmed, the booking will be held.";
+    expect(hypothetical(t, t.indexOf("held"))).toBe(true);
+    const u = "Once again your booking is confirmed.";
+    expect(hypothetical(u, u.indexOf("confirmed"))).toBe(false);
+  });
+
+  describe("H1: a later auxiliary or relative clause never erases the outer count", () => {
+    const orders = (make: (n: string) => Evidence) => [many(make, 2), many(make, 2).reverse()];
+    it.each([
+      "They are all of the eleven quotes that have been confirmed.",
+      "They are all of the 11 quotes that have been confirmed.",
+      "They are all of the umpteen quotes that have been confirmed.",
+      "They are all of the eleven bookings that were confirmed.",
+      "They are all eleven quotes that have now been confirmed.",
+      "They are all eleven quotes which have been confirmed.",
+      "They are all of the eleven quotes that had been confirmed.",
+      "They are all of the eleven quotes that will have been confirmed.",
+      "They are all of the eleven quotes that were already confirmed.",
+      "They are all eleven quotes that have now been confirmed.",
+    ])("“%s” → rejected (both orders)", (reply) => {
+      for (const e of orders(confirmedQ)) expect(run(reply, e)).toBe(false);
+      expect(predicateSpan(reply, reply.lastIndexOf("confirmed")).unresolved).toBe(true);
+    });
+    it.each([
+      "They are all of the eleven quotes that have been held.",
+      "They are all of the umpteen quotes that have been held.",
+      "They are all eleven quotes which have now been held.",
+    ])("held: “%s” → rejected (both orders)", (reply) => {
+      for (const e of orders(heldQ)) expect(run(reply, e)).toBe(false);
+    });
+    it("fails closed even when the count would match", () => {
+      expect(
+        run("They are all of the eleven quotes that have been confirmed.", many(confirmedQ, 11)),
+      ).toBe(false);
+    });
+    it("direct post-verb counts and trailing auxiliaries still work", () => {
+      expect(run("They are all eleven booked.", many(confirmedQ, 11))).toBe(true);
+      expect(run("They are both being held.", many(heldQ, 2))).toBe(true);
+      expect(run("They have both now been confirmed.", many(confirmedQ, 2))).toBe(true);
+      expect(run("They are all eleven booked.", many(confirmedQ, 2))).toBe(false);
+    });
+  });
+});

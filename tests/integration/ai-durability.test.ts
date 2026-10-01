@@ -1599,9 +1599,32 @@ describeRest("every booking/hold state grounding accepts is refreshed on replay 
     return { gateway, calls };
   }
 
-  it.each([...BOOKING_STATE_WORDS.booked, ...BOOKING_STATE_WORDS.held])(
-    "“%s”: refs stored server-side, replay re-reads the booking, stale prose never repeated",
-    async (word) => {
+  /** A confirmed booking later cancelled (fixture write: the M5 flow has no such action). */
+  const cancelConfirmed = (b: { id: string }) =>
+    admin(
+      `begin; set local session_replication_role = replica;
+       update public.booking_requests set status = 'cancelled' where id = '${b.id}';
+       commit;`,
+    );
+  type Transition = Change | "cancel-confirmed";
+  const cases: [string, Transition, string][] = [
+    ...BOOKING_STATE_WORDS.held.flatMap((w): [string, Transition, string][] => [
+      [w, "expire", "awaiting_review"],
+      [w, "cancel", "cancelled"],
+      [w, "decline", "declined"],
+      [w, "release", "awaiting_review"],
+      [w, "confirm", "confirmed"],
+    ]),
+    ...BOOKING_STATE_WORDS.booked.map((w): [string, Transition, string] => [
+      w,
+      "cancel-confirmed",
+      "cancelled",
+    ]),
+  ];
+
+  it.each(cases)(
+    "“%s”, then the booking changes (%s): replay re-reads it and shows %s",
+    async (word, transition, status) => {
       const isHeld = (BOOKING_STATE_WORDS.held as readonly string[]).includes(word);
       const { c, booking } = await booked();
       if (!isHeld) {
@@ -1616,10 +1639,13 @@ describeRest("every booking/hold state grounding accepts is refreshed on replay 
       const key = randomUUID();
       const said = await c.turn("is it done?", deps(model([{ say: prose }])), key);
       expect(said.reply).toBe(prose); // grounded when written
-      // The stored turn carries the server-side booking reference.
       const stored = await turnResponse(c.session, key);
       expect(stored).toMatchObject({ refs: { bookings: [{ quoteRef: booking.token_hash }] } });
-      // Replay: the model is never called; the booking IS read again.
+
+      // The authoritative state CHANGES before the lost response is retried.
+      if (transition === "cancel-confirmed") await cancelConfirmed(booking);
+      else await change(transition, booking);
+
       const counted = countingGateway();
       const replay = await c.turn(
         "is it done?",
@@ -1633,13 +1659,15 @@ describeRest("every booking/hold state grounding accepts is refreshed on replay 
         key,
       );
       expect(replay.replayed).toBe(true);
-      expect(counted.calls.n).toBeGreaterThan(0);
-      expect(replay.reply).not.toBe(prose);
+      expect(counted.calls.n).toBeGreaterThan(0); // an authoritative read happened
+      expect(replay.reply).not.toContain(prose); // the old prose is not repeated
       expect(replay.reply).toMatch(/^Here is where your request stands now\./);
-      expect(replay.blocks.find((b) => b.type === "booking")).toMatchObject({
-        status: isHeld ? "holding" : "confirmed",
-      });
+      expect(replay.blocks.find((b) => b.type === "booking")).toMatchObject({ status }); // NEW state
+      if (status !== "confirmed") expect(replay.reply).not.toMatch(/\bis confirmed\b/);
+      if (status !== "holding") expect(replay.reply).not.toMatch(/held until|being held/);
       expect(httpBody(replay)).not.toContain(booking.token_hash);
+      expect(httpBody(replay)).not.toMatch(HEX64);
+      expect(httpBody(replay)).not.toMatch(/quoteRef|"refs"/);
     },
   );
 });
