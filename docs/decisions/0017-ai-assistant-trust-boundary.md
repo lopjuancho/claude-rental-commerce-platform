@@ -244,6 +244,18 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       it says "Availability needs to be checked again…" instead, so no old Available or
       Unavailable badge or sentence is presented as the current state.
 
+17. **Round 6 of the review (Codex, 5bbab4d).**
+    - **Unreadable counts stay unresolved:** inside a quantifier phrase ("all/both/each/every" up
+      to a quote/booking noun or "of them") every word must be a known determiner/modifier or part
+      of a count the canonical parser reads; anything else ("all the umpteen quotes", "all umpteen
+      active quotes", "all umpteen of your quotes", "both several quotes") — and any vague amount
+      ("several quotes") — makes the subject unresolved, and the claim is rejected.
+    - **Plural never means one booking.** Subject resolution order: (1) quote numbers in the
+      sentence, (2) those of the nearest earlier sentence naming any, (3) plural wording → the
+      conversation's whole quote set, (4) the latest single booking ONLY for a singular claim. A
+      plural claim needs two or more concrete subjects (named or known) matching any stated
+      count; otherwise it is rejected ("All of them are confirmed" with one known quote).
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

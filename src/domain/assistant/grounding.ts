@@ -476,16 +476,33 @@ const COUNTED_SUBJECT = new RegExp(
 );
 /** "all eleven", "all 11" — a count after "all", with or without a noun. */
 const ALL_COUNT = new RegExp(`\\ball\\s+(${QTY_NUMBER})(?![\\w,])`, "gi");
-/** Words that may sit between "all"/"both" and the noun without being a count. */
+/**
+ * Words that may sit inside a quantifier phrase ("all the active quotes", "both of your
+ * bookings") without being a count. Any OTHER word there is read as a count attempt.
+ */
 const NOT_A_COUNT =
-  /^(?:the|your|my|our|these|those|of|current|other|remaining|pending|confirmed|held|booked|active|requested|new|existing|previous|open)$/i;
+  /^(?:the|your|my|our|these|those|its|their|of|current|other|remaining|pending|confirmed|held|booked|active|requested|new|existing|previous|open|recent|latest|earlier|submitted|same|rental|party|event|booking|reserved)$/i;
+/** Vague amounts: a stated count that can never be resolved to an exact subject set. */
+const VAGUE_COUNT =
+  /\b(?:several|many|multiple|numerous|some|few|a few|a couple of|lots of|a lot of|umpteen|zillions?|countless|various|dozens of|hundreds of)\s+(?:(?:of\s+)?[a-z]+\s+){0,3}?(?:quotes?|bookings?|reservations?|booking requests?|holds?)\b/i;
+/**
+ * A quantifier phrase: "all/both/each/every" + up to five words + a quote/booking noun (or "of
+ * them/these/those"). Captures the words in between ("the umpteen", "umpteen active", "umpteen
+ * of your", "of your umpteen").
+ */
+const QUANTIFIER_PHRASE = new RegExp(
+  `\\b(?:all|both|each|every)\\s+((?:[a-z0-9][a-z0-9,-]*\\s+){0,5}?)(?:${SUBJECT_NOUN}\\b|of\\s+(?:them|these|those)\\b)`,
+  "gi",
+);
 
 /**
  * How many quotes the wording says it is about, through the SAME canonical number parser as
  * quantities ("both", "all eleven quotes", "twenty-one bookings", "1,000 quotes"). A stated count
- * never silently disappears: a count word the parser cannot read, counts that disagree ("both
- * three quotes") or a plural quantifier with fewer than two ("all one quote") make the subject
- * UNRESOLVED — and an unresolved plural claim is rejected.
+ * never silently disappears: inside a quantifier phrase every word is either a known determiner
+ * or modifier, or part of a count the parser must read — anything else ("all the umpteen
+ * quotes", "all umpteen of your quotes", "both several quotes") leaves the subject UNRESOLVED, as
+ * do vague amounts, counts that disagree ("both three quotes") and a plural quantifier with fewer
+ * than two ("all one quote"). An unresolved plural claim is rejected.
  */
 function statedCount(text: string): { count: number | null; unresolved: boolean } {
   const counts: number[] = [];
@@ -500,13 +517,15 @@ function statedCount(text: string): { count: number | null; unresolved: boolean 
   for (const m of text.matchAll(ALL_COUNT)) take(m[1] ?? "");
   const both = /\bboth\b/i.test(text);
   if (both) counts.push(2);
-  // "all <word> quotes" where <word> is neither a count we read nor a plain determiner.
-  for (const m of text.matchAll(
-    new RegExp(`\\b(?:all|both)\\s+([a-z][a-z-]*)\\s+${SUBJECT_NOUN}\\b`, "gi"),
-  )) {
-    const w = m[1] ?? "";
-    if (!NOT_A_COUNT.test(w) && parseQuantity(w) === null) unresolved = true;
+  for (const m of text.matchAll(QUANTIFIER_PHRASE)) {
+    const words = (m[1] ?? "").trim().split(/\s+/).filter(Boolean);
+    const countWords = words.filter((w) => !NOT_A_COUNT.test(w));
+    if (countWords.length === 0) continue;
+    const n = parseQuantity(countWords.join(" "));
+    if (n === null) unresolved = true;
+    else counts.push(n);
   }
+  if (VAGUE_COUNT.test(text)) unresolved = true;
   const distinct = [...new Set(counts)];
   if (distinct.length > 1) unresolved = true;
   const count = distinct[0] ?? null;
@@ -819,20 +838,25 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     // stated count. One confirmed quote never authorises a claim about several; a plural claim
     // that cannot be resolved exactly is rejected (null subject).
     const subjectsOf = (): (EvidenceOf<"booking"> | null)[] => {
+      // Resolution order (a null subject means UNRESOLVED, and the claim is rejected):
+      //   1. quote numbers named in this sentence;
+      //   2. quote numbers named in the nearest earlier sentence naming any;
+      //   3. plural wording with nothing named → the conversation's whole quote set;
+      //   4. the latest single booking — ONLY for a singular claim.
+      // An explicitly plural claim never resolves to one booking: it needs 2+ concrete subjects,
+      // an exact match with any stated count, and no unreadable count.
       const shape = pluralSubject(sentence);
       const bookingOf = (n: string) => latest(input, "booking", (b) => b.quoteNumber === n);
-      const named = [...new Set(quoteNumbers.length ? quoteNumbers : earlier)];
       if (shape.unresolved) return [null];
+      const named = [...new Set(quoteNumbers.length ? quoteNumbers : earlier)];
       if (named.length) {
         if (shape.count !== null && shape.count !== named.length) return [null];
-        if (shape.noun && named.length < 2) return [null];
+        if (shape.plural && named.length < 2) return [null];
         return named.map(bookingOf);
       }
       if (!shape.plural) return [latest(input, "booking")];
       const all = [...knownQuotes];
-      if (all.length < 2) {
-        return shape.noun || (shape.count ?? 0) >= 2 ? [null] : [latest(input, "booking")];
-      }
+      if (all.length < 2) return [null];
       if (shape.count !== null && shape.count !== all.length) return [null];
       return all.map(bookingOf);
     };

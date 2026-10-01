@@ -764,3 +764,90 @@ describe("availability wording of either polarity is time-sensitive (R3-M1, roun
     expect(timeSensitiveClaims("Your quote Q-1 is ready.").availability).toBe(false);
   });
 });
+
+describe("Codex round-6: unreadable counts stay unresolved; plural never means one booking", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const refusedQ = (n: string): Evidence => ({
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+  const ORDERS = (a: Evidence, b: Evidence): [string, Evidence[]][] => [
+    ["first/second", [a, b]],
+    ["second/first", [b, a]],
+  ];
+
+  describe.each(ORDERS(confirmedQ("Q-1"), confirmedQ("Q-2")))(
+    "Q-1 and Q-2 confirmed (%s)",
+    (_l, evidence) => {
+      it.each([
+        "All the umpteen quotes are booked.",
+        "All umpteen active quotes are booked.",
+        "All umpteen of your quotes are booked.",
+        "All of your umpteen quotes are booked.",
+        "Both several quotes are booked.",
+        "All zillion bookings are confirmed.",
+        "Several quotes are booked.",
+      ])("%s → rejected (unreadable count)", (reply) => {
+        expect(run(reply, evidence)).toBe(false);
+      });
+      it("matching plural claims still pass", () => {
+        expect(run("All of them are confirmed.", evidence)).toBe(true);
+        expect(run("Both quotes are booked.", evidence)).toBe(true);
+        expect(run("All the quotes are booked.", evidence)).toBe(true);
+        expect(run("All two quotes are booked.", evidence)).toBe(true);
+        expect(run("All of your active quotes are booked.", evidence)).toBe(true);
+      });
+    },
+  );
+
+  describe.each(ORDERS(heldQ("Q-1"), heldQ("Q-2")))("Q-1 and Q-2 held (%s)", (_l, evidence) => {
+    it("held-state equivalents", () => {
+      expect(run("All the umpteen quotes are held.", evidence)).toBe(false);
+      expect(run("All umpteen of your quotes are held.", evidence)).toBe(false);
+      expect(run("All of them are held.", evidence)).toBe(true);
+    });
+  });
+
+  describe.each(ORDERS(confirmedQ("Q-1"), refusedQ("Q-2")))(
+    "Q-1 confirmed, Q-2 refused (%s)",
+    (_l, evidence) => {
+      it("a plural claim over a set with one refusal is rejected", () => {
+        expect(run("All of them are confirmed.", evidence)).toBe(false);
+        expect(run("They are all booked.", evidence)).toBe(false);
+        expect(run("Those bookings are confirmed.", evidence)).toBe(false);
+      });
+    },
+  );
+
+  it("one known booking: a plural claim never resolves to it", () => {
+    for (const reply of [
+      "All of them are confirmed.",
+      "They are confirmed.",
+      "Both are booked.",
+      "The bookings are confirmed.",
+      "All the quotes are booked.",
+      "Those bookings are confirmed.",
+    ]) {
+      expect(run(reply, [confirmedQ("Q-1")]), reply).toBe(false);
+    }
+    expect(run("All of them are held.", [heldQ("Q-1")])).toBe(false);
+    // Singular claims still use the single booking.
+    expect(run("Your booking is confirmed.", [confirmedQ("Q-1")])).toBe(true);
+    expect(run("Quote Q-1 is confirmed.", [confirmedQ("Q-1")])).toBe(true);
+    // One named quote under plural wording is not enough.
+    expect(run("Quote Q-1: they are all confirmed.", [confirmedQ("Q-1")])).toBe(false);
+  });
+});
