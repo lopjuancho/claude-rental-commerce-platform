@@ -1367,3 +1367,126 @@ describe("Codex round-10", () => {
     });
   });
 });
+
+describe("Codex round-11", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const refusedQ = (n: string): Evidence => ({
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const many = (make: (n: string) => Evidence, n: number) =>
+    Array.from({ length: n }, (_, i) => make(`Q-${String(i + 1)}`));
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+  const refused = [refusedQ("Q-1"), refusedQ("Q-2")];
+
+  describe.each([
+    ["no evidence", [] as Evidence[]],
+    ["refused", refused],
+    ["refused, reversed", [...refused].reverse()],
+  ] as const)("H-COND: a reporting modal never exempts the embedded claim (%s)", (_l, ev) => {
+    it.each([
+      "If you're wondering, I can confirm your booking is confirmed.",
+      "If you're wondering, I can assure you your booking is confirmed.",
+      "If you're wondering, I can tell you your items are held.",
+      "I can confirm your booking is confirmed.",
+      "I can assure you the booking is held.",
+      "I will tell you your booking is confirmed.",
+      "We can let you know your booking is held.",
+      "I may explain that your booking is confirmed.",
+      "If you like, I can promise your booking is confirmed.",
+      "Once approved, I can report your items are held.",
+      // kept from earlier rounds
+      "If you need reassurance your booking is confirmed.",
+      "If you want reassurance your booking is confirmed.",
+      "If you ask your booking is confirmed.",
+      "If you call us your booking is confirmed.",
+      "If you're wondering your booking is confirmed.",
+      "If you're wondering, your booking is confirmed and you can relax.",
+      "If you're wondering, your booking is confirmed and I will send details.",
+      "Once again your booking is confirmed.",
+      "Once more, your booking is confirmed.",
+      "Pending bookings are confirmed.",
+      "Your booking will be confirmed.",
+    ])("“%s” → grounded and rejected", (reply) => {
+      expect(run(reply, [...ev])).toBe(false);
+    });
+  });
+
+  it.each([
+    "If confirmed, it can be booked.",
+    "If accepted, the booking may be reserved.",
+    "Once approved, it will be held.",
+    "The quote could be booked if availability is confirmed.",
+    "If the quote is confirmed, it will be booked.",
+    "If the booking is held, we will keep the inventory reserved.",
+    "When the booking is approved, it can be held.",
+    "Provided the quote is accepted, it may be reserved.",
+    "Your booking will be confirmed once the team reviews it.",
+  ])("hypothetical (the modal belongs to the claim): “%s”", (reply) => {
+    expect(run(reply, [])).toBe(true);
+  });
+
+  describe("H1: comma-relative ambiguity is sticky through later commas", () => {
+    const counts = ["eleven", "twenty-one", "11", "1,000", "umpteen", "several", "zillion"];
+    const markers = ["which", "that", "who", "whom", "whose", "where"];
+    const parentheticals = [
+      "as you know",
+      "frankly",
+      "apparently",
+      "according to the team",
+      "after review",
+      "as you know, after review",
+    ];
+    const states: [string, (n: string) => Evidence][] = [
+      ["confirmed", confirmedQ],
+      ["held", heldQ],
+      ["booked", confirmedQ],
+    ];
+    describe.each(counts)("count “%s”", (count) => {
+      it.each(markers)("marker “%s”: every parenthetical and state, both orders", (marker) => {
+        for (const p of parentheticals) {
+          for (const [state, make] of states) {
+            const reply = `They are all of the ${count} quotes, ${marker}, ${p}, have been ${state}.`;
+            expect(predicateSpan(reply, reply.lastIndexOf(state)).unresolved, reply).toBe(true);
+            expect(run(reply, many(make, 2)), reply).toBe(false);
+            expect(run(reply, many(make, 2).reverse()), reply).toBe(false);
+          }
+        }
+      });
+    });
+    it.each([
+      "They are all of the eleven quotes, which, as you know, have been confirmed.",
+      "They are all of the 11 quotes, which, frankly, have been confirmed.",
+      "They are all of the umpteen quotes, which, apparently, have been held.",
+      "They are all eleven bookings, which, according to the team, were confirmed.",
+      "They are all twenty-one quotes, which, after review, have been booked.",
+      "They are all of the eleven quotes, which, as you know, after review, have been confirmed.",
+      "They are all of the eleven quotes, as you know, which have been confirmed.",
+    ])("Codex: “%s” → unresolved and rejected", (reply) => {
+      const state = /(confirmed|held|booked)\.$/.exec(reply)?.[1] ?? "confirmed";
+      expect(predicateSpan(reply, reply.lastIndexOf(state)).unresolved).toBe(true);
+      const make = state === "held" ? heldQ : confirmedQ;
+      for (const n of [2, 11, 21]) {
+        expect(run(reply, many(make, n))).toBe(false);
+        expect(run(reply, many(make, n).reverse())).toBe(false);
+      }
+    });
+    it("simple forms keep working", () => {
+      expect(run("They are all eleven booked.", many(confirmedQ, 11))).toBe(true);
+      expect(run("They are both being held.", many(heldQ, 2))).toBe(true);
+      expect(run("They have both now been confirmed.", many(confirmedQ, 2))).toBe(true);
+    });
+  });
+});

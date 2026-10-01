@@ -325,6 +325,23 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       have been confirmed" keeps its count material, meets the relative marker and is unresolved
       — even when eleven quotes would match.
 
+22. **Round 11 of the review (Codex, 28953da).**
+    - **A modal must belong to the transactional predicate:** a consequence is hypothetical only
+      if the modal is in the claim's OWN auxiliary chain ("it CAN BE booked", "the booking MAY BE
+      reserved"), or — when the state word has no chain of its own (an object complement: "we
+      will keep the inventory reserved") — the nearest verb group of its proposition is that
+      modal with no other auxiliary after it. "I can confirm your booking IS confirmed", "I will
+      tell you your items ARE held": the claim has its own present-tense chain, so the reporting
+      modal is irrelevant whatever the reporting verb is — no verb list. A condition must also
+      exist (earlier in the clause, fronted, or trailing: "could be booked if availability is
+      confirmed"); "Your booking will be confirmed." alone is a promise and is grounded.
+    - **The antecedent is opened by the LAST condition marker before the claim** (also mid-
+      sentence), and is still proven by shape.
+    - **Sticky relative ambiguity:** if any comma before the claim opens a relative clause, no
+      comma — before or after it, parentheticals included — moves the span's start; it reaches
+      back to the last hard boundary, so the outer count always meets the relative marker and the
+      claim is unresolved.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

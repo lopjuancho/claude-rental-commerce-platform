@@ -421,52 +421,82 @@ const ANTECEDENT_SUBJECT = new Set(
     "quote quotes booking bookings reservation reservations request requests hold holds order " +
     "orders item items inventory date slot rental rentals event " +
     "current other remaining pending confirmed active requested new existing previous recent " +
-    "latest same party reserved it they them everything"
+    "latest same party reserved it they them everything availability"
   ).split(" "),
 );
-const COORDINATOR = /\s(?:and|or|but|so|then)\s/gi;
+
+/** A condition opener anywhere (the LAST one before a claim opens its antecedent). */
+const MARKER_ANYWHERE =
+  /\b(?:if|unless|whether|once(?!\s+(?:again|more)\b)|when|whenever|provided(?:\s+that)?|assuming(?:\s+that)?|as\s+soon\s+as|in\s+case)\b/gi;
+const tokensOf = (text: string) => text.match(/[A-Za-z0-9][A-Za-z0-9'-]*(?:,\d{3})*/g) ?? [];
+
+/**
+ * Whether a modal belongs to THIS transactional predicate (ADR 0017 §22):
+ * - it is in the claim's own auxiliary chain ("it CAN BE booked", "the booking MAY BE reserved");
+ * - or the state word has no chain of its own (an object complement: "we will keep the inventory
+ *   reserved") and the nearest preceding verb group of its proposition is that modal, with no
+ *   other auxiliary after it.
+ * A modal of a reporting predicate ("I CAN confirm your booking IS confirmed", "I WILL tell you
+ * your items ARE held") never qualifies: the state word has its own present-tense chain ("is",
+ * "are"), so only that chain counts — whatever the reporting verb is.
+ */
+function modalBindsClaim(tokens: string[], chain: { start: number; modal: boolean }): boolean {
+  if (chain.modal) return true;
+  if (chain.start < tokens.length) return false; // the claim's own chain exists and is not modal
+  let propStart = 0;
+  tokens.forEach((t, i) => {
+    if (/^(?:and|or|but|so|then)$/i.test(t)) propStart = i + 1;
+  });
+  const prop = tokens.slice(propStart);
+  let modalAt = -1;
+  prop.forEach((t, i) => {
+    if (MODAL_WORDS.has(t.toLowerCase()) || /'ll$/i.test(t)) modalAt = i;
+  });
+  if (modalAt < 0) return false;
+  return !prop
+    .slice(modalAt + 1)
+    .some((t) => AUX_WORDS.has(t.toLowerCase()) || isContractedVerb(t));
+}
 
 export function hypothetical(sentence: string, index: number): boolean {
   const { text, offset } = clauseAt(sentence, index);
   const clauseStart = index - offset;
   const before = text.slice(0, offset);
-  const tokens = before.match(/[A-Za-z0-9][A-Za-z0-9'-]*(?:,\d{3})*/g) ?? [];
+  const tokens = tokensOf(before);
   const chain = auxChain(tokens);
-  const marker = STRONG_MARKER.exec(before);
-  if (marker) {
-    const markerTokens = (marker[0].match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? []).length;
-    const subject = tokens.slice(markerTokens, chain.start);
+  const markers = [...before.matchAll(MARKER_ANYWHERE)];
+  const last = markers.at(-1);
+  if (last) {
+    // The antecedent's own claim, proven by shape from the LAST opener before it.
+    const ante = tokensOf(before.slice(last.index));
+    const markerTokens = tokensOf(last[0]).length;
+    if (ante.length === markerTokens) return true; // elided: "If available", "Once confirmed"
+    const anteChain = auxChain(ante);
+    const subject = ante.slice(markerTokens, anteChain.start);
     // A contraction at the head of the chain carries the subject too ("If IT's available").
-    const head = tokens[chain.start] ?? "";
+    const head = ante[anteChain.start] ?? "";
     if (isContractedVerb(head)) subject.push(head.replace(/'[a-z]+$/i, ""));
-    // Elided antecedent: the opener is followed directly by the claim ("If available", "Once
-    // confirmed") — nothing else can come first.
-    if (tokens.length === markerTokens) return true;
-    const isAntecedent =
-      chain.start < tokens.length && // the claim has its own auxiliary chain
+    if (
+      anteChain.start < ante.length &&
       subject.length > 0 &&
       subject.every(
         (t) => ANTECEDENT_SUBJECT.has(t.toLowerCase()) || isQuoteNumberToken(t) || isCountToken(t),
-      );
-    if (isAntecedent) return true;
-    // Otherwise it is at most a consequence in the same clause, and only with its OWN modal
-    // chain ("If the quote is confirmed it WILL BE booked").
-    return chain.modal;
+      )
+    ) {
+      return true;
+    }
   }
-  // The consequence of a condition fronted in an earlier clause: modal/future in this claim's own
-  // proposition — from the clause start, or the last coordinator before it, up to the claim
-  // ("If the booking is held, we WILL keep the inventory reserved"). A modal of a LATER predicate
-  // ("…is confirmed and you can relax") is outside it.
-  if (clauseStart > 0) {
-    let propStart = 0;
-    for (const m of before.matchAll(COORDINATOR)) propStart = m.index + m[0].length;
-    const proposition = before.slice(propStart);
-    const modal =
-      chain.modal || /\b(?:will|would|can|could|may|might|shall|should)\b|'ll\b/i.test(proposition);
-    const fronted = sentence.slice(0, clauseStart);
-    if (modal && (STRONG_MARKER.test(fronted) || WEAK_MARKER.test(fronted))) return true;
-  }
-  return false;
+  // Otherwise only a CONSEQUENCE can be hypothetical: its modal must belong to this claim, and a
+  // condition must exist — earlier in its clause, fronted in an earlier clause, or after it
+  // ("The quote could be booked if availability is confirmed").
+  if (!modalBindsClaim(tokens, chain)) return false;
+  const fronted = sentence.slice(0, clauseStart);
+  return (
+    markers.length > 0 ||
+    STRONG_MARKER.test(fronted) ||
+    WEAK_MARKER.test(fronted) ||
+    new RegExp(MARKER_ANYWHERE.source, "i").test(sentence.slice(index))
+  );
 }
 
 /**
@@ -740,11 +770,19 @@ export function predicateSpan(sentence: string, stateAt: number): SubjectShape {
   // A comma that opens a RELATIVE clause (", which have been confirmed") is not a boundary: the
   // count before it belongs to the same assertion, so it stays in the span (and, with the
   // relative marker, fails closed below) — it is never dropped.
-  let clauseStart = 0;
+  //
+  // The ambiguity is STICKY: once any comma before the claim opens a relative clause, no comma
+  // (before or after it — parentheticals like ", as you know,") may move the clause start; the
+  // span reaches back to the last HARD boundary (";", a dash, "but"…), so the outer count is
+  // always seen together with the relative marker.
   const head = sentence.slice(0, stateAt);
-  for (const m of head.matchAll(CLAUSE_SEPARATOR)) {
-    const after = head.slice(m.index + m[0].length);
-    if (m[0] === "," && RELATIVE_OPENER.test(after)) continue;
+  const separators = [...head.matchAll(CLAUSE_SEPARATOR)];
+  const relative = separators.some(
+    (m) => m[0] === "," && RELATIVE_OPENER.test(head.slice(m.index + m[0].length)),
+  );
+  let clauseStart = 0;
+  for (const m of separators) {
+    if (relative && m[0] === ",") continue;
     clauseStart = m.index + m[0].length;
   }
   const tokens = sentence.slice(clauseStart, stateAt).match(TOKEN) ?? [];
