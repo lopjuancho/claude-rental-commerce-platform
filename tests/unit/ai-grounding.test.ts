@@ -5,6 +5,7 @@ import {
   factSentences,
   type GroundingInput,
   parseQuantity,
+  subjectShape,
   timeSensitiveClaims,
 } from "@/domain/assistant/grounding";
 
@@ -849,5 +850,163 @@ describe("Codex round-6: unreadable counts stay unresolved; plural never means o
     expect(run("Quote Q-1 is confirmed.", [confirmedQ("Q-1")])).toBe(true);
     // One named quote under plural wording is not enough.
     expect(run("Quote Q-1: they are all confirmed.", [confirmedQ("Q-1")])).toBe(false);
+  });
+});
+
+describe("Codex round-7: the WHOLE subject is parsed — no word window lets a count disappear", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const heldQ = (n: string): Evidence => ({ ...booking("hold_placed", 15), quoteNumber: n });
+  const many = (make: (n: string) => Evidence, n: number) =>
+    Array.from({ length: n }, (_, i) => make(`Q-${String(i + 1)}`));
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+  const MODIFIERS = [
+    "current",
+    "active",
+    "pending",
+    "requested",
+    "new",
+    "existing",
+    "recent",
+    "latest",
+    "rental",
+    "event",
+  ];
+  const chain = (n: number) => MODIFIERS.slice(0, n).join(" ");
+
+  it("Codex's reproductions are rejected (only Q-1 and Q-2 confirmed)", () => {
+    for (const evidence of [many(confirmedQ, 2), many(confirmedQ, 2).reverse()]) {
+      for (const reply of [
+        "All the umpteen current active event rental quotes are booked.",
+        "All the eleven current active event rental quotes are booked.",
+        "All the 11 current active event rental quotes are booked.",
+        "All the twenty currently pending customer quotes are booked.",
+        "All eleven very important active event rental bookings are confirmed.",
+      ]) {
+        expect(run(reply, evidence), reply).toBe(false);
+      }
+    }
+    for (const evidence of [many(heldQ, 2), many(heldQ, 2).reverse()]) {
+      for (const reply of [
+        "All umpteen currently active quotes are held.",
+        "All the umpteen current active event rental quotes are held.",
+        "All the eleven current active event rental quotes are held.",
+        "All the 11 current active event rental quotes are held.",
+      ]) {
+        expect(run(reply, evidence), reply).toBe(false);
+      }
+    }
+  });
+
+  it("positives", () => {
+    expect(run("All the current active quotes are booked.", many(confirmedQ, 2))).toBe(true);
+    expect(run("Both active quotes are confirmed.", many(confirmedQ, 2))).toBe(true);
+    expect(
+      run("All the eleven current active event rental quotes are booked.", many(confirmedQ, 11)),
+    ).toBe(true);
+    expect(
+      run("All the eleven current active event rental quotes are held.", many(heldQ, 11)),
+    ).toBe(true);
+    expect(run("This booking is confirmed.", many(confirmedQ, 1))).toBe(true);
+    expect(run("A hold is active.", many(heldQ, 1))).toBe(true);
+    expect(run("Your hold is active and the items are held.", many(heldQ, 1))).toBe(true);
+  });
+
+  describe.each([4, 5, 6, 8, 10])("%i modifiers (below, at and above the old window)", (n) => {
+    describe.each([
+      ["confirmed", "booked", confirmedQ],
+      ["held", "held", heldQ],
+    ] as const)("%s", (_state, predicate, make) => {
+      const readable = [
+        ["eleven", 11],
+        ["twenty-one", 21],
+        ["11", 11],
+        ["1,000", 1000],
+      ] as const;
+      it.each(readable)(
+        "“%s” is READ (count %i) and checked against the subjects",
+        (word, value) => {
+          const reply = `All the ${word} ${chain(n)} quotes are ${predicate}.`;
+          expect(subjectShape(reply)).toMatchObject({
+            count: value,
+            unresolved: false,
+            plural: true,
+          });
+          expect(run(reply, many(make, 2))).toBe(false);
+          expect(run(reply, many(make, 2).reverse())).toBe(false);
+          if (value <= 21) {
+            expect(run(reply, many(make, value))).toBe(true);
+            expect(run(reply, many(make, value).reverse())).toBe(true);
+          }
+        },
+      );
+      it.each(["umpteen", "several", "zillion"])(
+        "“%s” is UNRESOLVED (not an absent count) and rejected",
+        (word) => {
+          const reply = `All the ${word} ${chain(n)} quotes are ${predicate}.`;
+          expect(subjectShape(reply)).toMatchObject({ unresolved: true, plural: true });
+          expect(run(reply, many(make, 2))).toBe(false);
+          expect(run(reply, many(make, 2).reverse())).toBe(false);
+        },
+      );
+    });
+  });
+
+  it("an unsupported word anywhere in a plural subject fails closed", () => {
+    expect(subjectShape("All the current shiny active quotes are booked.").unresolved).toBe(true);
+    expect(run("All the current shiny active quotes are booked.", many(confirmedQ, 2))).toBe(false);
+    // …while a singular subject is not restricted.
+    expect(subjectShape("Your shiny booking is confirmed.").unresolved).toBe(false);
+  });
+
+  it("a count stated in another clause of the sentence is not lost", () => {
+    expect(
+      run(
+        "Your eleven current active event rental quotes: they are all booked.",
+        many(confirmedQ, 2),
+      ),
+    ).toBe(false);
+    expect(run("They are all eleven booked.", many(confirmedQ, 2))).toBe(false);
+    expect(run("Both quotes are held until 3:45 PM.", many(heldQ, 2))).toBe(true);
+  });
+});
+
+describe("Codex round-7: claims and conditions are found without word windows", () => {
+  const confirmedQ = (n: string): Evidence => ({
+    ...booking("confirmed", null, "This booking is confirmed by the team."),
+    quoteNumber: n,
+  });
+  const two = [confirmedQ("Q-1"), confirmedQ("Q-2")];
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+  it("a state word far from its verb is still a claim", () => {
+    expect(run("They are all eleven booked.", two)).toBe(false);
+    expect(run("The quotes are, as of right now, all eleven confirmed.", two)).toBe(false);
+    expect(run("They are all eleven not booked.", two)).toBe(true); // negated locally
+  });
+  it("a condition word INSIDE a subject makes nothing hypothetical", () => {
+    expect(run("All pending umpteen quotes are booked.", two)).toBe(false);
+    expect(run("All quotes made before umpteen days are booked.", two)).toBe(false);
+    // A condition opening the clause still does.
+    expect(run("If the team approves, all eleven quotes are booked.", two)).toBe(false); // separate clause
+    expect(run("If your booking is confirmed you will get an email.", [])).toBe(true);
+    expect(run("Pending the team's review, your booking is not confirmed yet.", [])).toBe(true);
   });
 });

@@ -256,6 +256,22 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       plural claim needs two or more concrete subjects (named or known) matching any stated
       count; otherwise it is rejected ("All of them are confirmed" with one known quote).
 
+18. **Round 7 of the review (Codex, 646be9a).** No fixed word window decides a claim's subject.
+    - **Subjects are parsed whole:** every clause's subject — all its tokens from the clause
+      start to its first verb, however many — is read token by token. When it is plural (a
+      quantifier, a plural noun or pronoun, several quote numbers), each token must be a quote
+      number, a count (a run of number words or digits read together by the canonical parser), or
+      a known determiner/modifier/noun; anything else ("umpteen", "several", "currently", "very
+      important") makes the subject unresolved and the claim is rejected (fail closed). Counts
+      after "all" outside the subject ("they are all eleven booked") are read too. The bounded
+      phrase regexes of rounds 4–6 are removed.
+    - **Claims are found without a window:** besides the phrase patterns, a state word ("booked",
+      "confirmed", "reserved", "secured", "held", "on hold"…) with any form of "be" earlier in the
+      sentence is a claim.
+    - **Conditions must open the clause:** "pending", "before", "once"… make a claim hypothetical
+      only when they open its clause; inside a subject ("all pending quotes are booked") they no
+      longer hide the claim.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,

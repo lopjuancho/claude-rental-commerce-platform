@@ -317,8 +317,13 @@ function unknownSubjects(sentence: string, known: string[], businessName: string
 /** Words that negate the claim right after them ("not available", "nothing has been paid"). */
 const NEGATOR =
   /^(?:not|no|never|nothing|none|nor|without|cannot|can't|cant|isn't|aren't|wasn't|weren't|won't|don't|doesn't|didn't|haven't|hasn't|hadn't|yet)$/;
-/** A condition opening the clause makes its claims hypothetical ("if it's available, …"). */
-const CONDITION = /\b(?:if|unless|whether|once|until|before|pending)\b/i;
+/**
+ * Only a condition that OPENS the clause ("if it's available, …", "once the team confirms it is
+ * booked") — a word like "pending" or "before" inside a subject ("all pending quotes are booked")
+ * makes nothing hypothetical.
+ */
+const CONDITION =
+  /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:if|unless|whether|once|until|before|pending)\b/i;
 
 function clauseAt(sentence: string, index: number): { text: string; offset: number } {
   // Not ":" — times ("12:00") would split a clause.
@@ -463,90 +468,141 @@ function quantityMentions(text: string): number[] {
 
 const QUOTE_NUMBER = /\b[A-Z][A-Z0-9]{0,7}-\d{1,9}\b/g;
 
-/** Nouns that make a claim about SEVERAL quotes/bookings at once ("both quotes", "the bookings"). */
-const PLURAL_QUOTE_NOUN = /\b(?:quotes|bookings|reservations|booking requests|holds)\b/i;
-/** Other plural wording ("both", "all of them", "they"): several subjects, which must be resolved. */
+// ── the subjects of a sentence, parsed whole (no word window) ─────────────────
+
+/** Words a plural transactional subject may contain besides counts and quote numbers. */
+const SUBJECT_WORDS = new Set(
+  (
+    "all both each every of the your my our these those its their this that a an and or " +
+    "quote quotes booking bookings reservation reservations request requests hold holds order orders " +
+    "them they they're you " +
+    "current other remaining pending confirmed held booked active requested new existing previous " +
+    "open recent latest earlier submitted same rental party event reserved " +
+    "yes great good news so now okay ok also then sure perfect done"
+  ).split(" "),
+);
+const QUANTIFIERS = new Set(["all", "both", "each", "every"]);
+const PLURAL_TOKENS = new Set([
+  "quotes",
+  "bookings",
+  "reservations",
+  "requests",
+  "holds",
+  "orders",
+  "them",
+  "they",
+  "they're",
+  "these",
+  "those",
+]);
+/** A subject ends at its verb. */
+const VERBS = new Set(
+  "is are was were be been being have has had will would can could may might do does did get got remain remains stay stays look looks".split(
+    " ",
+  ),
+);
+/** Plural wording outside the subject ("they are BOTH booked", "are ALL confirmed"). */
 const PLURAL_WORD =
   /\b(?:both|each of (?:them|these|those|the)|all of (?:them|these|those|the)|every one|each one|all (?!set\b)(?:\w+ )?(?:are|were|have|is)|are all|they|they're|them|these|those)\b/i;
-const SUBJECT_NOUN = "(?:quotes?|bookings?|reservations?|booking requests?|holds?)";
-/** A number (digits or words, through parseQuantity) right before a quote/booking noun. */
-const COUNTED_SUBJECT = new RegExp(
-  `(?<![\\w,-])(${QTY_NUMBER})\\s+(?:of\\s+(?:the|your|my|our|these|those)\\s+)?(?:[a-z]+\\s+)?${SUBJECT_NOUN}\\b`,
-  "gi",
-);
-/** "all eleven", "all 11" — a count after "all", with or without a noun. */
-const ALL_COUNT = new RegExp(`\\ball\\s+(${QTY_NUMBER})(?![\\w,])`, "gi");
-/**
- * Words that may sit inside a quantifier phrase ("all the active quotes", "both of your
- * bookings") without being a count. Any OTHER word there is read as a count attempt.
- */
-const NOT_A_COUNT =
-  /^(?:the|your|my|our|these|those|its|their|of|current|other|remaining|pending|confirmed|held|booked|active|requested|new|existing|previous|open|recent|latest|earlier|submitted|same|rental|party|event|booking|reserved)$/i;
-/** Vague amounts: a stated count that can never be resolved to an exact subject set. */
-const VAGUE_COUNT =
-  /\b(?:several|many|multiple|numerous|some|few|a few|a couple of|lots of|a lot of|umpteen|zillions?|countless|various|dozens of|hundreds of)\s+(?:(?:of\s+)?[a-z]+\s+){0,3}?(?:quotes?|bookings?|reservations?|booking requests?|holds?)\b/i;
-/**
- * A quantifier phrase: "all/both/each/every" + up to five words + a quote/booking noun (or "of
- * them/these/those"). Captures the words in between ("the umpteen", "umpteen active", "umpteen
- * of your", "of your umpteen").
- */
-const QUANTIFIER_PHRASE = new RegExp(
-  `\\b(?:all|both|each|every)\\s+((?:[a-z0-9][a-z0-9,-]*\\s+){0,5}?)(?:${SUBJECT_NOUN}\\b|of\\s+(?:them|these|those)\\b)`,
-  "gi",
-);
+const CLAUSE_SEPARATOR =
+  /;|,(?!\d{3}\b)|(?<!\d):(?!\d)|\s[-—]\s|\s(?:but|however|although|though|whereas|while)\s/gi;
+const TOKEN = /[A-Za-z0-9][A-Za-z0-9'-]*(?:,\d{3})*/g;
+
+const isQuoteNumberToken = (t: string) => /^[A-Z][A-Z0-9]{0,7}-\d{1,9}$/.test(t);
+const isNumberToken = (t: string) =>
+  /^\d{1,3}(?:,\d{3})+$|^\d+$/.test(t) ||
+  t
+    .toLowerCase()
+    .split("-")
+    .every((w) => w in UNITS || w in SCALES || w === "dozen" || w === "dozens");
+
+export interface SubjectShape {
+  plural: boolean;
+  count: number | null;
+  unresolved: boolean;
+}
 
 /**
- * How many quotes the wording says it is about, through the SAME canonical number parser as
- * quantities ("both", "all eleven quotes", "twenty-one bookings", "1,000 quotes"). A stated count
- * never silently disappears: inside a quantifier phrase every word is either a known determiner
- * or modifier, or part of a count the parser must read — anything else ("all the umpteen
- * quotes", "all umpteen of your quotes", "both several quotes") leaves the subject UNRESOLVED, as
- * do vague amounts, counts that disagree ("both three quotes") and a plural quantifier with fewer
- * than two ("all one quote"). An unresolved plural claim is rejected.
+ * One clause's subject — ALL its tokens from the clause start up to its first verb, however many
+ * — read token by token. When the subject is plural (a quantifier, a plural noun or pronoun, or
+ * several quote numbers), EVERY token must be understood: a quote number, a count (a run of
+ * number words or digits read together by the canonical parser: "twenty one", "one hundred and
+ * one", "1,000"), or a known determiner/modifier/noun. Anything else ("umpteen", "several",
+ * "currently", "very important") makes it UNRESOLVED — the claim fails closed.
  */
-function statedCount(text: string): { count: number | null; unresolved: boolean } {
+function clauseSubject(clause: string): { plural: boolean; counts: number[]; unresolved: boolean } {
+  const all = clause.match(TOKEN) ?? [];
+  const verbAt = all.findIndex((t) => VERBS.has(t.toLowerCase()));
+  const tokens = verbAt < 0 ? all : all.slice(0, verbAt);
+  const lower = tokens.map((t) => t.toLowerCase());
+  const plural =
+    lower.some((t) => QUANTIFIERS.has(t) || PLURAL_TOKENS.has(t)) ||
+    tokens.filter(isQuoteNumberToken).length > 1;
   const counts: number[] = [];
   let unresolved = false;
-  const take = (raw: string) => {
-    if (/^(?:a|an|and)$/i.test(raw.trim())) return; // an article is not a count ("a hold")
-    const n = parseQuantity(raw);
-    if (n === null) unresolved = true;
-    else counts.push(n);
-  };
-  for (const m of text.matchAll(COUNTED_SUBJECT)) take(m[1] ?? "");
-  for (const m of text.matchAll(ALL_COUNT)) take(m[1] ?? "");
-  const both = /\bboth\b/i.test(text);
-  if (both) counts.push(2);
-  for (const m of text.matchAll(QUANTIFIER_PHRASE)) {
-    const words = (m[1] ?? "").trim().split(/\s+/).filter(Boolean);
-    const countWords = words.filter((w) => !NOT_A_COUNT.test(w));
-    if (countWords.length === 0) continue;
-    const n = parseQuantity(countWords.join(" "));
-    if (n === null) unresolved = true;
+  if (lower.includes("both")) counts.push(2);
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i] ?? "";
+    if (isNumberToken(t)) {
+      let j = i + 1;
+      while (
+        j < tokens.length &&
+        (isNumberToken(tokens[j] ?? "") ||
+          (/^(?:and|a)$/i.test(tokens[j] ?? "") && isNumberToken(tokens[j + 1] ?? "")))
+      ) {
+        j++;
+      }
+      const n = parseQuantity(tokens.slice(i, j).join(" "));
+      if (n === null) unresolved = true;
+      else counts.push(n);
+      i = j - 1;
+    } else if (plural && !isQuoteNumberToken(t) && !SUBJECT_WORDS.has(t.toLowerCase())) {
+      unresolved = true;
+    }
+  }
+  if (lower.some((t) => QUANTIFIERS.has(t)) && counts.some((c) => c < 2)) unresolved = true;
+  return { plural, counts, unresolved };
+}
+
+/**
+ * How many quotes — and whether several — a sentence's claims are about. Every clause's COMPLETE
+ * subject is parsed (no word or modifier limit), plus plural wording and "all <count>" anywhere
+ * ("they are both booked", "they are all eleven booked"). A stated count never disappears: it is
+ * read, or the subject is UNRESOLVED (unreadable count, counts that disagree, a quantifier with
+ * fewer than two) — and an unresolved claim is rejected.
+ */
+export function subjectShape(sentence: string): SubjectShape {
+  const counts: number[] = [];
+  let plural = PLURAL_WORD.test(sentence);
+  let unresolved = false;
+  let start = 0;
+  const pieces: string[] = [];
+  for (const m of sentence.matchAll(CLAUSE_SEPARATOR)) {
+    pieces.push(sentence.slice(start, m.index));
+    start = m.index + m[0].length;
+  }
+  pieces.push(sentence.slice(start));
+  for (const piece of pieces) {
+    const c = clauseSubject(piece);
+    plural ||= c.plural;
+    unresolved ||= c.unresolved;
+    counts.push(...c.counts);
+  }
+  if (/\bboth\b/i.test(sentence)) counts.push(2);
+  // "… are all eleven booked": a count right after "all", outside the subject.
+  const tokens = sentence.match(TOKEN) ?? [];
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i]?.toLowerCase() !== "all" || !isNumberToken(tokens[i + 1] ?? "")) continue;
+    let j = i + 2;
+    while (j < tokens.length && isNumberToken(tokens[j] ?? "")) j++;
+    const n = parseQuantity(tokens.slice(i + 1, j).join(" "));
+    if (n === null || n < 2) unresolved = true;
     else counts.push(n);
   }
-  if (VAGUE_COUNT.test(text)) unresolved = true;
   const distinct = [...new Set(counts)];
   if (distinct.length > 1) unresolved = true;
   const count = distinct[0] ?? null;
-  const quantifier = both || /\b(?:all|each of|every one of)\b/i.test(text);
-  if (quantifier && count !== null && count < 2) unresolved = true;
-  return { count, unresolved };
-}
-function pluralSubject(text: string): {
-  plural: boolean;
-  noun: boolean;
-  count: number | null;
-  unresolved: boolean;
-} {
-  const noun = PLURAL_QUOTE_NOUN.test(text);
-  const { count, unresolved } = statedCount(text);
-  return {
-    noun,
-    plural: noun || PLURAL_WORD.test(text) || (count ?? 0) >= 2 || unresolved,
-    count,
-    unresolved,
-  };
+  return { plural: plural || (count ?? 0) >= 2 || unresolved, count, unresolved };
 }
 
 // ── claim patterns ───────────────────────────────────────────────────────────
@@ -569,6 +625,22 @@ const TAX_CLAIM =
   /\b(?:tax(?:es)? (?:is |are )?(?:already )?(?:included|includes|in there|built in|covered|waived|zero)|including (?:all )?tax(?:es)?|tax(?:es)? inclusive|tax[- ]free|(?:no|without) (?:sales )?tax(?:es)?)\b/gi;
 const PAYMENT_CLAIM =
   /\b(?:paid|payment (?:is |has been |was )?(?:received|complete|completed|processed|made|taken|confirmed|successful|done)|charged (?:your|the) card|card (?:has been|was|is) charged|(?:you(?:'ve| have)|you were) (?:been )?(?:charged|billed)|deposit (?:has been |was |is )?(?:received|taken|collected)|prepaid)\b/gi;
+
+/**
+ * Booking/hold STATE predicates, found without any word window: a state word with a form of "be"
+ * anywhere before it in the sentence ("they are all eleven booked", "the quotes are, as of now,
+ * all confirmed"). These complement the phrase patterns above, which are bounded.
+ */
+const BOOKED_STATE = /\b(?:booked|confirmed|reserved|secured|finali[sz]ed|locked in)\b/gi;
+const HELD_STATE = /\b(?:held|on hold)\b/gi;
+const BE_VERB = /\b(?:is|are|was|were|be|been|being)\b|'s\b|'re\b/i;
+function statePredicates(sentence: string, state: RegExp, phrases: RegExp): number[] {
+  const at = new Set<number>([...sentence.matchAll(phrases)].map((m) => m.index));
+  for (const m of sentence.matchAll(state)) {
+    if (BE_VERB.test(sentence.slice(0, m.index))) at.add(m.index);
+  }
+  return [...at].sort((a, b) => a - b);
+}
 
 /**
  * Stable violation codes. Telemetry and logs carry ONLY these — never the reply's prose, which can
@@ -711,7 +783,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       const around = `${text.slice(start, at)} ${text.slice(from, stop)}`;
       const inSentence = [...around.matchAll(QUOTE_NUMBER)].map((m) => m[0]);
       const attributed = inSentence.length ? inSentence : carriedNumbers(start);
-      if (!pluralSubject(around).plural && attributed.every((n) => n === b.quoteNumber)) {
+      if (!subjectShape(around).plural && attributed.every((n) => n === b.quoteNumber)) {
         text = text.slice(0, at) + " ".repeat(b.message.length) + text.slice(from);
       }
     }
@@ -845,7 +917,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       //   4. the latest single booking — ONLY for a singular claim.
       // An explicitly plural claim never resolves to one booking: it needs 2+ concrete subjects,
       // an exact match with any stated count, and no unreadable count.
-      const shape = pluralSubject(sentence);
+      const shape = subjectShape(sentence);
       const bookingOf = (n: string) => latest(input, "booking", (b) => b.quoteNumber === n);
       if (shape.unresolved) return [null];
       const named = [...new Set(quoteNumbers.length ? quoteNumbers : earlier)];
@@ -861,16 +933,16 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
       return all.map(bookingOf);
     };
 
-    for (const m of sentence.matchAll(BOOKED_CLAIM)) {
-      if (negated(sentence, m.index)) continue;
+    for (const index of statePredicates(sentence, BOOKED_STATE, BOOKED_CLAIM)) {
+      if (negated(sentence, index)) continue;
       if (!subjectsOf().every((b) => b?.status === "confirmed")) {
         flag("GROUNDING_BOOKING_STATUS_UNSUPPORTED");
         break;
       }
     }
 
-    for (const m of sentence.matchAll(HOLD_CLAIM)) {
-      if (negated(sentence, m.index)) continue;
+    for (const index of statePredicates(sentence, HELD_STATE, HOLD_CLAIM)) {
+      if (negated(sentence, index)) continue;
       const minutes = /\bfor (\d+) minutes?\b/i.exec(sentence);
       const ok = subjectsOf().every((b) => {
         const remaining = b?.holdExpiresAt
