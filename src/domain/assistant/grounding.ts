@@ -405,6 +405,27 @@ export function blankFillers(text: string): string {
   return text.replace(FILLER, (m) => " ".repeat(m.length));
 }
 
+/**
+ * The ONLY shape a conditional antecedent may have for its own claim to be exempt (ADR 0017 §21):
+ * opener + a transactional subject + the claim's auxiliary chain ("If [the quote] is confirmed",
+ * "Once [the quote] has been approved", "When [the reservation] is confirmed"). Every word of the
+ * subject must be one of these — determiners, quote/booking nouns, their modifiers, pronouns,
+ * quote numbers, counts. ANY other word ("If you need reassurance your booking is…", "If the
+ * customer asks your booking is…") means another proposition comes first: the claim is not the
+ * antecedent and is grounded. Exemption is proven positively; it is never inferred from the
+ * absence of a recognised verb.
+ */
+const ANTECEDENT_SUBJECT = new Set(
+  (
+    "the your my our this that these those its their a an all both each every of " +
+    "quote quotes booking bookings reservation reservations request requests hold holds order " +
+    "orders item items inventory date slot rental rentals event " +
+    "current other remaining pending confirmed active requested new existing previous recent " +
+    "latest same party reserved it they them everything"
+  ).split(" "),
+);
+const COORDINATOR = /\s(?:and|or|but|so|then)\s/gi;
+
 export function hypothetical(sentence: string, index: number): boolean {
   const { text, offset } = clauseAt(sentence, index);
   const clauseStart = index - offset;
@@ -413,22 +434,47 @@ export function hypothetical(sentence: string, index: number): boolean {
   const chain = auxChain(tokens);
   const marker = STRONG_MARKER.exec(before);
   if (marker) {
-    // The antecedent's own predicate: nothing verbal between the marker and the claim's chain.
     const markerTokens = (marker[0].match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? []).length;
-    if (!tokens.slice(markerTokens, chain.start).some(isVerbToken)) return true;
-    // A consequence in the same clause ("If the quote is confirmed it will be booked").
+    const subject = tokens.slice(markerTokens, chain.start);
+    // A contraction at the head of the chain carries the subject too ("If IT's available").
+    const head = tokens[chain.start] ?? "";
+    if (isContractedVerb(head)) subject.push(head.replace(/'[a-z]+$/i, ""));
+    // Elided antecedent: the opener is followed directly by the claim ("If available", "Once
+    // confirmed") — nothing else can come first.
+    if (tokens.length === markerTokens) return true;
+    const isAntecedent =
+      chain.start < tokens.length && // the claim has its own auxiliary chain
+      subject.length > 0 &&
+      subject.every(
+        (t) => ANTECEDENT_SUBJECT.has(t.toLowerCase()) || isQuoteNumberToken(t) || isCountToken(t),
+      );
+    if (isAntecedent) return true;
+    // Otherwise it is at most a consequence in the same clause, and only with its OWN modal
+    // chain ("If the quote is confirmed it WILL BE booked").
     return chain.modal;
   }
-  // The consequence of a condition fronted in an earlier clause — only with its own modal chain.
-  if (clauseStart > 0 && chain.modal) {
+  // The consequence of a condition fronted in an earlier clause: modal/future in this claim's own
+  // proposition — from the clause start, or the last coordinator before it, up to the claim
+  // ("If the booking is held, we WILL keep the inventory reserved"). A modal of a LATER predicate
+  // ("…is confirmed and you can relax") is outside it.
+  if (clauseStart > 0) {
+    let propStart = 0;
+    for (const m of before.matchAll(COORDINATOR)) propStart = m.index + m[0].length;
+    const proposition = before.slice(propStart);
+    const modal =
+      chain.modal || /\b(?:will|would|can|could|may|might|shall|should)\b|'ll\b/i.test(proposition);
     const fronted = sentence.slice(0, clauseStart);
-    if (STRONG_MARKER.test(fronted) || WEAK_MARKER.test(fronted)) return true;
+    if (modal && (STRONG_MARKER.test(fronted) || WEAK_MARKER.test(fronted))) return true;
   }
   return false;
 }
 
-function negated(sentence: string, index: number): boolean {
-  if (hypothetical(sentence, index)) return true;
+/**
+ * `index` is where the claim's wording starts (negation is judged right before it); `stateAt`, for
+ * booking/hold claims, is the state word itself — conditional scope is decided from ITS chain.
+ */
+function negated(sentence: string, index: number, stateAt = index): boolean {
+  if (hypothetical(sentence, stateAt)) return true;
   const { text, offset } = clauseAt(sentence, index);
   const before = text.slice(0, offset);
   const words = before.toLowerCase().match(/[a-z']+/g) ?? [];
@@ -687,10 +733,18 @@ const PREDICATE_WORDS = new Set(
  * or count material, every token must be understood (a count read by the canonical parser, a
  * quote number, a known determiner/modifier/noun/adverb); otherwise the subject is UNRESOLVED.
  */
+const RELATIVE_OPENER = /^\s*(?:and\s+|or\s+)?(?:which|that|who|whom|whose|where)\b/i;
+
 export function predicateSpan(sentence: string, stateAt: number): SubjectShape {
   // The claim's clause, from its start (after the last separator) to the state word.
+  // A comma that opens a RELATIVE clause (", which have been confirmed") is not a boundary: the
+  // count before it belongs to the same assertion, so it stays in the span (and, with the
+  // relative marker, fails closed below) — it is never dropped.
   let clauseStart = 0;
-  for (const m of sentence.slice(0, stateAt).matchAll(CLAUSE_SEPARATOR)) {
+  const head = sentence.slice(0, stateAt);
+  for (const m of head.matchAll(CLAUSE_SEPARATOR)) {
+    const after = head.slice(m.index + m[0].length);
+    if (m[0] === "," && RELATIVE_OPENER.test(after)) continue;
     clauseStart = m.index + m[0].length;
   }
   const tokens = sentence.slice(clauseStart, stateAt).match(TOKEN) ?? [];
@@ -722,7 +776,7 @@ export function predicateSpan(sentence: string, stateAt: number): SubjectShape {
   if (!material) return { plural: false, count: null, unresolved: false };
   // Count material with a relative clause or another verb inside ("are all of the eleven quotes
   // THAT HAVE been confirmed"): the parser cannot bind the count to the claim — fail closed.
-  if (span.some((t) => /^(?:that|which|who|whom|whose)$/i.test(t) || isVerbToken(t))) {
+  if (span.some((t) => /^(?:that|which|who|whom|whose|where)$/i.test(t) || isVerbToken(t))) {
     return { plural: true, count: null, unresolved: true };
   }
   const counts: number[] = [];
@@ -1126,7 +1180,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     };
 
     for (const p of statePredicates(sentence, BOOKED_STATE, BOOKED_CLAIM)) {
-      if (negated(sentence, p.at)) continue;
+      if (negated(sentence, p.at, p.stateAt)) continue;
       if (!subjectsOf(p.stateAt).every((b) => b?.status === "confirmed")) {
         flag("GROUNDING_BOOKING_STATUS_UNSUPPORTED");
         break;
@@ -1134,7 +1188,7 @@ export function checkGrounding(input: GroundingInput): GroundingResult {
     }
 
     for (const p of statePredicates(sentence, HELD_STATE, HOLD_CLAIM)) {
-      if (negated(sentence, p.at)) continue;
+      if (negated(sentence, p.at, p.stateAt)) continue;
       const minutes = /\bfor (\d+) minutes?\b/i.exec(sentence);
       const ok = subjectsOf(p.stateAt).every((b) => {
         const remaining = b?.holdExpiresAt

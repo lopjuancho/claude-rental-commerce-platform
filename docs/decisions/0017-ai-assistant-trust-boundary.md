@@ -307,6 +307,24 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       confirmed; confirmed → cancelled), and assert the new state, an authoritative read, no old
       prose and no server-only reference in the HTTP body.
 
+21. **Round 10 of the review (Codex, b078e17).**
+    - **Antecedents are proven, not inferred:** a claim inside a clause opened by a condition is
+      exempt as the condition itself only in the positive shape opener + transactional subject +
+      the claim's own auxiliary chain ("If [the quote] is confirmed", "Once [the quote] has been
+      approved", "If [it]'s available"), or when the opener is followed directly by the claim
+      ("If available"). Every subject word must be a determiner, a quote/booking noun or its
+      modifier, a pronoun ("it", "they"), a quote number or a count. Anything else — whatever
+      verb it is ("If you need reassurance your booking is…", "If the customer asks…") — means
+      another proposition comes first and the claim is grounded. No verb list decides it.
+    - **Consequences:** in the same clause, only with the claim's own modal chain ("it WILL BE
+      booked"); after a fronted condition, only with a modal in the claim's own proposition (from
+      the clause start or the last coordinator up to the claim: "we WILL keep the inventory
+      reserved"), never a later predicate's.
+    - **Comma relative clauses fail closed:** a comma followed by "which/that/who/whom/whose/
+      where" is not a clause boundary for the post-verb span, so "all of the eleven quotes, which
+      have been confirmed" keeps its count material, meets the relative marker and is unresolved
+      — even when eleven quotes would match.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,
