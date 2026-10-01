@@ -60,15 +60,44 @@ export function bookingStatus(
   organizationId: string,
   quoteId: string,
 ): Promise<string | null>;
+export const SMOKE_TAG: RegExp;
+export interface SmokeBlock {
+  id: string;
+  productId: string;
+}
 export function addSmokeAvailabilityBlock(
   db: Queryable,
   organizationId: string,
   productSlug: string,
   isoDate: string,
   tag: string,
-): Promise<string | null>;
-export function removeSmokeAvailabilityBlocks(
+): Promise<SmokeBlock | null>;
+export function removeSmokeAvailabilityBlock(
   db: Queryable,
   organizationId: string,
+  block: SmokeBlock,
   tag: string,
 ): Promise<number>;
+export function bookingHoldReleased(
+  db: Queryable,
+  organizationId: string,
+  quoteId: string,
+): Promise<{ requestStatus: string; blockingAllocations: number } | null>;
+export function modelCalls(
+  db: Queryable,
+  organizationId: string,
+  sessionToken: string | null,
+): Promise<number>;
+export interface SmokeCleanupState {
+  tag: string;
+  organizationId: string | null;
+  booking: { quoteId: string; quoteNumber: string } | null;
+  block: SmokeBlock | null;
+  bookingCleanup: string;
+  blockCleanup: string;
+  stopping: boolean;
+}
+export function createSmokeCleanup(
+  db: Queryable,
+  tag: string,
+): { state: SmokeCleanupState; run(): Promise<SmokeCleanupState>; recovery(): string[] };

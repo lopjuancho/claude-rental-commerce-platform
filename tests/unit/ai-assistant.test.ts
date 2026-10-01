@@ -446,7 +446,12 @@ describe("runTurn", () => {
     expect(res).toMatchObject({ status: "ok", reply: "The total is $330.00." });
     expect(res.blocks).toEqual(priced.blocks);
     expect(rows.map((r) => r.role)).toEqual(["user", "assistant", "tool", "assistant"]);
-    expect(actions).toEqual([{ toolName: "calculate_price", status: "ok", errorCode: null }]);
+    // Each provider call is a `model_call` telemetry row; the tool call its own row.
+    expect(actions).toEqual([
+      { toolName: "model_call", status: "ok", errorCode: null },
+      { toolName: "calculate_price", status: "ok", errorCode: null },
+      { toolName: "model_call", status: "ok", errorCode: null },
+    ]);
     // The model never sees an organization id.
     expect(JSON.stringify(model.requests)).not.toContain(tenant.organizationId);
   });

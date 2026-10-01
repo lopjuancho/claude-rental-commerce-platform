@@ -520,15 +520,30 @@ async function turn(
     // 3. The model loop: every step checks the one deadline.
     for (let step = 0; step < limits.maxModelSteps; step++) {
       deadline.assertOpen("model");
-      const res = await deadline.race(
-        deps.provider.complete({
-          messages,
-          tools: TOOL_SPECS,
-          maxOutputTokens: deps.maxOutputTokens,
-          signal: deadline.signal,
-        }),
-        "model",
-      );
+      // Every provider call leaves a telemetry row (`model_call`: status, latency, model,
+      // correlation id — never content), so it is observable that a replay calls no model.
+      const modelStarted = Date.now();
+      let res: Awaited<ReturnType<typeof deps.provider.complete>>;
+      try {
+        res = await deadline.race(
+          deps.provider.complete({
+            messages,
+            tools: TOOL_SPECS,
+            maxOutputTokens: deps.maxOutputTokens,
+            signal: deadline.signal,
+          }),
+          "model",
+        );
+      } catch (e) {
+        await record(
+          "model_call",
+          "error",
+          (e as { code?: string }).code ?? "MODEL_ERROR",
+          Date.now() - modelStarted,
+        );
+        throw e;
+      }
+      await record("model_call", "ok", undefined, Date.now() - modelStarted);
       tokens += res.usage.inputTokens + res.usage.outputTokens;
       if (res.toolCalls.length === 0) {
         reply = res.text ?? "";

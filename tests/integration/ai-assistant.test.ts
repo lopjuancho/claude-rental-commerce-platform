@@ -185,9 +185,16 @@ describeRest("conversation through the real backend", () => {
     );
     expect(toolArgs.rows.map((r) => r.s).join("\n")).not.toContain(email);
     const actions = await admin<{ tool_name: string; status: string }>(
-      "select tool_name, status from public.ai_actions where conversation_id = $1 order by created_at",
+      "select tool_name, status from public.ai_actions where conversation_id = $1 and tool_name <> 'model_call' order by created_at",
       [conv.rows[0]!.id],
     );
+    // Every provider call is recorded too (`model_call` rows: no content, status and latency).
+    const modelCalls = await admin<{ n: string; ok: string }>(
+      "select count(*)::text n, count(*) filter (where status = 'ok')::text ok from public.ai_actions where conversation_id = $1 and tool_name = 'model_call'",
+      [conv.rows[0]!.id],
+    );
+    expect(Number(modelCalls.rows[0]!.n)).toBeGreaterThan(0);
+    expect(modelCalls.rows[0]!.ok).toBe(modelCalls.rows[0]!.n);
     expect(actions.rows.map((r) => r.tool_name)).toEqual([
       "search_products",
       "check_availability",
@@ -292,7 +299,7 @@ async function attack(
     [await hashSessionToken(session)],
   );
   const actions = await admin<{ tool_name: string; status: string; error_code: string | null }>(
-    "select tool_name, status, error_code from public.ai_actions where conversation_id = $1 order by created_at",
+    "select tool_name, status, error_code from public.ai_actions where conversation_id = $1 and tool_name <> 'model_call' order by created_at",
     [conv.rows[0]!.id],
   );
   const toolResults = model.seen.flatMap((r) =>

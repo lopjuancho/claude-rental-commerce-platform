@@ -167,30 +167,133 @@ export async function bookingStatus(db, organizationId, quoteId) {
   return rows[0]?.status ?? null;
 }
 
+/** A smoke run tag: "ai-smoke-" + 12 hex characters. Anything else is refused. */
+export const SMOKE_TAG = /^ai-smoke-[0-9a-f]{12}$/;
+
 /**
- * Smoke-only availability change: a maintenance block for ONE product of this organization on
- * one (far-future) date, tagged so it can be removed exactly. The window spans the whole local
- * day in any timezone. Returns the block id.
+ * Smoke-only availability change: ONE maintenance block for ONE product of this organization on
+ * one (far-future) date, owned by this run (its tag). The tag is validated BEFORE the insert. The
+ * window spans the whole local day in any timezone. Returns the exact block id and product id.
  */
 export async function addSmokeAvailabilityBlock(db, organizationId, productSlug, isoDate, tag) {
+  if (!SMOKE_TAG.test(tag ?? ""))
+    throw new Error("refusing an availability block without a valid smoke tag");
   const { rows } = await db.query(
     `insert into public.availability_blocks (organization_id, product_id, period, reason, notes)
      select $1, p.id,
             tstzrange(($3::date - interval '14 hours')::timestamptz, ($3::date + interval '38 hours')::timestamptz),
             'maintenance', $4
      from public.products p where p.organization_id = $1 and p.slug = $2
-     returning id`,
+     returning id, product_id`,
     [organizationId, productSlug, isoDate, tag],
   );
-  return rows[0]?.id ?? null;
+  return rows[0] ? { id: rows[0].id, productId: rows[0].product_id } : null;
 }
 
-/** Removes exactly the smoke's tagged blocks of this organization. Returns how many. */
-export async function removeSmokeAvailabilityBlocks(db, organizationId, tag) {
-  if (!/^ai-smoke-[0-9a-f]{8,}$/.test(tag)) throw new Error("refusing to remove untagged blocks");
+/**
+ * Removes exactly ONE block: this organization's, with this id, for this product, carrying this
+ * run's tag. Returns how many rows were deleted (0 or 1).
+ */
+export async function removeSmokeAvailabilityBlock(db, organizationId, block, tag) {
+  if (!SMOKE_TAG.test(tag ?? ""))
+    throw new Error("refusing to remove a block without a valid smoke tag");
   const r = await db.query(
-    "delete from public.availability_blocks where organization_id = $1 and notes = $2",
-    [organizationId, tag],
+    `delete from public.availability_blocks
+     where organization_id = $1 and id = $2 and product_id = $3 and notes = $4`,
+    [organizationId, block.id, block.productId, tag],
   );
   return r.rowCount;
+}
+
+/**
+ * Whether the smoke booking's inventory is released, by the availability engine's own rule: an
+ * allocation blocks inventory while its status is held or confirmed.
+ */
+export async function bookingHoldReleased(db, organizationId, quoteId) {
+  const { rows } = await db.query(
+    `select b.status::text as request_status,
+            (select count(*)::int from public.reservation_allocations a
+              where a.organization_id = $1 and a.reservation_id = b.reservation_id
+                and a.status in ('held', 'confirmed')) as blocking
+     from public.booking_requests b
+     where b.organization_id = $1 and b.quote_id = $2 order by b.created_at desc limit 1`,
+    [organizationId, quoteId],
+  );
+  const r = rows[0];
+  return r ? { requestStatus: r.request_status, blockingAllocations: r.blocking } : null;
+}
+
+/**
+ * Provider (model) calls recorded for this session's conversation: one `model_call` telemetry row
+ * per call (src/server/ai/assistant.ts) — the direct evidence that a replay called no model.
+ */
+export async function modelCalls(db, organizationId, sessionToken) {
+  const { rows } = await db.query(
+    `select count(*)::int as n from public.ai_actions a join public.ai_conversations c on c.id = a.conversation_id
+     where c.organization_id = $1 and c.session_hash = $2 and a.tool_name = 'model_call'`,
+    [organizationId, sessionHashOf(sessionToken)],
+  );
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * Everything this run created that cleanup may need to undo, and what happened to it. `run()` is
+ * idempotent: it cancels the smoke's booking request if it is still pending and removes the
+ * smoke's exact availability block. Used by the normal path, a thrown error, SIGINT and SIGTERM.
+ */
+export function createSmokeCleanup(db, tag) {
+  if (!SMOKE_TAG.test(tag ?? "")) throw new Error("invalid smoke tag");
+  const state = {
+    tag,
+    organizationId: null,
+    booking: null, // { quoteId, quoteNumber }
+    block: null, // { id, productId }
+    bookingCleanup: "not attempted",
+    blockCleanup: "not created",
+    stopping: false,
+  };
+  let running = null;
+  async function run() {
+    running ??= (async () => {
+      if (state.organizationId && state.booking) {
+        try {
+          const status = await bookingStatus(db, state.organizationId, state.booking.quoteId);
+          if (status === "pending") {
+            await cancelSmokeBooking(db, state.organizationId, state.booking.quoteId);
+          }
+          const now = await bookingStatus(db, state.organizationId, state.booking.quoteId);
+          state.bookingCleanup = now === "pending" ? "failed" : `succeeded (${String(now)})`;
+        } catch {
+          state.bookingCleanup = "failed";
+        }
+      }
+      if (state.organizationId && state.block) {
+        try {
+          const removed = await removeSmokeAvailabilityBlock(
+            db,
+            state.organizationId,
+            state.block,
+            tag,
+          );
+          state.blockCleanup = removed === 1 ? "succeeded" : "failed (not found)";
+          if (removed === 1) state.block = null;
+        } catch {
+          state.blockCleanup = "failed";
+        }
+      }
+    })();
+    await running;
+    running = null;
+    return state;
+  }
+  /** Safe identifiers to clean up by hand if cleanup failed or the process was killed. */
+  function recovery() {
+    const lines = [];
+    if (state.block) lines.push(`availability block id ${state.block.id} (notes "${tag}")`);
+    if (state.booking && !state.bookingCleanup.startsWith("succeeded")) {
+      lines.push(`booking request of quote ${state.booking.quoteNumber} (smoke tag ${tag})`);
+    }
+    return lines;
+  }
+  return { state, run, recovery };
 }

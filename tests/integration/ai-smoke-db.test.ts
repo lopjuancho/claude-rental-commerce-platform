@@ -8,11 +8,14 @@ import type { ResolvedTenant } from "@/server/tenancy/resolve-tenant";
 import { generateVisitorToken } from "@/server/visitor";
 import {
   addSmokeAvailabilityBlock,
+  bookingHoldReleased,
   bookingRequestsFor,
   bookingStatus,
   cancelSmokeBooking,
   conversationCounters,
-  removeSmokeAvailabilityBlocks,
+  createSmokeCleanup,
+  modelCalls,
+  removeSmokeAvailabilityBlock,
   storedTurn,
   countForCustomer,
   currentSessionToken,
@@ -212,6 +215,9 @@ describeRest(
       );
       const qa = await quoteByLink(pool, orgA.id, a.url);
       expect(await bookingStatus(pool, orgA.id, qa!.id)).toBe("pending");
+      expect(
+        (await bookingHoldReleased(pool, orgA.id, qa!.id))?.blockingAllocations,
+      ).toBeGreaterThan(0);
       // Another tenant's scope cannot touch it.
       const other = await pool.connect();
       try {
@@ -228,9 +234,78 @@ describeRest(
         client.release();
       }
       expect(await bookingStatus(pool, orgA.id, qa!.id)).toBe("cancelled");
+      // The inventory is released by the availability engine's own rule (no held/confirmed
+      // allocation remains), not inferred from the request status.
+      expect(await bookingHoldReleased(pool, orgA.id, qa!.id)).toEqual({
+        requestStatus: "cancelled",
+        blockingAllocations: 0,
+      });
+      expect(await bookingHoldReleased(pool, orgB.id, qa!.id)).toBeNull();
     });
 
-    it("availability blocks: added for one product, removed exactly by tag, scoped to the org", async () => {
+    it("availability blocks: exact ownership — one id, one product, one org, one tag", async () => {
+      const p = await makeProduct(orgA, { units: 1 });
+      const p2 = await makeProduct(orgA, { units: 1 });
+      const slug = (
+        await admin<{ slug: string }>("select slug from public.products where id = $1", [
+          p.productId,
+        ])
+      ).rows[0]!.slug;
+      const tag = `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      const otherTag = `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      // Invalid tags are refused BEFORE any insert.
+      for (const bad of ["", "staff note", "ai-smoke-XYZ", "ai-smoke-123"]) {
+        await expect(
+          addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-06-01", bad),
+        ).rejects.toThrow();
+      }
+      expect(await addSmokeAvailabilityBlock(pool, orgB.id, slug, "2030-06-01", tag)).toBeNull();
+      const mine = await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-06-01", tag);
+      expect(mine?.productId).toBe(p.productId);
+      expect(mine?.id).toMatch(/^[0-9a-f-]{36}$/);
+      // Look-alikes that must survive: a staff block, a second block with the SAME tag, another tag.
+      const staff = await admin<{ id: string }>(
+        `insert into public.availability_blocks (organization_id, product_id, period, reason, notes)
+       values ($1, $2, tstzrange('2030-06-01', '2030-06-02'), 'maintenance', 'staff: deep clean') returning id`,
+        [orgA.id, p.productId],
+      );
+      const twin = await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-06-01", tag);
+      const other = await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-06-01", otherTag);
+      // Wrong org, wrong product, wrong tag: nothing deleted.
+      expect(await removeSmokeAvailabilityBlock(pool, orgB.id, mine!, tag)).toBe(0);
+      expect(
+        await removeSmokeAvailabilityBlock(
+          pool,
+          orgA.id,
+          { ...mine!, productId: p2.productId },
+          tag,
+        ),
+      ).toBe(0);
+      expect(await removeSmokeAvailabilityBlock(pool, orgA.id, mine!, otherTag)).toBe(0);
+      await expect(removeSmokeAvailabilityBlock(pool, orgA.id, mine!, "")).rejects.toThrow();
+      // The exact block, and only it.
+      expect(await removeSmokeAvailabilityBlock(pool, orgA.id, mine!, tag)).toBe(1);
+      const left = await admin<{ id: string }>(
+        "select id from public.availability_blocks where organization_id = $1 and product_id = $2",
+        [orgA.id, p.productId],
+      );
+      expect(left.rows.map((r) => r.id).sort()).toEqual(
+        [staff.rows[0]!.id, twin!.id, other!.id].sort(),
+      );
+      await admin("delete from public.availability_blocks where product_id = $1", [p.productId]);
+    });
+
+    it("cleanup: cancels a still-pending smoke booking, removes the exact block, reports safely", async () => {
+      const email = `gate-${randomUUID().slice(0, 8)}@example.test`;
+      const a = await quote(orgA, email);
+      await requestPublicBooking(
+        tenantOf(orgA),
+        { tokenHash: a.tokenHash },
+        {},
+        { ip: "198.51.100.65", visitorToken: generateVisitorToken() },
+        deps(),
+      );
+      const qa = await quoteByLink(pool, orgA.id, a.url);
       const p = await makeProduct(orgA, { units: 1 });
       const slug = (
         await admin<{ slug: string }>("select slug from public.products where id = $1", [
@@ -238,13 +313,42 @@ describeRest(
         ])
       ).rows[0]!.slug;
       const tag = `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-      expect(await addSmokeAvailabilityBlock(pool, orgB.id, slug, "2030-06-01", tag)).toBeNull();
-      expect(await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-06-01", tag)).toMatch(
-        /^[0-9a-f-]{36}$/,
-      );
-      expect(await removeSmokeAvailabilityBlocks(pool, orgB.id, tag)).toBe(0);
-      expect(await removeSmokeAvailabilityBlocks(pool, orgA.id, tag)).toBe(1);
-      await expect(removeSmokeAvailabilityBlocks(pool, orgA.id, "")).rejects.toThrow();
+      expect(() => createSmokeCleanup(pool, "bad")).toThrow();
+      const client = await pool.connect();
+      try {
+        const cleanup = createSmokeCleanup(client, tag);
+        // Nothing registered yet: nothing attempted.
+        expect(await cleanup.run()).toMatchObject({
+          bookingCleanup: "not attempted",
+          blockCleanup: "not created",
+        });
+        cleanup.state.organizationId = orgA.id;
+        cleanup.state.booking = { quoteId: qa!.id, quoteNumber: a.quoteNumber };
+        cleanup.state.block = await addSmokeAvailabilityBlock(
+          client,
+          orgA.id,
+          slug,
+          "2030-07-06",
+          tag,
+        );
+        // A crash now would leave these: the recovery lines name them without any secret.
+        const recovery = cleanup.recovery().join("\n");
+        expect(recovery).toContain(cleanup.state.block!.id);
+        expect(recovery).toContain(a.quoteNumber);
+        expect(recovery).not.toMatch(/[0-9a-f]{64}/);
+        const state = await cleanup.run();
+        expect(state.bookingCleanup).toBe("succeeded (cancelled)");
+        expect(state.blockCleanup).toBe("succeeded");
+        expect(cleanup.recovery()).toEqual([]);
+        expect(await bookingHoldReleased(pool, orgA.id, qa!.id)).toEqual({
+          requestStatus: "cancelled",
+          blockingAllocations: 0,
+        });
+        // Idempotent: a second run (a signal after the normal path) changes nothing.
+        expect((await cleanup.run()).bookingCleanup).toBe("succeeded (cancelled)");
+      } finally {
+        client.release();
+      }
     });
 
     it("storedTurn / conversationCounters: scoped, hash-free, and unchanged by a replay", async () => {
@@ -263,10 +367,17 @@ describeRest(
       expect(t).toEqual({ status: "completed", attempt: 1, bookingRefs: 0 });
       expect(JSON.stringify(t)).not.toMatch(/[0-9a-f]{64}/);
       expect(await storedTurn(pool, orgB.id, session, key)).toBeNull();
+      // A live turn records each provider call; a replay of the same request records none.
+      expect(await modelCalls(pool, orgA.id, session)).toBe(1);
+      expect(await modelCalls(pool, orgB.id, session)).toBe(0);
       const before = await conversationCounters(pool, orgA.id, session);
       const replay = await runTurn(input, turnDeps(fail));
       expect(replay.replayed).toBe(true);
+      expect(await modelCalls(pool, orgA.id, session)).toBe(1);
       expect(await conversationCounters(pool, orgA.id, session)).toEqual(before);
+      // A new message calls the model again (a failing call is recorded too).
+      await runTurn({ ...input, requestKey: randomUUID() }, turnDeps(fail));
+      expect(await modelCalls(pool, orgA.id, session)).toBe(2);
       // References count, without being returned.
       await admin(
         `update public.ai_turns t set response = response || jsonb_build_object(

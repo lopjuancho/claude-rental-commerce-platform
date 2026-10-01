@@ -23,13 +23,23 @@
  */
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { leaksServerRefs, safeExcerpt, unsupportedStateClaims } from "./ai-smoke-checks.mjs";
+import {
+  availabilityReplayVerdict,
+  bookingReplayVerdict,
+  expectedWhen,
+  freshAvailabilityVerdict,
+  leaksServerRefs,
+  safeExcerpt,
+  unsupportedStateClaims,
+} from "./ai-smoke-checks.mjs";
 import {
   addSmokeAvailabilityBlock,
   bookingStatus,
   cancelSmokeBooking,
+  bookingHoldReleased,
   conversationCounters,
-  removeSmokeAvailabilityBlocks,
+  createSmokeCleanup,
+  modelCalls,
   storedTurn,
   bookingRequestsFor,
   countForCustomer,
@@ -53,7 +63,36 @@ const db = new pg.Client({ connectionString: env.AI_SMOKE_DATABASE_URL });
 const cookies = new Map();
 /** Tags this run's staging-only fixtures (the availability block) so cleanup removes exactly them. */
 const smokeTag = `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-let cleanupOrg = null;
+/**
+ * Everything this run created that must be undone, and what happened to it (one object for the
+ * normal path, a thrown error, SIGINT and SIGTERM). A forced kill (SIGKILL) cannot be caught: the
+ * run prints its tag first, and the recovery identifiers whenever cleanup did not succeed.
+ */
+const cleanup = createSmokeCleanup(db, smokeTag);
+let finishing = false;
+async function finish(code, why) {
+  if (finishing) return;
+  finishing = true;
+  cleanup.state.stopping = true;
+  if (why) console.error(why);
+  const state = await cleanup.run().catch(() => cleanup.state);
+  console.log(`cleanup: booking ${state.bookingCleanup}; availability block ${state.blockCleanup}`);
+  const recovery = cleanup.recovery();
+  if (recovery.length) {
+    console.log(`MANUAL CLEANUP NEEDED (smoke tag ${smokeTag}):`);
+    for (const line of recovery) console.log(`  - ${line}`);
+  }
+  await db.end().catch(() => undefined);
+  process.exit(code);
+}
+for (const [signal, code] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
+  process.on(signal, () => {
+    void finish(code, `Smoke test interrupted (${signal}): stopping and cleaning up.`);
+  });
+}
 const results = [];
 
 function remember(res, jar = cookies) {
@@ -77,6 +116,7 @@ const sleep = (ms) =>
  */
 async function turn(message, { requestId = newId(), page, jar = cookies } = {}) {
   for (let attempt = 0; ; attempt++) {
+    if (cleanup.state.stopping) throw new Error("stopping");
     const res = await fetch(new URL("/api/assistant", base), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
@@ -117,7 +157,8 @@ async function main() {
   await db.connect();
   const org = await resolveOrganization(db, base.hostname);
   if (!org) throw new Error("the base URL's host does not resolve to an organization");
-  cleanupOrg = org;
+  cleanup.state.organizationId = org;
+  console.log(`smoke run tag: ${smokeTag}`);
   // 0. The storefront page view issues the visitor and assistant session cookies.
   remember(await fetch(base, { headers: { cookie: cookieHeader() } }));
   check(
@@ -217,11 +258,9 @@ async function main() {
   //    browser session, so this chat's active quote stays A (q3). Viewing B and asking to book
   //    must not book either until the customer says which.
   const jarB = new Map();
+  const emailB = `ai-smoke-b-${randomUUID().slice(0, 8)}@example.test`;
   remember(await fetch(base), jarB);
-  await turn(
-    `My name is Other Session, email ai-smoke-b-${randomUUID().slice(0, 8)}@example.test.`,
-    { jar: jarB },
-  );
+  await turn(`My name is Other Session, email ${emailB}.`, { jar: jarB });
   const bQuote = await turn(
     `Please create a quote for one ${name} on ${saturday(11)} from 12:00 to 16:00, pickup.`,
     { jar: jarB },
@@ -258,6 +297,10 @@ async function main() {
   );
   check("the booking reply never claims confirmed/paid", !FALSE_CLAIM.test(booking.reply ?? ""));
 
+  if (quoteA && b?.status === "hold_placed") {
+    cleanup.state.booking = { quoteId: quoteA.id, quoteNumber: quoteA.quoteNumber };
+  }
+
   // 12. LIVE booking-state replay. A booking-status reply is stored; the smoke's OWN booking
   //     request is then cancelled in the database (the quote page's cancel function — it also
   //     releases the hold); the SAME request id is retried. The replay must re-read the
@@ -291,6 +334,7 @@ async function main() {
     );
     if (quoteA) {
       const counters = await conversationCounters(db, org, session());
+      const callsBefore = await modelCalls(db, org, session());
       await cancelSmokeBooking(db, org, quoteA.id);
       const now = await bookingStatus(db, org, quoteA.id);
       check(
@@ -298,8 +342,21 @@ async function main() {
         now === "cancelled",
         String(now),
       );
+      // The inventory itself is released (the availability engine's rule: no held/confirmed
+      // allocation remains) — not inferred from the request status.
+      const release = await bookingHoldReleased(db, org, quoteA.id);
+      check(
+        "live replay setup: the cancelled request's inventory hold is released",
+        release?.requestStatus === "cancelled" && release.blockingAllocations === 0,
+        release
+          ? `${release.requestStatus}, ${String(release.blockingAllocations)} blocking`
+          : "none",
+      );
+      if (now === "cancelled")
+        cleanup.state.bookingCleanup = "succeeded (cancelled by the replay check)";
       const replay = await turn(statusQuestion, { requestId: statusKey });
       const after = await conversationCounters(db, org, session());
+      const callsAfter = await modelCalls(db, org, session());
       const cards = blocks(replay, "booking");
       check(
         "live replay: the same request id is replayed",
@@ -307,8 +364,22 @@ async function main() {
         `http ${String(replay.http)}`,
       );
       check(
-        "live replay: the model is NOT run again (no new messages, actions or attempts)",
+        "live replay: the provider (model) is NOT called again (model_call telemetry unchanged)",
+        callsBefore > 0 && callsAfter === callsBefore,
+        `${String(callsBefore)} → ${String(callsAfter)}`,
+      );
+      check(
+        "live replay: nothing is appended (messages, actions, attempts unchanged)",
         JSON.stringify(counters) === JSON.stringify(after),
+      );
+      const verdict = bookingReplayVerdict(replay.reply, replay.blocks, {
+        quoteNumber: quoteA.quoteNumber,
+        status: "cancelled",
+      });
+      check(
+        "live replay: the NEW state, and only it (cancelled card; no active/held/confirmed card or language)",
+        verdict.ok,
+        `${verdict.reasons.join("; ")} :: ${safeExcerpt(replay.reply)}`,
       );
       check(
         "live replay: the NEW authoritative state is shown (cancelled card for quote A)",
@@ -392,16 +463,22 @@ async function main() {
         card?.status === "available",
         card?.status ?? a1.errorCode ?? `http ${String(a1.http)}`,
       );
-      const blockId = await addSmokeAvailabilityBlock(db, org, slug, availDate, smokeTag);
+      cleanup.state.block = await addSmokeAvailabilityBlock(db, org, slug, availDate, smokeTag);
+      if (cleanup.state.block) cleanup.state.blockCleanup = "pending";
       check(
         "live availability replay setup: tagged block added for the smoke product/date",
-        Boolean(blockId),
+        Boolean(cleanup.state.block),
       );
       const fresh = await turn(question);
+      const freshVerdict = freshAvailabilityVerdict(one(fresh, "availability"), {
+        slug,
+        when: expectedWhen(availDate),
+        quantity: 1,
+      });
       check(
-        "live availability replay setup: a FRESH check now reports it unavailable",
-        one(fresh, "availability") !== null && one(fresh, "availability").status !== "available",
-        one(fresh, "availability")?.status ?? fresh.errorCode ?? "",
+        "live availability replay setup: a FRESH check for the SAME product, window and quantity is now unavailable",
+        freshVerdict.ok,
+        freshVerdict.reasons.join("; "),
       );
       const a2 = await turn(question, { requestId: availKey });
       check("live availability replay: the same request id is replayed", a2.replayed === true);
@@ -409,20 +486,25 @@ async function main() {
         "live availability replay: no availability card is replayed as current",
         blocks(a2, "availability").length === 0,
       );
+      const replayVerdict = availabilityReplayVerdict(a2.reply, a2.blocks);
       check(
-        "live availability replay: stale prose is not repeated; the customer is asked to re-check",
-        /Availability needs to be checked again/.test(a2.reply ?? "") &&
-          !(a2.reply ?? "").includes((a1.reply ?? "").trim() || "\u0000") &&
-          !/\bis available\b|\bshows as available\b/i.test(a2.reply ?? ""),
-        safeExcerpt(a2.reply),
+        "live availability replay: neutral re-check only (no card, no positive availability claim)",
+        replayVerdict.ok && !(a2.reply ?? "").includes((a1.reply ?? "").trim() || "\u0000"),
+        `${replayVerdict.reasons.join("; ")} :: ${safeExcerpt(a2.reply)}`,
       );
       check(
         "live availability replay: no server-side reference in the HTTP body",
         !leaksServerRefs(a2.raw ?? ""),
       );
     } finally {
-      const removed = await removeSmokeAvailabilityBlocks(db, org, smokeTag);
-      check("cleanup: the smoke's availability block is removed", removed === 1, String(removed));
+      if (cleanup.state.block) {
+        const state = await cleanup.run();
+        check(
+          "cleanup: the smoke's exact availability block is removed",
+          state.blockCleanup === "succeeded",
+          state.blockCleanup,
+        );
+      }
     }
   }
 
@@ -533,24 +615,30 @@ async function main() {
   const holds = await countForCustomer(db, org, email, "bookings");
   check("database: exactly one booking request", holds === 1, String(holds));
 
+  const quotesB = await countForCustomer(db, org, emailB, "quotes");
+  const bookingsB = await countForCustomer(db, org, emailB, "bookings");
+  const state = await cleanup.run();
   const failed = results.filter((r) => !r.ok);
   console.log(
     `\n${String(results.length - failed.length)}/${String(results.length)} checks passed.`,
   );
+  // What this run left on staging — observed, not assumed.
+  console.log(`smoke run tag: ${smokeTag}`);
   console.log(
-    "Left on staging (clearly labelled ai-smoke customers): 7 quotes (5 for the main customer, 1 from the second session, none from the adversarial session) and one booking request, which the smoke itself CANCELLED (its hold is released). The smoke's availability block was removed.",
+    `staging artifacts: ${String(quotes + quotesB)} quotes (${String(quotes)} main customer, ${String(quotesB)} second session), ${String(holds + bookingsB)} booking request(s)`,
   );
+  console.log(`booking cleanup: ${state.bookingCleanup}`);
+  console.log(`availability block cleanup: ${state.blockCleanup}`);
+  const recovery = cleanup.recovery();
+  if (recovery.length) {
+    console.log(`MANUAL CLEANUP NEEDED (smoke tag ${smokeTag}):`);
+    for (const line of recovery) console.log(`  - ${line}`);
+  }
   await db.end();
   process.exit(failed.length ? 1 : 0);
 }
 
 main().catch(async (e) => {
   // Never print the error itself (it may carry connection details): its kind only.
-  console.error(`Smoke test aborted: ${e instanceof Error ? e.name : "error"}`);
-  if (cleanupOrg) {
-    const removed = await removeSmokeAvailabilityBlocks(db, cleanupOrg, smokeTag).catch(() => -1);
-    console.error(`cleanup: removed ${String(removed)} smoke availability block(s)`);
-  }
-  await db.end().catch(() => undefined);
-  process.exit(1);
+  await finish(1, `Smoke test aborted: ${e instanceof Error ? e.name : "error"}`);
 });
