@@ -102,19 +102,35 @@ export function reconcileSmokeBookings(
 export const LEASE_GRACE_SECONDS: number;
 export type RequestTransport =
   "in_flight" | "response_completed" | "transport_failed_unknown" | "wait_timed_out_unknown";
+export interface SmokeDelivery {
+  state: RequestTransport;
+  httpStatus: number | null;
+  /** A recognized application pre-turn refusal code (PRE_TURN_REFUSALS), or null. */
+  refusal: string | null;
+}
+export const PRE_TURN_REFUSALS: Readonly<Record<number, readonly string[]>>;
+export function preTurnRefusal(status: number | null, body: unknown): string | null;
 export function requestTerminality(
   db: Queryable,
   organizationId: string,
   sessionToken: string | null,
   requestKey: string,
-  transport: RequestTransport,
+  sends?: Pick<SmokeDelivery, "refusal">[],
 ): Promise<{ terminal: boolean; reason: string }>;
 export interface SmokeRequestIntent {
   requestId: string;
   sessionToken: string | null;
+  sends: SmokeDelivery[];
+  /** The latest delivery's transport state. */
   state: RequestTransport;
   resolution: "terminal" | "unknown" | null;
 }
+export function trackedExchange<R extends { status: number; text: () => Promise<string> }>(
+  cleanup: ReturnType<typeof createSmokeCleanup>,
+  requestId: string,
+  sessionToken: string | null,
+  send: () => Promise<R>,
+): Promise<{ res: R; raw: string; body: unknown }>;
 export function modelCalls(
   db: Queryable,
   organizationId: string,
@@ -144,10 +160,15 @@ export function createSmokeCleanup(
   tag: string,
 ): {
   state: SmokeCleanupState;
-  run(options?: { waitForInFlightMs?: number }): Promise<SmokeCleanupState>;
+  run(options?: { waitForInFlightMs?: number; blockOnly?: boolean }): Promise<SmokeCleanupState>;
   recovery(): string[];
   beginRequest(
     requestId: string,
     sessionToken: string | null,
-  ): { intent: SmokeRequestIntent; responded: () => void; failed: () => void };
+  ): {
+    intent: SmokeRequestIntent;
+    send: SmokeDelivery;
+    responded: (httpStatus?: number | null, body?: unknown) => void;
+    failed: () => void;
+  };
 };

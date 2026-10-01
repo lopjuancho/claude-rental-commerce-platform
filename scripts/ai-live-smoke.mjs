@@ -51,6 +51,7 @@ import {
   quoteByLink,
   resolveOrganization,
   toolsRun,
+  trackedExchange,
 } from "./ai-smoke-db.mjs";
 
 const env = process.env;
@@ -119,29 +120,21 @@ const sleep = (ms) =>
 async function turn(message, { requestId = newId(), page, jar = cookies } = {}) {
   for (let attempt = 0; ; attempt++) {
     if (cleanup.state.stopping) throw new Error("stopping");
-    // Mutation intent BEFORE the request is sent: its exact id and session. An interrupt lets it
-    // settle (bounded); if it does not — or the transport fails — its completion is UNKNOWN until
-    // the server's turn journal shows it terminal (scripts/ai-smoke-db.mjs requestTerminality).
-    const intent = cleanup.beginRequest(requestId, currentSessionToken(jar));
-    const sent = fetch(new URL("/api/assistant", base), {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
-      body: JSON.stringify({ message, requestId, ...(page ? { page } : {}) }),
-    }).then(
-      async (r) => {
-        const raw = await r.text();
-        intent.responded();
-        return { r, raw };
-      },
-      (e) => {
-        intent.failed();
-        throw e;
-      },
+    // Mutation intent BEFORE the request is sent: its exact id and session. The whole exchange —
+    // request, headers AND body — is one tracked delivery; if it does not complete (or an
+    // interrupt's wait runs out) its outcome is UNKNOWN until the server's turn journal proves the
+    // request can no longer act (scripts/ai-smoke-db.mjs requestTerminality).
+    const {
+      res,
+      raw,
+      body: parsed,
+    } = await trackedExchange(cleanup, requestId, currentSessionToken(jar), () =>
+      fetch(new URL("/api/assistant", base), {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
+        body: JSON.stringify({ message, requestId, ...(page ? { page } : {}) }),
+      }),
     );
-    cleanup.state.inFlight = sent;
-    const { r: res, raw } = await sent.finally(() => {
-      if (cleanup.state.inFlight === sent) cleanup.state.inFlight = null;
-    });
     remember(res, jar);
     // What THIS request did with the model, reported by the server in-process.
     const calls = res.headers.get("x-assistant-model-calls");
@@ -149,12 +142,7 @@ async function turn(message, { requestId = newId(), page, jar = cookies } = {}) 
       modelCalls: calls === null ? null : Number(calls),
       telemetry: res.headers.get("x-assistant-telemetry"),
     };
-    let body = {};
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      body = {};
-    }
+    const body = parsed && typeof parsed === "object" ? parsed : {};
     if (res.status === 429 && attempt < 12) {
       await sleep(8_000);
       continue;
@@ -536,7 +524,7 @@ async function main() {
       );
     } finally {
       if (cleanup.state.block) {
-        const state = await cleanup.run();
+        const state = await cleanup.run({ blockOnly: true });
         check(
           "cleanup: the smoke's exact availability block is removed",
           state.blockCleanup === "succeeded",

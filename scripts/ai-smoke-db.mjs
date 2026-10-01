@@ -321,44 +321,181 @@ export async function reconcileSmokeBookings(db, organizationId, quoteIds, email
 export const LEASE_GRACE_SECONDS = 30;
 
 /**
- * Whether ONE assistant request of the smoke has PROVABLY stopped acting, from the server's own
- * durable turn journal — never from "no booking exists right now", which a request still running
- * can change a moment later. `transport` is what the smoke saw of the HTTP exchange.
- *
- * Terminal: the request's turn is completed or failed with no business mutation still 'started';
- * or its lease ran out (a mutation can begin only under a live lease: app.ai_owned_conversation)
- * with none 'started'; or the server ANSWERED without ever recording a turn (refused up front).
- * Everything else — no turn yet while the response is unknown, a live lease, a mutation still
- * 'started' — is NOT terminal.
+ * The application's OWN refusals that the handler (src/server/ai/handler.ts) returns BEFORE a turn
+ * exists and with no work left running: rate limits, wrong content type, oversized or invalid body,
+ * missing session — all before runTurn — and BUSY, which ai_turn_begin returns without creating
+ * the turn. Exact (HTTP status, JSON errorCode) pairs of the app's error body; anything else —
+ * a gateway 502/504, an edge or runtime error page, 503 AI_UNAVAILABLE (thrown AFTER runTurn
+ * started), a 200 — is NOT proof that no turn will start. tests/unit/ai-smoke-db.test.ts pins this
+ * list to the handler source.
  */
-export async function requestTerminality(db, organizationId, sessionToken, requestKey, transport) {
-  if (!sessionToken) return { terminal: false, reason: "its session is unknown" };
-  const { rows } = await db.query(
-    `select t.status,
-            t.lease_expires_at <= now() - make_interval(secs => $4) as lease_over,
-            (select count(*)::int from public.ai_mutations m
-              where m.organization_id = $1 and m.turn_id = t.id and m.status = 'started') as started
-     from public.ai_turns t join public.ai_conversations c on c.id = t.conversation_id
-     where c.organization_id = $1 and t.organization_id = $1 and c.session_hash = $2 and t.request_key = $3`,
-    [organizationId, sessionHashOf(sessionToken), requestKey, LEASE_GRACE_SECONDS],
-  );
-  const t = rows[0];
-  if (!t) {
-    return transport === "response_completed"
-      ? { terminal: true, reason: "answered without starting a turn" }
-      : { terminal: false, reason: "no turn recorded yet; the request may still reach the server" };
+export const PRE_TURN_REFUSALS = Object.freeze({
+  400: ["INVALID_MESSAGE"],
+  409: ["SESSION_REQUIRED", "BUSY"],
+  413: ["TOO_LARGE"],
+  415: ["UNSUPPORTED"],
+  429: ["RATE_LIMITED"],
+});
+
+/** The recognized pre-turn refusal code of an application response, or null. */
+export function preTurnRefusal(status, body) {
+  const codes = PRE_TURN_REFUSALS[status];
+  if (!codes || !body || typeof body !== "object" || body.status !== "error") return null;
+  return codes.includes(body.errorCode) ? body.errorCode : null;
+}
+
+/** One connection for a transaction: a Pool lends one; a Client is used as it is. */
+async function withConnection(db, fn) {
+  if (typeof db.connect === "function" && "totalCount" in db) {
+    const c = await db.connect();
+    try {
+      return await fn(c);
+    } finally {
+      c.release();
+    }
   }
-  if (t.started > 0) {
-    return {
-      terminal: false,
-      reason: `turn ${t.status}; a business mutation is still in progress`,
-    };
+  return fn(db);
+}
+
+const FENCE_RESPONSE = JSON.stringify({
+  status: "error",
+  errorCode: "SMOKE_FENCED",
+  reply: "This message was closed by the staging smoke test's cleanup.",
+  blocks: [],
+});
+
+/**
+ * Whether ONE assistant request key of the smoke can still mutate — now or in a FUTURE attempt —
+ * decided from the server's own turn journal for its CURRENT attempt, never from "no booking exists
+ * right now". `sends` is every delivery of this key the smoke made and what its transport showed.
+ *
+ * Under the conversation's row lock — the lock ai_turn_begin, ai_turn_finish/fail and
+ * ai_mutation_begin all take first — so no attempt can be claimed, finished or start a mutation
+ * while it decides (a retry being claimed right now holds it: lock timeout → NOT terminal):
+ * - no turn row: terminal only if EVERY delivery got a recognized pre-turn refusal;
+ * - a business mutation still 'started' for the turn: NOT terminal;
+ * - completed: terminal — any later delivery of the key replays it (ai_turn_begin);
+ * - processing under a live lease: NOT terminal;
+ * - failed, abandoned, or processing past its lease: the exact attempt N is FENCED — turned into a
+ *   completed turn (only if it is still attempt N in that status) and released from the
+ *   conversation — so a delivery still on its way replays instead of starting attempt N+1, and the
+ *   old attempt can no longer finish, fail or begin a mutation. Then terminal.
+ */
+export async function requestTerminality(db, organizationId, sessionToken, requestKey, sends = []) {
+  const notTerminal = (reason) => ({ terminal: false, reason });
+  if (!sessionToken) return notTerminal("its session is unknown");
+  return withConnection(db, async (c) => {
+    await c.query("begin");
+    try {
+      await c.query("set local lock_timeout = '1500ms'");
+      const conv = await c.query(
+        `select a.id from public.ai_conversations a
+         where a.organization_id = $1 and a.session_hash = $2 for update`,
+        [organizationId, sessionHashOf(sessionToken)],
+      );
+      const conversationId = conv.rows[0]?.id ?? null;
+      const t = conversationId
+        ? (
+            await c.query(
+              `select t.id, t.status, t.attempt,
+                      t.lease_expires_at <= now() - make_interval(secs => $4) as lease_over,
+                      (select count(*)::int from public.ai_mutations m
+                        where m.organization_id = $2 and m.turn_id = t.id and m.status = 'started') as started
+               from public.ai_turns t
+               where t.conversation_id = $1 and t.organization_id = $2 and t.request_key = $3`,
+              [conversationId, organizationId, requestKey, LEASE_GRACE_SECONDS],
+            )
+          ).rows[0]
+        : null;
+      if (!t) {
+        await c.query("commit");
+        const refusals = sends.map((s) => s.refusal ?? null);
+        return refusals.length > 0 && refusals.every(Boolean)
+          ? {
+              terminal: true,
+              reason: `the application refused every delivery before a turn (${[...new Set(refusals)].join(", ")})`,
+            }
+          : notTerminal("no turn recorded and no recognized pre-turn refusal for every delivery");
+      }
+      const attempt = `attempt ${String(t.attempt)}`;
+      if (t.started > 0) {
+        await c.query("rollback");
+        return notTerminal(`${attempt} ${t.status}; a business mutation is still in progress`);
+      }
+      if (t.status === "completed") {
+        await c.query("commit");
+        return { terminal: true, reason: `${attempt} completed; a later delivery replays it` };
+      }
+      if (t.status === "processing" && !t.lease_over) {
+        await c.query("rollback");
+        return notTerminal(`${attempt} processing; it may still act (live lease)`);
+      }
+      const fenced = await c.query(
+        `update public.ai_turns
+            set status = 'completed', response = $5::jsonb, error_code = 'SMOKE_FENCED', completed_at = now()
+          where id = $1 and organization_id = $2 and attempt = $3 and status = $4`,
+        [t.id, organizationId, t.attempt, t.status, FENCE_RESPONSE],
+      );
+      if (fenced.rowCount !== 1) {
+        await c.query("rollback");
+        return notTerminal(`${attempt} changed while it was being fenced`);
+      }
+      await c.query(
+        `update public.ai_conversations
+            set active_turn_id = null, active_turn_attempt = null, active_turn_expires_at = null
+          where id = $1 and active_turn_id = $2`,
+        [conversationId, t.id],
+      );
+      await c.query("commit");
+      return {
+        terminal: true,
+        reason: `${attempt} ${t.status}; fenced (a later delivery replays and cannot start another attempt)`,
+      };
+    } catch (e) {
+      await c.query("rollback").catch(() => undefined);
+      if (e && typeof e === "object" && e.code === "55P03") {
+        return notTerminal(
+          "its conversation is locked: an attempt is being claimed or written now",
+        );
+      }
+      throw e;
+    }
+  });
+}
+
+/**
+ * One HTTP exchange of a smoke request, tracked as a delivery of its intent over the WHOLE exchange
+ * (request, headers AND body): the delivery is `response_completed` only once the body has been
+ * read in full; any failure on the way — including a body read that fails after the headers
+ * arrived — is `transport_failed_unknown`. A body that arrived in full but is not JSON is still a
+ * completed transport (`body` null): the HTTP exchange finished, but it carries no recognized
+ * application outcome, so it can never count as a pre-turn refusal.
+ */
+export async function trackedExchange(cleanup, requestId, sessionToken, send) {
+  const delivery = cleanup.beginRequest(requestId, sessionToken);
+  const exchange = (async () => {
+    try {
+      const res = await send();
+      const raw = await res.text();
+      let body = null;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = null;
+      }
+      delivery.responded(res.status, body);
+      return { res, raw, body };
+    } catch (e) {
+      delivery.failed();
+      throw e;
+    }
+  })();
+  cleanup.state.inFlight = exchange;
+  try {
+    return await exchange;
+  } finally {
+    if (cleanup.state.inFlight === exchange) cleanup.state.inFlight = null;
   }
-  if (t.status === "completed" || t.status === "failed") {
-    return { terminal: true, reason: `turn ${t.status}` };
-  }
-  if (t.lease_over) return { terminal: true, reason: `turn ${t.status}; its lease has expired` };
-  return { terminal: false, reason: `turn ${t.status}; it may still act (live lease)` };
 }
 
 /**
@@ -366,13 +503,12 @@ export async function requestTerminality(db, organizationId, sessionToken, reque
  * normal path, a failed check, a thrown error, SIGINT and SIGTERM.
  *
  * Every assistant request is a MUTATION INTENT registered before it is sent (`beginRequest`), with
- * its exact request id and session, and the quotes/customers it may touch are registered before
- * then too. Its transport state: in_flight → response_completed | transport_failed_unknown |
- * wait_timed_out_unknown. An unknown transport is resolved only by the server's journal
+ * its exact request id and session; each delivery of it (a same-id 429 retry is another delivery)
+ * has a transport state: in_flight → response_completed | transport_failed_unknown |
+ * wait_timed_out_unknown. The transport never proves completion by itself: the journal does
  * (`requestTerminality`). The booking outcome: reconciled_no_booking_terminal,
  * reconciled_booking_cancelled, or unresolved — success requires EVERY request terminal (checked
- * BEFORE the bookings, so nothing can commit after the look) and no effective blocker.
- * `run()` is idempotent.
+ * BEFORE the bookings) and no effective blocker. `run()` is idempotent.
  */
 export function createSmokeCleanup(db, tag) {
   if (!SMOKE_TAG.test(tag ?? "")) throw new Error("invalid smoke tag");
@@ -383,7 +519,7 @@ export function createSmokeCleanup(db, tag) {
     /** Quote id → number, for every smoke quote seen (recovery output). */
     quoteNumbers: new Map(),
     customerEmails: new Set(),
-    /** request id → { requestId, sessionToken, state, resolution } (the session never printed). */
+    /** request id → { requestId, sessionToken, sends, state, resolution } (session never printed). */
     requests: new Map(),
     block: null, // { id, productId }
     bookingOutcome: "not_started",
@@ -391,35 +527,48 @@ export function createSmokeCleanup(db, tag) {
     blockCleanup: "not created",
     unresolved: [],
     stopping: false,
-    inFlight: null, // the HTTP request in progress, if any
+    inFlight: null, // the HTTP exchange in progress, if any
   };
-  /** Registers a request BEFORE it is sent; `settle` records what its transport showed. */
+  /** Registers one delivery of a request BEFORE it is sent. */
   function beginRequest(requestId, sessionToken) {
-    const intent = state.requests.get(requestId) ?? { requestId, resolution: null };
-    Object.assign(intent, { sessionToken, state: "in_flight" });
+    const intent = state.requests.get(requestId) ?? {
+      requestId,
+      sessionToken,
+      sends: [],
+      state: "in_flight",
+      resolution: null,
+    };
+    intent.sessionToken ??= sessionToken;
+    const send = { state: "in_flight", httpStatus: null, refusal: null };
+    intent.sends.push(send);
+    intent.state = send.state;
+    intent.resolution = null;
     state.requests.set(requestId, intent);
+    const set = (s) => {
+      send.state = s;
+      intent.state = s;
+    };
     return {
       intent,
-      responded: () => {
-        intent.state = "response_completed";
+      send,
+      responded: (httpStatus = null, body = null) => {
+        send.httpStatus = httpStatus;
+        send.refusal = preTurnRefusal(httpStatus, body);
+        set("response_completed");
       },
-      failed: () => {
-        intent.state = "transport_failed_unknown";
-      },
+      failed: () => set("transport_failed_unknown"),
     };
   }
   let running = null;
   async function reconcileBookings() {
     const org = state.organizationId;
-    // 1. Has every request provably stopped acting? (Before looking at bookings.)
+    // 1. Can any request still mutate, now or in a later attempt? (Before looking at bookings.)
     const unknown = [];
     for (const r of state.requests.values()) {
-      const t = await requestTerminality(db, org, r.sessionToken, r.requestId, r.state);
+      const t = await requestTerminality(db, org, r.sessionToken, r.requestId, r.sends);
       r.resolution = t.terminal ? "terminal" : "unknown";
       if (!t.terminal)
-        unknown.push(
-          `request ${r.requestId} (${r.state}): completion not established — ${t.reason}`,
-        );
+        unknown.push(`request ${r.requestId}: completion not established — ${t.reason}`);
     }
     // 2. The bookings themselves, by exact quote and smoke customer.
     const r = await reconcileSmokeBookings(db, org, state.quoteIds, state.customerEmails);
@@ -437,10 +586,11 @@ export function createSmokeCleanup(db, tag) {
     }
   }
   /**
-   * `waitForInFlightMs`: on an interrupt, first let a request already sent settle (bounded). If it
-   * does not, its completion is UNKNOWN — the journal, not this wait, decides.
+   * `waitForInFlightMs`: on an interrupt, first let an exchange already sent settle (bounded). If it
+   * does not, its completion is UNKNOWN — the journal, not this wait, decides. `blockOnly`: remove
+   * the maintenance block only (mid-run), leaving requests and bookings for the final cleanup.
    */
-  async function run({ waitForInFlightMs = 0 } = {}) {
+  async function run({ waitForInFlightMs = 0, blockOnly = false } = {}) {
     if (state.inFlight) {
       let timer;
       const settled = await Promise.race([
@@ -454,13 +604,17 @@ export function createSmokeCleanup(db, tag) {
       ]);
       clearTimeout(timer);
       if (!settled) {
-        for (const r of state.requests.values())
+        for (const r of state.requests.values()) {
+          for (const s of r.sends) if (s.state === "in_flight") s.state = "wait_timed_out_unknown";
           if (r.state === "in_flight") r.state = "wait_timed_out_unknown";
+        }
       }
     }
     running ??= (async () => {
       const org = state.organizationId;
-      if (
+      if (blockOnly) {
+        // (requests and bookings are reconciled by the final cleanup)
+      } else if (
         org &&
         (state.quoteIds.size > 0 || state.customerEmails.size > 0 || state.requests.size)
       ) {
@@ -518,7 +672,12 @@ export function createSmokeCleanup(db, tag) {
       }
       for (const e of state.customerEmails) lines.push(`smoke customer email ${e}`);
       for (const r of state.requests.values()) {
-        if (r.resolution !== "terminal") lines.push(`request ${r.requestId} (${r.state})`);
+        if (r.resolution !== "terminal") {
+          const sends = r.sends.map(
+            (s) => s.state + (s.httpStatus ? ` ${String(s.httpStatus)}` : ""),
+          );
+          lines.push(`request ${r.requestId} (deliveries: ${sends.join(", ")})`);
+        }
       }
       for (const u of state.unresolved) lines.push(`  ${u}`);
     }

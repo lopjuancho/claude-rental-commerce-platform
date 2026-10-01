@@ -279,6 +279,69 @@ describe("Codex smoke round 4: the embedding clause's OWN stance; negation adver
   });
 });
 
+describe("Codex smoke round 5: composed polarity (nested and repeated negation fail closed)", () => {
+  it.each([
+    "It is not true that your booking is not confirmed.",
+    "Your booking is not not confirmed.",
+    "It is not false that your booking is confirmed.",
+    "I cannot deny that your booking is confirmed.",
+    "I do not disagree that your booking is confirmed.",
+    "It is not true that I doubt that your booking is confirmed.",
+    "Nothing is not booked.",
+    "I am not sure whether your booking is not confirmed.",
+  ])("flags “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply).length).toBeGreaterThan(0);
+  });
+  it.each([
+    "It is not true that your booking is confirmed.",
+    "Your booking is not confirmed.",
+    "I cannot confirm that your booking is confirmed.",
+    "I deny that your booking is confirmed.",
+    "It is false that your booking is confirmed.",
+    "I am not sure whether your booking is confirmed.",
+    "I know that your booking is not confirmed.",
+  ])("does not flag “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply)).toEqual([]);
+  });
+  it("the replay verdicts compose the same way", () => {
+    const cancelled = [{ type: "booking", quoteNumber: "Q-7", status: "cancelled" }];
+    const expected = { quoteNumber: "Q-7", status: "cancelled" };
+    for (const claim of [
+      "It is not true that your booking is not confirmed.",
+      "Your booking is not not confirmed.",
+    ]) {
+      const v = bookingReplayVerdict(
+        `Here is where your request stands now. ${claim}`,
+        cancelled,
+        expected,
+      );
+      expect(v.ok).toBe(false);
+      expect(v.reasons.join(" ")).toMatch(/asserts state/);
+    }
+    expect(
+      bookingReplayVerdict(
+        "Here is where your request stands now. It is not true that your booking is confirmed.",
+        cancelled,
+        expected,
+      ).ok,
+    ).toBe(true);
+    for (const claim of [
+      "It is not true that it is not available.",
+      "It is not false that it is available.",
+    ]) {
+      const v = availabilityReplayVerdict(`Availability needs to be checked again. ${claim}`, []);
+      expect(v.ok).toBe(false);
+      expect(v.reasons.join(" ")).toMatch(/asserts availability/);
+    }
+    expect(
+      availabilityReplayVerdict(
+        "Availability needs to be checked again. It is not true that it is available.",
+        [],
+      ).ok,
+    ).toBe(true);
+  });
+});
+
 describe("providerObservationVerdict", () => {
   const ok = { modelCalls: 2, telemetry: "complete" };
   const replay0 = { modelCalls: 0, telemetry: "complete" };

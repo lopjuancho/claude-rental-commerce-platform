@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
 import { beforeAll, expect, it } from "vitest";
 import { runTurn } from "@/server/ai/assistant";
 import type { LlmProvider } from "@/server/ai/provider";
@@ -19,6 +20,7 @@ import {
   removeSmokeAvailabilityBlock,
   requestTerminality,
   storedTurn,
+  trackedExchange,
   countForCustomer,
   currentSessionToken,
   expireQuote,
@@ -509,7 +511,14 @@ describeRest(
       const s = serverRequest(q, true);
       const { tag, cleanup } = smokeCleanup(q);
       const h = cleanup.beginRequest(s.requestKey, s.session);
-      cleanup.state.inFlight = s.done.then(h.responded, h.failed);
+      cleanup.state.inFlight = s.done.then(
+        () => {
+          h.responded(200, null);
+        },
+        () => {
+          h.failed();
+        },
+      );
       await s.started; // the server is executing the request
       cleanup.state.stopping = true; // SIGTERM
       const first = await cleanup.run({ waitForInFlightMs: 200 });
@@ -545,7 +554,7 @@ describeRest(
       lost.failed();
       const none = await cleanup.run();
       expect(none.bookingOutcome).toBe("unresolved");
-      expect(none.unresolved.join(" ")).toMatch(/no turn recorded yet/);
+      expect(none.unresolved.join(" ")).toMatch(/no turn recorded/);
       expect(cleanup.recovery().join("\n")).toContain(lost.intent.requestId);
       cleanup.state.requests.delete(lost.intent.requestId);
       // (b) The connection failed while the server keeps executing; it commits afterwards.
@@ -617,7 +626,14 @@ describeRest(
       const s = serverRequest(q, true);
       const { cleanup } = smokeCleanup(q);
       const h = cleanup.beginRequest(s.requestKey, s.session);
-      cleanup.state.inFlight = s.done.then(h.responded, h.failed);
+      cleanup.state.inFlight = s.done.then(
+        () => {
+          h.responded(200, null);
+        },
+        () => {
+          h.failed();
+        },
+      );
       s.open();
       cleanup.state.stopping = true;
       const state = await cleanup.run({ waitForInFlightMs: 10_000 });
@@ -628,6 +644,7 @@ describeRest(
       expect(exitCode(state, cleanup.recovery())).toBe(0);
     });
 
+    const unknownDelivery = [{ refusal: null }];
     it("an expired lease is terminal only when no business mutation is still 'started'", async () => {
       const q = await smokeQuote(false);
       const s = serverRequest(q, false);
@@ -638,7 +655,7 @@ describeRest(
           [s.requestKey],
         );
       expect(
-        await requestTerminality(pool, orgA.id, s.session, s.requestKey, "wait_timed_out_unknown"),
+        await requestTerminality(pool, orgA.id, s.session, s.requestKey, unknownDelivery),
       ).toMatchObject({ terminal: false });
       await admin(
         `insert into public.ai_mutations (organization_id, conversation_id, turn_id, attempt, tool_name, mutation_key, status)
@@ -652,7 +669,7 @@ describeRest(
         orgA.id,
         s.session,
         s.requestKey,
-        "wait_timed_out_unknown",
+        unknownDelivery,
       );
       expect(started).toMatchObject({ terminal: false });
       expect(started.reason).toMatch(/mutation is still in progress/);
@@ -661,14 +678,198 @@ describeRest(
         [s.requestKey],
       );
       expect(
-        await requestTerminality(pool, orgA.id, s.session, s.requestKey, "wait_timed_out_unknown"),
+        await requestTerminality(pool, orgA.id, s.session, s.requestKey, unknownDelivery),
       ).toMatchObject({ terminal: true });
       // Another tenant's scope never sees the turn (and so never calls it terminal).
       expect(
-        await requestTerminality(pool, orgB.id, s.session, s.requestKey, "wait_timed_out_unknown"),
+        await requestTerminality(pool, orgB.id, s.session, s.requestKey, unknownDelivery),
       ).toMatchObject({ terminal: false });
       s.open();
       await s.done;
+    });
+
+    // ── current-attempt terminality: a retry of the same request key (real ai_turn_begin) ──
+    const sessionHash = (token: string) => createHash("sha256").update(`ai:${token}`).digest("hex");
+    /** A request whose attempt 1 FAILED (committed) — e.g. its response was lost. */
+    async function failedAttempt() {
+      const session = generateSessionToken();
+      const key = `smoke-${randomUUID()}`;
+      await runTurn(
+        {
+          tenant: tenantOf(orgA),
+          sessionToken: session,
+          requestKey: key,
+          message: "Please request the booking.",
+          meta: { ip: "198.51.100.70" },
+          correlationId: `c-${randomUUID()}`,
+        },
+        turnDeps(fail),
+      );
+      expect(await storedTurn(pool, orgA.id, session, key)).toMatchObject({
+        status: "failed",
+        attempt: 1,
+      });
+      return { session, key };
+    }
+    type Conn = PoolClient;
+    /** On its OWN connection: claims the retry through the app's ai_turn_begin, uncommitted. */
+    async function beginRetry(c: Conn, session: string, key: string) {
+      await c.query("begin");
+      await c.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+      const { rows } = await c.query<{ outcome: string; turn_id: string; attempt: number }>(
+        "select outcome, turn_id, attempt from public.ai_turn_begin($1, $2, $3, 60, 'retry-test')",
+        [orgA.id, sessionHash(session), key],
+      );
+      return rows[0]!;
+    }
+    async function failRetry(turnId: string, attempt: number) {
+      const c = await pool.connect();
+      try {
+        await c.query("begin");
+        await c.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+        await c.query("select public.ai_turn_fail($1, $2, $3, 'RETRY_FAILED', null, null, null)", [
+          orgA.id,
+          turnId,
+          attempt,
+        ]);
+        await c.query("commit");
+      } finally {
+        c.release();
+      }
+    }
+
+    it("RETRY 1: failed attempt N + an UNCOMMITTED retry N+1 → unresolved (never the stale failed row); rollback → fenced no-op", async () => {
+      const q = await smokeQuote(false);
+      const { session, key } = await failedAttempt();
+      const { cleanup } = smokeCleanup(q);
+      cleanup.beginRequest(key, session).failed(); // the smoke's delivery: outcome unknown
+      const b = await pool.connect();
+      try {
+        const retry = await beginRetry(b, session, key);
+        expect(retry).toMatchObject({ outcome: "started", attempt: 2 });
+        // What any other connection reads is still the OLD committed row: attempt 1, failed.
+        expect(await storedTurn(pool, orgA.id, session, key)).toMatchObject({
+          status: "failed",
+          attempt: 1,
+        });
+        const during = await cleanup.run();
+        expect(during.bookingOutcome).toBe("unresolved");
+        expect(during.bookingCleanup).not.toMatch(/succeeded/);
+        expect(during.unresolved.join(" ")).toMatch(/being claimed or written/);
+        // Nothing was fenced while the retry held the conversation.
+        expect(await storedTurn(pool, orgA.id, session, key)).toMatchObject({ status: "failed" });
+        await b.query("rollback");
+      } finally {
+        b.release();
+      }
+      // The retry never happened: attempt 1 (failed) is current → fenced → a terminal no-op.
+      const after = await cleanup.run();
+      expect(after.bookingOutcome).toBe("reconciled_no_booking_terminal");
+      expect(await storedTurn(pool, orgA.id, session, key)).toMatchObject({
+        status: "completed",
+        attempt: 1,
+      });
+      // The fence holds: a delivery arriving later replays and cannot start attempt 2.
+      const late = await pool.connect();
+      try {
+        expect((await beginRetry(late, session, key)).outcome).toBe("replay");
+        await late.query("rollback");
+      } finally {
+        late.release();
+      }
+    });
+
+    it("RETRY 2/3: retry N+1 committed and in progress → unresolved; N+1 fails without a mutation → fenced no-op success", async () => {
+      const q = await smokeQuote(false);
+      const { session, key } = await failedAttempt();
+      const { cleanup } = smokeCleanup(q);
+      cleanup.beginRequest(key, session).failed();
+      const b = await pool.connect();
+      let retry: { turn_id: string; attempt: number };
+      try {
+        retry = await beginRetry(b, session, key);
+        await b.query("commit");
+      } finally {
+        b.release();
+      }
+      const during = await cleanup.run();
+      expect(during.bookingOutcome).toBe("unresolved");
+      expect(during.unresolved.join(" ")).toMatch(/attempt 2 processing; it may still act/);
+      await failRetry(retry.turn_id, retry.attempt);
+      const after = await cleanup.run();
+      expect(after.bookingOutcome).toBe("reconciled_no_booking_terminal");
+      expect(exitCode(after, cleanup.recovery())).toBe(0);
+      expect(await storedTurn(pool, orgA.id, session, key)).toMatchObject({
+        status: "completed",
+        attempt: 2,
+      });
+    });
+
+    it("RETRY 4: retry N+1 commits a booking → unresolved while it runs; once terminal: cancelled + released", async () => {
+      const q = await smokeQuote(false);
+      const { session, key } = await failedAttempt();
+      const { cleanup } = smokeCleanup(q);
+      cleanup.beginRequest(key, session).failed();
+      const b = await pool.connect();
+      let retry: { turn_id: string; attempt: number };
+      try {
+        retry = await beginRetry(b, session, key);
+        await b.query("commit");
+      } finally {
+        b.release();
+      }
+      await q.commit(); // attempt 2's booking
+      const during = await cleanup.run();
+      // The booking that exists is cancelled at once (inventory released), but the request is
+      // still running — it could create another — so cleanup stays unresolved.
+      expect(during.bookingOutcome).toBe("unresolved");
+      expect(during.unresolved.join(" ")).toMatch(/attempt 2 processing/);
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+      await failRetry(retry.turn_id, retry.attempt);
+      const after = await cleanup.run();
+      expect(after.bookingOutcome).toBe("reconciled_booking_cancelled");
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+      expect((await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations).toBe(0);
+      expect(exitCode(after, cleanup.recovery())).toBe(0);
+    });
+
+    // ── no turn in the journal: only a recognized application refusal proves anything ──
+    const fakeResponse = (status: number, text: string) => () =>
+      Promise.resolve({ status, text: () => Promise.resolve(text) });
+    it.each([
+      ["gateway 502", fakeResponse(502, "<html>502 Bad Gateway</html>"), "unresolved"],
+      ["gateway 504", fakeResponse(504, "<html>504 Gateway Timeout</html>"), "unresolved"],
+      [
+        "503 AI_UNAVAILABLE (after runTurn)",
+        fakeResponse(503, '{"status":"error","errorCode":"AI_UNAVAILABLE","reply":"x"}'),
+        "unresolved",
+      ],
+      ["a 200 with no turn", fakeResponse(200, '{"status":"ok","reply":"Hi"}'), "unresolved"],
+      [
+        "recognized 429 RATE_LIMITED",
+        fakeResponse(429, '{"status":"error","errorCode":"RATE_LIMITED","reply":"x"}'),
+        "reconciled_no_booking_terminal",
+      ],
+      [
+        "recognized 409 SESSION_REQUIRED",
+        fakeResponse(409, '{"status":"error","errorCode":"SESSION_REQUIRED","reply":"x"}'),
+        "reconciled_no_booking_terminal",
+      ],
+    ])("no turn + %s → %s", async (_label, send, expected) => {
+      const q = await smokeQuote(false);
+      // A session whose conversation exists (an earlier request), but NOT for this request key.
+      const { session } = await failedAttempt();
+      const { cleanup } = smokeCleanup(q);
+      const key = `smoke-${randomUUID()}`;
+      await trackedExchange(cleanup, key, session, send);
+      expect(cleanup.state.requests.get(key)!.state).toBe("response_completed");
+      const state = await cleanup.run();
+      // (the earlier, failed request of this session is not one of the smoke's intents here)
+      expect(state.bookingOutcome).toBe(expected);
+      if (expected === "unresolved") {
+        expect(state.unresolved.join(" ")).toMatch(/no turn recorded/);
+        expect(cleanup.recovery().join("\n")).toContain(key);
+      }
     });
 
     it("recovery after a database failure still names the exact known identifiers, and no secret", async () => {
