@@ -334,7 +334,10 @@ const STRONG_MARKER =
   /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:if|unless|whether|once(?!\s+(?:again|more)\b)|when|whenever|provided(?:\s+that)?|assuming(?:\s+that)?|as\s+soon\s+as|in\s+case)\b/i;
 const WEAK_MARKER = /^\s*(?:(?:and|but|so|or|then|only)\s+)?(?:pending|before|after|until|upon)\b/i;
 const AUX_WORDS = new Set(
-  "am is are was were be been being have has had do does did get gets got getting".split(" "),
+  // Copular verbs link a subject to its state like "be" ("if inventory REMAINS available").
+  "am is are was were be been being have has had do does did get gets got getting remain remains remained stay stays stayed become becomes became seem seems look looks".split(
+    " ",
+  ),
 );
 const MODAL_WORDS = new Set("will would can could may might shall should must".split(" "));
 /** Words that may sit inside an auxiliary chain without ending it. */
@@ -487,16 +490,32 @@ export function hypothetical(sentence: string, index: number): boolean {
     }
   }
   // Otherwise only a CONSEQUENCE can be hypothetical: its modal must belong to this claim, and a
-  // condition must exist — earlier in its clause, fronted in an earlier clause, or after it
-  // ("The quote could be booked if availability is confirmed").
+  // condition must govern THIS proposition — earlier in its clause, fronted in an earlier clause,
+  // or trailing it in the positive shape below.
   if (!modalBindsClaim(tokens, chain)) return false;
   const fronted = sentence.slice(0, clauseStart);
   return (
     markers.length > 0 ||
     STRONG_MARKER.test(fronted) ||
     WEAK_MARKER.test(fronted) ||
-    new RegExp(MARKER_ANYWHERE.source, "i").test(sentence.slice(index))
+    trailingConditionOwns(sentence, index)
   );
+}
+
+/**
+ * A trailing condition governs the claim only when it is attached DIRECTLY to the claim's state
+ * word: state word, then optionally a comma and/or "only", then the condition opener ("could be
+ * booked IF availability is confirmed", "will be confirmed ONCE the team reviews it"). Anything
+ * else between them — a semicolon, a dash, "and let us know", ", and call us", "but contact us",
+ * "and I can explain more" — starts another proposition, and a condition there belongs to that
+ * proposition, not to the claim. Ownership is proven by this shape; it is never inferred from an
+ * "if" somewhere later in the sentence.
+ */
+const TRAILING_CONDITION =
+  /^\s*(?:,\s*)?(?:(?:but\s+)?only\s+)?(?:if|unless|once(?!\s+(?:again|more)\b)|when|whenever|provided(?:\s+that)?|assuming(?:\s+that)?|as\s+soon\s+as|in\s+case)\b/i;
+function trailingConditionOwns(sentence: string, index: number): boolean {
+  const afterState = sentence.slice(index).replace(/^(?:on\s+hold|locked\s+in|[A-Za-z'-]+)/i, "");
+  return TRAILING_CONDITION.test(afterState);
 }
 
 /**
@@ -896,7 +915,9 @@ const wordsRegex = (list: readonly string[], flags: string) =>
   new RegExp(`\\b(?:${list.map((w) => w.replace(/ /g, "\\s+")).join("|")})\\b`, flags);
 const BOOKED_STATE = wordsRegex(BOOKING_STATE_WORDS.booked, "gi");
 const HELD_STATE = wordsRegex(BOOKING_STATE_WORDS.held, "gi");
-const BE_VERB = /\b(?:is|are|was|were|be|been|being)\b|'s\b|'re\b/i;
+/** "be" — and the copular verbs that link a subject to its state the same way ("remain held"). */
+const BE_VERB =
+  /\b(?:is|are|was|were|be|been|being|remains?|remained|stays?|stayed|becomes?|became)\b|'s\b|'re\b/i;
 
 /**
  * Booking/hold STATE predicates, found without any word window: every phrase-pattern match, and

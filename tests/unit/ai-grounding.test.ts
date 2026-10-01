@@ -1490,3 +1490,73 @@ describe("Codex round-11", () => {
     });
   });
 });
+
+describe("Codex round-12: a trailing condition must belong to the claim's own proposition", () => {
+  const refusedQ = (n: string): Evidence => ({
+    ...booking("refused", null, "The team declined this booking request."),
+    quoteNumber: n,
+  });
+  const run = (reply: string, evidence: Evidence[]) =>
+    checkGrounding({
+      reply,
+      evidence,
+      now: NOW,
+      knownProducts: [],
+      businessName: "Acme Party Rentals",
+      currency: "USD",
+    }).ok;
+  const refused = [refusedQ("Q-1"), refusedQ("Q-2")];
+
+  describe.each([
+    ["no evidence", [] as Evidence[]],
+    ["refused", refused],
+    ["refused, reversed", [...refused].reverse()],
+  ] as const)("another proposition's condition never exempts the claim (%s)", (_l, ev) => {
+    it.each([
+      // semicolon
+      "Your booking will be confirmed; contact us if you have questions.",
+      "Your items will be held; contact us if you have questions.",
+      "Your booking will be confirmed; we can help if you need anything.",
+      // coordinating conjunction
+      "Your booking will be confirmed and let us know if you need help.",
+      "Your booking will be confirmed and call us if anything changes.",
+      "Your items will be held but contact us if you have questions.",
+      // comma + new proposition
+      "Your booking will be confirmed, and call us if anything changes.",
+      "Your booking will be confirmed, and we can help if you need anything.",
+      "Your items will be held, but contact us if you have questions.",
+      // reporting/help proposition
+      "Your booking will be confirmed and I can explain more if you want.",
+      "Your booking will be confirmed and we can talk if you have questions.",
+      // dash, and no condition at all
+      "Your booking will be confirmed - contact us if you have questions.",
+      "Your booking will be confirmed.",
+      "Your items remain held.",
+      // earlier rounds, kept
+      "I can confirm your booking is confirmed.",
+      "If you're wondering, I can tell you your items are held.",
+      "If you need reassurance your booking is confirmed.",
+      "Once again your booking is confirmed.",
+      "Pending bookings are confirmed.",
+    ])("“%s” → grounded and rejected", (reply) => {
+      expect(run(reply, [...ev])).toBe(false);
+    });
+  });
+
+  it.each([
+    "The quote could be booked if availability is confirmed.",
+    "The booking may be held if the date is available.",
+    "It can be reserved if the customer accepts the quote.",
+    "The items could be held if inventory remains available.",
+    "The quote might be booked once availability is confirmed.",
+    "The booking can be held when inventory is available.",
+    "Your booking will be confirmed once the team reviews it.",
+    "Your booking will be confirmed, but only if the team approves it.",
+    // fronted/earlier conditions, kept
+    "If the quote is confirmed, it will be booked.",
+    "Once approved, it will be held.",
+    "When the booking is approved, it can be reserved.",
+  ])("hypothetical (the condition governs the claim): “%s”", (reply) => {
+    expect(run(reply, [])).toBe(true);
+  });
+});

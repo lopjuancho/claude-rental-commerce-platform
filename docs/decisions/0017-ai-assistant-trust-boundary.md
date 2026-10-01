@@ -342,6 +342,17 @@ deterministically and safely for anonymous visitors (ADR 0001, 0014, 0015).
       back to the last hard boundary, so the outer count always meets the relative marker and the
       claim is unresolved.
 
+23. **Round 12 of the review (Codex, 31b3f7d).** A trailing condition makes a claim hypothetical
+    only when it is attached DIRECTLY to the claim's state word: the state word, then optionally a
+    comma and/or "only", then the condition opener ("could be booked IF availability is
+    confirmed", "will be confirmed ONCE the team reviews it", "…, but only if the team approves").
+    Anything else in between — a semicolon, a dash, a coordinator starting another action ("and
+    let us know", ", and call us", "but contact us"), another subject and predicate ("and I can
+    explain more") — is another proposition, and its condition is not the claim's. Ownership is
+    proven by this shape, never inferred from an "if" later in the sentence. Copular verbs
+    ("remains", "stays") count as auxiliaries, so "if inventory remains available" is a proper
+    antecedent; "Your items remain held." is still a grounded assertion.
+
 ## Not in M7
 
 Payments, SMS/email, autonomous cancellation/refund/confirmation, staff copilots, voice,
