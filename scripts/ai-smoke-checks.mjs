@@ -31,12 +31,11 @@ const AUX = new Set(
 );
 const MODALS = new Set("will would can could may might shall should must".split(" "));
 const CHAIN_ADVERBS = new Set(
-  "now already also still just officially fully definitely currently temporarily all both each".split(
+  "now already also still just officially fully definitely currently temporarily all both each yet actually really ever even quite entirely completely necessarily".split(
     " ",
   ),
 );
 const NEGATORS = new Set(["not", "never", "no", "cannot"]);
-const NEGATIVE_SUBJECTS = new Set(["nothing", "none", "no", "neither", "nobody", "noone"]);
 const isNegator = (t) => NEGATORS.has(t) || /n't$/.test(t);
 const isContractedAux = (t) => /'(?:re|s|ve|ll|d|m)$/.test(t);
 /** Words a subordinate clause's subject may consist of ("before [the booking] is…"). */
@@ -62,8 +61,13 @@ const SUBORDINATORS = new Set([
   "whether",
   "that",
 ]);
+/**
+ * Real epistemic uncertainty before a "that" clause: an intention to still check something, or
+ * an explicit not-knowing. Affirmative knowledge ("I know that", "I am sure that", "I can verify
+ * that", "I can confirm that") is an ASSERTION, not uncertainty.
+ */
 const UNCERTAIN_MATRIX =
-  /\b(?:check|checking|verify|verifying|confirm whether|find out|see|ask|asking|know|sure|unsure|wonder|wondering|determine|unclear)\b/;
+  /\b(?:need|needs|needed|have to|has to|got to|going to|let me|want to|try to|trying to|will|'ll)\b.*\b(?:check|verify|confirm|find out|see|ask|look)\b|\b(?:unsure|unclear|uncertain|wonder|wondering)\b/;
 const QUESTION_OPENER =
   /^(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|may|might|what|which|when|where|who|how|why|whether)\b/;
 const TRAILING_CONDITION =
@@ -122,7 +126,17 @@ export function classifyState(sentence, at, stateLength) {
   );
   const subject = tokens.slice(subjectStart, chainStart);
   // B — a negative subject ("Nothing has been booked", "and nothing is paid").
-  if (subject.some((t) => NEGATIVE_SUBJECTS.has(t))) return "B";
+  // (A negative subject OF THIS proposition: the negative word heads the subject itself —
+  //  "Nothing has been booked", "No booking is confirmed", "None of the quotes are…".
+  //  "No matter what happens your booking is confirmed" is not one.)
+  const head = subject[0];
+  if (
+    head !== undefined &&
+    (["nothing", "none", "nobody", "neither", "noone"].includes(head) ||
+      (head === "no" && subject.length > 1 && subject.slice(1).every((t) => SUBJECT_WORDS.has(t))))
+  ) {
+    return "B";
+  }
 
   if (sub >= 0) {
     const word = tokens[sub];
@@ -265,4 +279,38 @@ export function bookingReplayVerdict(reply, blocks, expected) {
   const claims = unsupportedStateClaims(reply ?? "");
   if (claims.length) reasons.push(`asserts state (${claims.join(", ")})`);
   return { ok: reasons.length === 0, reasons };
+}
+
+/**
+ * Whether a replay is PROVEN to have called no model. Both requests report, in-process, how many
+ * provider calls they made and whether every `model_call` row was durably written; the durable
+ * count must also be unchanged. Missing or incomplete observation is INCONCLUSIVE — a failure,
+ * never a pass.
+ */
+export function providerObservationVerdict({ first, replay, dbBefore, dbAfter }) {
+  const reasons = [];
+  if (first?.telemetry !== "complete" || replay?.telemetry !== "complete") {
+    reasons.push("inconclusive: provider telemetry incomplete or missing");
+  }
+  if (!(Number(first?.modelCalls) >= 1))
+    reasons.push("inconclusive: the original turn reported no model call");
+  if (replay?.modelCalls === undefined || replay.modelCalls === null) {
+    reasons.push("inconclusive: the replay reported no observation");
+  } else if (Number(replay.modelCalls) !== 0)
+    reasons.push(`replay made ${String(replay.modelCalls)} model call(s)`);
+  if (!(Number(dbBefore) >= 1) || dbAfter !== dbBefore) {
+    reasons.push(`durable model_call count ${String(dbBefore)} → ${String(dbAfter)}`);
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+/**
+ * The process exit code: non-zero whenever ANY check failed, or cleanup is not proven (booking or
+ * maintenance cleanup failed/unresolved), or manual cleanup is needed.
+ */
+export function smokeExitCode({ failedChecks, bookingCleanup, blockCleanup, recovery }) {
+  const bookingOk =
+    bookingCleanup === "not attempted" || String(bookingCleanup).startsWith("succeeded");
+  const blockOk = blockCleanup === "not created" || blockCleanup === "succeeded";
+  return failedChecks > 0 || !bookingOk || !blockOk || (recovery ?? []).length > 0 ? 1 : 0;
 }

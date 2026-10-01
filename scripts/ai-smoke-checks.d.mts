@@ -25,3 +25,19 @@ export function bookingReplayVerdict(
   blocks: { type: string; quoteNumber?: string; status?: string }[] | undefined,
   expected: { quoteNumber: string; status: string },
 ): Verdict;
+export interface Observed {
+  modelCalls?: number | string | null;
+  telemetry?: string | null;
+}
+export function providerObservationVerdict(input: {
+  first: Observed | null | undefined;
+  replay: Observed | null | undefined;
+  dbBefore: number;
+  dbAfter: number;
+}): Verdict;
+export function smokeExitCode(input: {
+  failedChecks: number;
+  bookingCleanup: string;
+  blockCleanup: string;
+  recovery: string[];
+}): 0 | 1;

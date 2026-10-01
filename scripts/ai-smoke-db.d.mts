@@ -82,7 +82,17 @@ export function bookingHoldReleased(
   db: Queryable,
   organizationId: string,
   quoteId: string,
-): Promise<{ requestStatus: string; blockingAllocations: number } | null>;
+): Promise<{
+  requestStatus: string;
+  blockingAllocations: number;
+  residualAllocations: number;
+} | null>;
+export function reconcileSmokeBookings(
+  db: Queryable,
+  organizationId: string,
+  quoteIds: Iterable<string>,
+  emails: Iterable<string>,
+): Promise<{ quotes: number; requests: number; cancelled: number; unresolved: string[] }>;
 export function modelCalls(
   db: Queryable,
   organizationId: string,
@@ -91,13 +101,20 @@ export function modelCalls(
 export interface SmokeCleanupState {
   tag: string;
   organizationId: string | null;
-  booking: { quoteId: string; quoteNumber: string } | null;
+  quoteIds: Set<string>;
+  customerEmails: Set<string>;
   block: SmokeBlock | null;
   bookingCleanup: string;
   blockCleanup: string;
+  unresolved: string[];
   stopping: boolean;
+  inFlight: Promise<unknown> | null;
 }
 export function createSmokeCleanup(
   db: Queryable,
   tag: string,
-): { state: SmokeCleanupState; run(): Promise<SmokeCleanupState>; recovery(): string[] };
+): {
+  state: SmokeCleanupState;
+  run(options?: { waitForInFlightMs?: number }): Promise<SmokeCleanupState>;
+  recovery(): string[];
+};

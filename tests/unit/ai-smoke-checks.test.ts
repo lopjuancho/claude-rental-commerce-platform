@@ -5,7 +5,9 @@ import {
   expectedWhen,
   freshAvailabilityVerdict,
   leaksServerRefs,
+  providerObservationVerdict,
   safeExcerpt,
+  smokeExitCode,
   unsupportedStateClaims,
 } from "../../scripts/ai-smoke-checks.mjs";
 
@@ -145,5 +147,111 @@ describe("leaksServerRefs / safeExcerpt", () => {
     const e = safeExcerpt(`see /q/${"A".repeat(43)} and ${"b".repeat(64)}`);
     expect(e).not.toContain("A".repeat(43));
     expect(e).not.toContain("b".repeat(64));
+  });
+});
+
+describe("Codex smoke round 3: affirmative knowledge is an assertion; adverbs keep negation", () => {
+  it.each([
+    "I know that your booking is confirmed.",
+    "I am sure that your booking is confirmed.",
+    "I can verify that your items are held.",
+    "No matter what happens your booking is confirmed.",
+    "I know your items are reserved for you.",
+    "I am certain your booking is booked.",
+    "I can confirm that your booking is booked.",
+  ])("flags “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply).length).toBeGreaterThan(0);
+  });
+  it.each([
+    "Your booking is not yet confirmed.",
+    "Your booking cannot yet be confirmed.",
+    "Your booking is not actually confirmed.",
+    "Your booking has not yet been booked.",
+    "I do not know whether your booking is confirmed.",
+    "I am not sure whether your booking is confirmed.",
+    "I need to check whether your booking is confirmed.",
+    "I need to check that your booking is confirmed.",
+    "No booking is confirmed.",
+    "None of the quotes are confirmed.",
+  ])("does not flag “%s”", (reply) => {
+    expect(unsupportedStateClaims(reply)).toEqual([]);
+  });
+  it("the replay verdicts inherit it", () => {
+    const neutral = "Here is where your request stands now. This booking request was cancelled.";
+    const cancelled = [{ type: "booking", quoteNumber: "Q-7", status: "cancelled" }];
+    const expected = { quoteNumber: "Q-7", status: "cancelled" };
+    expect(
+      bookingReplayVerdict(`${neutral} I know that your booking is confirmed.`, cancelled, expected)
+        .ok,
+    ).toBe(false);
+    expect(
+      bookingReplayVerdict(
+        `${neutral} No matter what happens your booking is confirmed.`,
+        cancelled,
+        expected,
+      ).ok,
+    ).toBe(false);
+    const RECHECK =
+      "Availability needs to be checked again: it can change at any time. Ask me and I'll check it now.";
+    expect(availabilityReplayVerdict(`${RECHECK} I am sure that it is available.`, []).ok).toBe(
+      false,
+    );
+    expect(availabilityReplayVerdict(`${RECHECK} I know the slide is available.`, []).ok).toBe(
+      false,
+    );
+  });
+});
+
+describe("providerObservationVerdict", () => {
+  const ok = { modelCalls: 2, telemetry: "complete" };
+  const replay0 = { modelCalls: 0, telemetry: "complete" };
+  it("passes only with complete observation, zero replay calls and an unchanged durable count", () => {
+    expect(
+      providerObservationVerdict({ first: ok, replay: replay0, dbBefore: 5, dbAfter: 5 }).ok,
+    ).toBe(true);
+  });
+  it.each([
+    [
+      "original telemetry incomplete",
+      { first: { ...ok, telemetry: "incomplete" }, replay: replay0, dbBefore: 5, dbAfter: 5 },
+    ],
+    [
+      "replay telemetry incomplete",
+      { first: ok, replay: { ...replay0, telemetry: "incomplete" }, dbBefore: 5, dbAfter: 5 },
+    ],
+    ["headers missing", { first: {}, replay: {}, dbBefore: 5, dbAfter: 5 }],
+    [
+      "replay called the model",
+      { first: ok, replay: { ...replay0, modelCalls: 1 }, dbBefore: 5, dbAfter: 6 },
+    ],
+    ["durable count changed", { first: ok, replay: replay0, dbBefore: 5, dbAfter: 6 }],
+    ["no durable rows at all", { first: ok, replay: replay0, dbBefore: 0, dbAfter: 0 }],
+  ])("fails (or is inconclusive) when %s", (_l, input) => {
+    expect(providerObservationVerdict(input).ok).toBe(false);
+  });
+});
+
+describe("smokeExitCode", () => {
+  const clean = {
+    failedChecks: 0,
+    bookingCleanup: "succeeded (released)",
+    blockCleanup: "succeeded",
+    recovery: [] as string[],
+  };
+  it("0 only when every check passed and cleanup is proven", () => {
+    expect(smokeExitCode(clean)).toBe(0);
+    expect(
+      smokeExitCode({ ...clean, bookingCleanup: "not attempted", blockCleanup: "not created" }),
+    ).toBe(0);
+  });
+  it.each([
+    ["a failed check", { failedChecks: 1 }],
+    ["booking cleanup failed", { bookingCleanup: "failed (database error)" }],
+    ["booking cleanup unresolved", { bookingCleanup: "unresolved (confirmed booking request)" }],
+    ["block cleanup failed", { blockCleanup: "failed (not found)" }],
+    ["block cleanup pending", { blockCleanup: "pending" }],
+    ["manual cleanup needed", { recovery: ["availability block id x"] }],
+  ])("non-zero when %s", (_l, over) => {
+    expect(smokeExitCode({ ...clean, ...over })).toBe(1);
   });
 });

@@ -855,6 +855,7 @@ test("HTTP responses never carry a quote token hash or session hash, live or rep
   const headers = { host: `acme.localhost:${port}`, "cf-connecting-ip": testIp() };
   await request.get(`http://localhost:${port}/`, { headers });
   const bodies: string[] = [];
+  const observed: { calls: string | undefined; telemetry: string | undefined }[] = [];
   const say = async (message: string, requestId = randomUUID().replace(/-/g, "")) => {
     const res = await request.post(`http://localhost:${port}/api/assistant`, {
       headers: { ...headers, "content-type": "application/json" },
@@ -862,6 +863,10 @@ test("HTTP responses never carry a quote token hash or session hash, live or rep
     });
     const text = await res.text();
     bodies.push(text);
+    observed.push({
+      calls: res.headers()["x-assistant-model-calls"],
+      telemetry: res.headers()["x-assistant-telemetry"],
+    });
     return JSON.parse(text) as {
       status: string;
       reply: string;
@@ -880,6 +885,11 @@ test("HTTP responses never carry a quote token hash or session hash, live or rep
   expect(booked.blocks.find((b) => b.type === "booking")).toBeTruthy();
   const replay = await say("Please request the booking", bookingKey); // lost response → replay
   expect(replay.replayed).toBe(true);
+  // Provider observation (headers only): the live turn made model calls with complete
+  // telemetry; its replay made none.
+  expect(Number(observed.at(-2)?.calls)).toBeGreaterThanOrEqual(1);
+  expect(observed.at(-2)?.telemetry).toBe("complete");
+  expect(observed.at(-1)).toEqual({ calls: "0", telemetry: "complete" });
   expect(replay.reply).toMatch(/^Here is where your request stands now\./);
   const db = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();

@@ -18,6 +18,8 @@ export const AI_LIMITS = {
   maxModelSteps: 5,
   /** Whole-turn wall clock. */
   turnTimeoutMs: 60_000,
+  /** A `model_call` telemetry write slower than this makes the request's observation incomplete. */
+  telemetryTimeoutMs: 2_000,
   /** Lifetime messages of one conversation before the customer is asked to start over. */
   maxConversationMessages: 400,
 } as const;

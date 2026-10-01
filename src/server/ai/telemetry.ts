@@ -35,6 +35,47 @@ export async function recordToolAction(
 }
 
 /**
+ * The same telemetry row, but reporting whether it was durably written within `timeoutMs` (it never
+ * throws and never retries). Used for `model_call` rows, whose completeness the live smoke relies
+ * on: a failed or late write must be distinguishable from "no provider call happened".
+ */
+export async function recordToolActionChecked(
+  store: AiConversationStore,
+  organizationId: string,
+  entry: Parameters<typeof recordToolAction>[2],
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(false);
+    }, timeoutMs);
+  });
+  const write = store
+    .recordAction(organizationId, {
+      conversationId: entry.conversationId,
+      toolName: /^[a-z_]{1,40}$/.test(entry.toolName) ? entry.toolName : "unknown_tool",
+      status: entry.status,
+      errorCode: entry.errorCode?.slice(0, 60) ?? null,
+      durationMs: Math.max(0, Math.round(entry.durationMs)),
+      correlationId: entry.correlationId,
+      model: entry.model.slice(0, 80),
+    })
+    .then(
+      () => true as const,
+      (e: unknown) => {
+        logAssistantError(entry.correlationId, "telemetry", e);
+        return false as const;
+      },
+    );
+  try {
+    return await Promise.race([write, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Server log for failures: correlation id, where, and the error's name/code only — no message
  * bodies (they may contain customer text), no stack in the response, never secrets.
  */

@@ -44,7 +44,7 @@ import {
 import type { LlmMessage, LlmProvider, LlmToolSpec } from "./provider";
 import { strictToolJsonSchema, TOOL_DESCRIPTIONS, TOOL_NAMES } from "./schemas";
 import { hashSessionToken } from "./session";
-import { logAssistantError, recordToolAction } from "./telemetry";
+import { logAssistantError, recordToolAction, recordToolActionChecked } from "./telemetry";
 import { adoptPageQuote, currentBooking, executeTool } from "./tools";
 
 /**
@@ -95,6 +95,17 @@ export interface TurnResult {
   errorCode?: string;
   /** The stored reply of an already-completed request (duplicate or retried POST). */
   replayed?: boolean;
+  /**
+   * What THIS request did with the model, counted in-process (not read back from storage): how
+   * many provider calls it made, and whether every one of their `model_call` telemetry rows was
+   * durably written in time. A replay makes none. Reported in response headers, not the body.
+   */
+  observation?: TurnObservation;
+}
+
+export interface TurnObservation {
+  modelCalls: number;
+  telemetryComplete: boolean;
 }
 
 export const TOOL_SPECS: LlmToolSpec[] = TOOL_NAMES.map((name) => ({
@@ -319,8 +330,10 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
   const limits = { ...AI_LIMITS, ...deps.limits };
   const now = deps.now ?? (() => new Date());
   const deadline = new Deadline((input.startedAt ?? Date.now()) + limits.turnTimeoutMs);
+  const observation: TurnObservation = { modelCalls: 0, telemetryComplete: true };
   try {
-    return await turn(input, deps, limits, now, deadline);
+    const result = await turn(input, deps, limits, now, deadline, observation);
+    return { ...result, observation: { ...observation } };
   } finally {
     deadline.dispose();
   }
@@ -332,6 +345,7 @@ async function turn(
   limits: Record<keyof typeof AI_LIMITS, number>,
   now: () => Date,
   deadline: Deadline,
+  observation: TurnObservation,
 ): Promise<TurnResult> {
   const execute = deps.execute ?? executeTool;
   const org = input.tenant.organizationId;
@@ -521,8 +535,27 @@ async function turn(
     for (let step = 0; step < limits.maxModelSteps; step++) {
       deadline.assertOpen("model");
       // Every provider call leaves a telemetry row (`model_call`: status, latency, model,
-      // correlation id — never content), so it is observable that a replay calls no model.
+      // correlation id — never content) and is counted in-process; a row that is not durably
+      // written in time marks this request's observation incomplete (never silently).
       const modelStarted = Date.now();
+      const observeModelCall = async (status: ToolStatus, errorCode: string | undefined) => {
+        observation.modelCalls++;
+        const written = await recordToolActionChecked(
+          deps.store,
+          org,
+          {
+            conversationId,
+            toolName: "model_call",
+            status,
+            errorCode,
+            durationMs: Date.now() - modelStarted,
+            correlationId: input.correlationId,
+            model: deps.provider.model,
+          },
+          limits.telemetryTimeoutMs,
+        );
+        if (!written) observation.telemetryComplete = false;
+      };
       let res: Awaited<ReturnType<typeof deps.provider.complete>>;
       try {
         res = await deadline.race(
@@ -535,15 +568,10 @@ async function turn(
           "model",
         );
       } catch (e) {
-        await record(
-          "model_call",
-          "error",
-          (e as { code?: string }).code ?? "MODEL_ERROR",
-          Date.now() - modelStarted,
-        );
+        await observeModelCall("error", (e as { code?: string }).code ?? "MODEL_ERROR");
         throw e;
       }
-      await record("model_call", "ok", undefined, Date.now() - modelStarted);
+      await observeModelCall("ok", undefined);
       tokens += res.usage.inputTokens + res.usage.outputTokens;
       if (res.toolCalls.length === 0) {
         reply = res.text ?? "";

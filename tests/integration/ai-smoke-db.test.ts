@@ -14,6 +14,7 @@ import {
   cancelSmokeBooking,
   conversationCounters,
   createSmokeCleanup,
+  reconcileSmokeBookings,
   modelCalls,
   removeSmokeAvailabilityBlock,
   storedTurn,
@@ -25,7 +26,7 @@ import {
   resolveOrganization,
 } from "../../scripts/ai-smoke-db.mjs";
 import { pgAiStore } from "./support/ai";
-import { makeProduct } from "./support/availability";
+import { makeProduct, rpc } from "./support/availability";
 import { admin, createOrg, pool, type TestOrg } from "./support/db";
 import { fakeProvider, pgGateway } from "./support/pricing";
 import { describeRest } from "./support/rest";
@@ -236,7 +237,7 @@ describeRest(
       expect(await bookingStatus(pool, orgA.id, qa!.id)).toBe("cancelled");
       // The inventory is released by the availability engine's own rule (no held/confirmed
       // allocation remains), not inferred from the request status.
-      expect(await bookingHoldReleased(pool, orgA.id, qa!.id)).toEqual({
+      expect(await bookingHoldReleased(pool, orgA.id, qa!.id)).toMatchObject({
         requestStatus: "cancelled",
         blockingAllocations: 0,
       });
@@ -295,60 +296,181 @@ describeRest(
       await admin("delete from public.availability_blocks where product_id = $1", [p.productId]);
     });
 
-    it("cleanup: cancels a still-pending smoke booking, removes the exact block, reports safely", async () => {
-      const email = `gate-${randomUUID().slice(0, 8)}@example.test`;
+    /** A smoke-like customer with a quote, and (optionally) its booking request committed. */
+    async function smokeQuote(book: boolean) {
+      const email = `ai-smoke-${randomUUID().slice(0, 8)}@example.test`;
       const a = await quote(orgA, email);
-      await requestPublicBooking(
-        tenantOf(orgA),
-        { tokenHash: a.tokenHash },
-        {},
-        { ip: "198.51.100.65", visitorToken: generateVisitorToken() },
-        deps(),
+      const qa = (await quoteByLink(pool, orgA.id, a.url))!;
+      const commit = () =>
+        requestPublicBooking(
+          tenantOf(orgA),
+          { tokenHash: a.tokenHash },
+          {},
+          { ip: "198.51.100.66", visitorToken: generateVisitorToken() },
+          deps(),
+        );
+      if (book) await commit();
+      return { email, quoteId: qa.id, quoteNumber: a.quoteNumber, commit };
+    }
+    const newTag = () => `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+
+    it("release follows the engine's own predicate (allocation_is_active)", async () => {
+      const q = await smokeQuote(true);
+      const reservation = (
+        await admin<{ reservation_id: string }>(
+          "select reservation_id from public.booking_requests where quote_id = $1",
+          [q.quoteId],
+        )
+      ).rows[0]!.reservation_id;
+      const setAllocations = (status: string, expires: string) =>
+        admin(
+          `begin; set local session_replication_role = replica;
+           update public.reservation_allocations set status = '${status}', hold_expires_at = ${expires} where reservation_id = '${reservation}';
+           commit;`,
+        );
+      // An unexpired held allocation blocks.
+      expect(
+        (await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations,
+      ).toBeGreaterThan(0);
+      // An EXPIRED held allocation row remains, but no longer blocks: released.
+      await setAllocations("held", "now() - interval '1 minute'");
+      const expired = await bookingHoldReleased(pool, orgA.id, q.quoteId);
+      expect(expired?.blockingAllocations).toBe(0);
+      expect(expired?.residualAllocations).toBeGreaterThan(0);
+      // A confirmed allocation blocks.
+      await setAllocations("confirmed", "null");
+      expect(
+        (await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations,
+      ).toBeGreaterThan(0);
+      await setAllocations("released", "null");
+    });
+
+    it("a booking committed while its response is still in flight is found and released on SIGTERM", async () => {
+      const q = await smokeQuote(false);
+      const client = await pool.connect();
+      try {
+        const cleanup = createSmokeCleanup(client, newTag());
+        cleanup.state.organizationId = orgA.id;
+        // Intent registered BEFORE the mutation is sent (the response will never be read).
+        cleanup.state.quoteIds.add(q.quoteId);
+        cleanup.state.customerEmails.add(q.email);
+        let committed = false;
+        cleanup.state.inFlight = q.commit().then(async () => {
+          committed = true;
+          await new Promise((r) => setTimeout(r, 300)); // the response is delayed
+        });
+        // SIGTERM: stop, let the in-flight request settle (bounded), reconcile by exact quote.
+        cleanup.state.stopping = true;
+        const state = await cleanup.run({ waitForInFlightMs: 10_000 });
+        expect(committed).toBe(true);
+        expect(state.bookingCleanup).toBe("succeeded (released; 1 cancelled now)");
+        expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+        expect((await bookingHoldReleased(pool, orgA.id, q.quoteId))?.blockingAllocations).toBe(0);
+        expect(cleanup.recovery()).toEqual([]); // recovery output only when not proven
+      } finally {
+        client.release();
+      }
+    });
+
+    it("found through the smoke customer even when the quote id was never registered", async () => {
+      const q = await smokeQuote(true);
+      const client = await pool.connect();
+      try {
+        const r = await reconcileSmokeBookings(client, orgA.id, [], [q.email]);
+        expect(r).toMatchObject({ quotes: 1, requests: 1, cancelled: 1, unresolved: [] });
+        expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("cancelled");
+        // Another tenant's scope finds nothing of it.
+        expect(await reconcileSmokeBookings(client, orgB.id, [q.quoteId], [q.email])).toMatchObject(
+          {
+            quotes: 0,
+            requests: 0,
+          },
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    it("no booking committed: cleanup is a safe success", async () => {
+      const q = await smokeQuote(false);
+      const cleanup = createSmokeCleanup(pool, newTag());
+      cleanup.state.organizationId = orgA.id;
+      cleanup.state.quoteIds.add(q.quoteId);
+      const state = await cleanup.run();
+      expect(state.bookingCleanup).toBe("succeeded (no booking request was committed)");
+      expect(cleanup.recovery()).toEqual([]);
+    });
+
+    it("a CONFIRMED booking is never reported as cleaned up; recovery names it; nothing cancelled", async () => {
+      const q = await smokeQuote(true);
+      const id = (
+        await admin<{ id: string }>("select id from public.booking_requests where quote_id = $1", [
+          q.quoteId,
+        ])
+      ).rows[0]!.id;
+      // (The fixture's delivery quote needs review approval before the team can confirm it.)
+      await admin(
+        `begin; set local session_replication_role = replica;
+         update public.quotes set review_approved_at = now() where id = '${q.quoteId}';
+         commit;`,
       );
-      const qa = await quoteByLink(pool, orgA.id, a.url);
+      await rpc(orgA.users.office, "select public.confirm_booking_request($1, true)", [id]);
+      const cleanup = createSmokeCleanup(pool, newTag());
+      cleanup.state.organizationId = orgA.id;
+      cleanup.state.quoteIds.add(q.quoteId);
+      const state = await cleanup.run();
+      expect(state.bookingCleanup).toMatch(/^unresolved/);
+      expect(state.bookingCleanup).not.toMatch(/succeeded/);
+      expect(cleanup.recovery().join("\n")).toContain(q.quoteNumber);
+      expect(cleanup.recovery().join("\n")).not.toMatch(/[0-9a-f]{64}/);
+      expect(await bookingStatus(pool, orgA.id, q.quoteId)).toBe("confirmed");
+    });
+
+    it("AMBIGUOUS (two live requests on one quote): fail closed, nothing cancelled", async () => {
+      const issued: string[] = [];
+      // The schema allows one pending request per quote; the ambiguity is simulated at the query
+      // level to prove the reconciler refuses rather than picks one.
+      const fake = {
+        query(sql: string) {
+          issued.push(sql);
+          if (/from public\.quotes q/.test(sql)) {
+            return Promise.resolve({ rows: [{ id: "q-1", quote_number: "Q-77" }], rowCount: 1 });
+          }
+          if (/select b\.status::text as status/.test(sql)) {
+            return Promise.resolve({
+              rows: [{ status: "pending" }, { status: "pending" }],
+              rowCount: 2,
+            });
+          }
+          return Promise.resolve({ rows: [], rowCount: 0 });
+        },
+      };
+      const r = await reconcileSmokeBookings(fake, "org", ["q-1"], []);
+      expect(r.unresolved.join(" ")).toMatch(/Q-77: 2 live booking requests \(ambiguous\)/);
+      expect(issued.some((q) => /cancel_booking_by_token/.test(q))).toBe(false);
+    });
+
+    it("cleanup removes the exact block and reports unresolved block failures", async () => {
       const p = await makeProduct(orgA, { units: 1 });
       const slug = (
         await admin<{ slug: string }>("select slug from public.products where id = $1", [
           p.productId,
         ])
       ).rows[0]!.slug;
-      const tag = `ai-smoke-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      const tag = newTag();
       expect(() => createSmokeCleanup(pool, "bad")).toThrow();
-      const client = await pool.connect();
-      try {
-        const cleanup = createSmokeCleanup(client, tag);
-        // Nothing registered yet: nothing attempted.
-        expect(await cleanup.run()).toMatchObject({
-          bookingCleanup: "not attempted",
-          blockCleanup: "not created",
-        });
-        cleanup.state.organizationId = orgA.id;
-        cleanup.state.booking = { quoteId: qa!.id, quoteNumber: a.quoteNumber };
-        cleanup.state.block = await addSmokeAvailabilityBlock(
-          client,
-          orgA.id,
-          slug,
-          "2030-07-06",
-          tag,
-        );
-        // A crash now would leave these: the recovery lines name them without any secret.
-        const recovery = cleanup.recovery().join("\n");
-        expect(recovery).toContain(cleanup.state.block!.id);
-        expect(recovery).toContain(a.quoteNumber);
-        expect(recovery).not.toMatch(/[0-9a-f]{64}/);
-        const state = await cleanup.run();
-        expect(state.bookingCleanup).toBe("succeeded (cancelled)");
-        expect(state.blockCleanup).toBe("succeeded");
-        expect(cleanup.recovery()).toEqual([]);
-        expect(await bookingHoldReleased(pool, orgA.id, qa!.id)).toEqual({
-          requestStatus: "cancelled",
-          blockingAllocations: 0,
-        });
-        // Idempotent: a second run (a signal after the normal path) changes nothing.
-        expect((await cleanup.run()).bookingCleanup).toBe("succeeded (cancelled)");
-      } finally {
-        client.release();
-      }
+      const cleanup = createSmokeCleanup(pool, tag);
+      cleanup.state.organizationId = orgA.id;
+      cleanup.state.block = await addSmokeAvailabilityBlock(pool, orgA.id, slug, "2030-07-06", tag);
+      expect(cleanup.recovery().join("\n")).toContain(cleanup.state.block!.id);
+      expect((await cleanup.run()).blockCleanup).toBe("succeeded");
+      expect(cleanup.recovery()).toEqual([]);
+      // A block that is already gone is NOT reported as cleaned.
+      const again = createSmokeCleanup(pool, tag);
+      again.state.organizationId = orgA.id;
+      again.state.block = { id: randomUUID(), productId: p.productId };
+      expect((await again.run()).blockCleanup).toBe("failed (not found)");
+      expect(again.recovery().length).toBeGreaterThan(0);
     });
 
     it("storedTurn / conversationCounters: scoped, hash-free, and unchanged by a replay", async () => {
@@ -362,7 +484,9 @@ describeRest(
         meta: { ip: "198.51.100.64" },
         correlationId: `c-${randomUUID()}`,
       };
-      await runTurn(input, turnDeps(sayModel("Hi there!")));
+      const live = await runTurn(input, turnDeps(sayModel("Hi there!")));
+      // In-process observation of THIS request: one provider call, telemetry durably written.
+      expect(live.observation).toEqual({ modelCalls: 1, telemetryComplete: true });
       const t = await storedTurn(pool, orgA.id, session, key);
       expect(t).toEqual({ status: "completed", attempt: 1, bookingRefs: 0 });
       expect(JSON.stringify(t)).not.toMatch(/[0-9a-f]{64}/);
@@ -373,6 +497,7 @@ describeRest(
       const before = await conversationCounters(pool, orgA.id, session);
       const replay = await runTurn(input, turnDeps(fail));
       expect(replay.replayed).toBe(true);
+      expect(replay.observation).toEqual({ modelCalls: 0, telemetryComplete: true });
       expect(await modelCalls(pool, orgA.id, session)).toBe(1);
       expect(await conversationCounters(pool, orgA.id, session)).toEqual(before);
       // A new message calls the model again (a failing call is recorded too).

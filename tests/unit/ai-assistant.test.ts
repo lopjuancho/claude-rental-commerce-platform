@@ -741,3 +741,64 @@ describe("session generations: a late, older cookie never replaces a newer sessi
     expect(sessionCookieName(4)).toBe("rc_ai_4");
   });
 });
+
+describe("provider-call observation (live-smoke M3): complete, or explicitly incomplete", () => {
+  const noExecute: TurnDeps["execute"] = () => Promise.reject(new Error("no tools in this test"));
+  it("provider success + telemetry success: counted and complete", async () => {
+    const { store, actions } = memoryStore();
+    const res = await runTurn(
+      input("hi"),
+      deps(fakeModel([() => text("Hello!")]), store, noExecute),
+    );
+    expect(res.observation).toEqual({ modelCalls: 1, telemetryComplete: true });
+    expect(actions.filter((a) => a.toolName === "model_call")).toHaveLength(1);
+  });
+
+  it("provider failure + telemetry success: the failed call is counted too", async () => {
+    const { store, actions } = memoryStore();
+    const failing: LlmProvider = {
+      id: "fake",
+      model: "fake-model",
+      complete: () => Promise.reject(Object.assign(new Error("down"), { code: "HTTP" })),
+    };
+    const res = await runTurn(input("hi"), deps(failing, store, noExecute));
+    expect(res.status).toBe("error");
+    expect(res.observation).toEqual({ modelCalls: 1, telemetryComplete: true });
+    expect(actions).toEqual([{ toolName: "model_call", status: "error", errorCode: "HTTP" }]);
+  });
+
+  it("a REJECTED model_call telemetry write makes the observation incomplete (never silent)", async () => {
+    const { store } = memoryStore();
+    const rejecting: AiConversationStore = {
+      ...store,
+      recordAction: (org, a) =>
+        a.toolName === "model_call"
+          ? Promise.reject(new Error("insert failed"))
+          : store.recordAction(org, a),
+    };
+    const res = await runTurn(
+      input("hi"),
+      deps(fakeModel([() => text("Hello!")]), rejecting, noExecute),
+    );
+    expect(res.status).toBe("ok"); // the customer's turn is unaffected
+    expect(res.observation).toEqual({ modelCalls: 1, telemetryComplete: false });
+  });
+
+  it("a model_call telemetry write slower than the bound makes it incomplete (no endless wait)", async () => {
+    const { store } = memoryStore();
+    const hanging: AiConversationStore = {
+      ...store,
+      recordAction: (org, a) =>
+        a.toolName === "model_call"
+          ? new Promise<void>(() => undefined)
+          : store.recordAction(org, a),
+    };
+    const started = Date.now();
+    const res = await runTurn(input("hi"), {
+      ...deps(fakeModel([() => text("Hello!")]), hanging, noExecute),
+      limits: { telemetryTimeoutMs: 50 },
+    });
+    expect(res.observation).toEqual({ modelCalls: 1, telemetryComplete: false });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});

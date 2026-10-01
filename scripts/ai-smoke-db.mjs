@@ -206,21 +206,30 @@ export async function removeSmokeAvailabilityBlock(db, organizationId, block, ta
 }
 
 /**
- * Whether the smoke booking's inventory is released, by the availability engine's own rule: an
- * allocation blocks inventory while its status is held or confirmed.
+ * Whether the smoke booking's inventory is released, by the availability engine's OWN predicate
+ * (app.allocation_is_active: confirmed, or held with an unexpired hold). A residual allocation row
+ * that no longer blocks (e.g. an expired hold) does not count; `residualAllocations` reports rows.
  */
 export async function bookingHoldReleased(db, organizationId, quoteId) {
   const { rows } = await db.query(
     `select b.status::text as request_status,
             (select count(*)::int from public.reservation_allocations a
               where a.organization_id = $1 and a.reservation_id = b.reservation_id
-                and a.status in ('held', 'confirmed')) as blocking
+                and app.allocation_is_active(a.status, a.hold_expires_at)) as blocking,
+            (select count(*)::int from public.reservation_allocations a
+              where a.organization_id = $1 and a.reservation_id = b.reservation_id) as residual
      from public.booking_requests b
      where b.organization_id = $1 and b.quote_id = $2 order by b.created_at desc limit 1`,
     [organizationId, quoteId],
   );
   const r = rows[0];
-  return r ? { requestStatus: r.request_status, blockingAllocations: r.blocking } : null;
+  return r
+    ? {
+        requestStatus: r.request_status,
+        blockingAllocations: r.blocking,
+        residualAllocations: r.residual,
+      }
+    : null;
 }
 
 /**
@@ -237,34 +246,130 @@ export async function modelCalls(db, organizationId, sessionToken) {
 }
 
 /**
- * Everything this run created that cleanup may need to undo, and what happened to it. `run()` is
- * idempotent: it cancels the smoke's booking request if it is still pending and removes the
- * smoke's exact availability block. Used by the normal path, a thrown error, SIGINT and SIGTERM.
+ * The smoke's candidate quotes: every quote it registered BEFORE a mutation was sent, and every
+ * quote of its own (uniquely named) customers in this organization — so a booking committed while
+ * its response never arrived is still found.
+ */
+async function smokeQuotes(db, organizationId, quoteIds, emails) {
+  const { rows } = await db.query(
+    `select q.id, q.quote_number from public.quotes q
+     where q.organization_id = $1
+       and (q.id = any($2::uuid[])
+            or q.customer_id in (select c.id from public.customers c
+                                 where c.organization_id = $1 and c.email = any($3::text[])))`,
+    [organizationId, [...quoteIds], [...emails]],
+  );
+  return rows.map((r) => ({ id: r.id, quoteNumber: r.quote_number }));
+}
+
+/**
+ * Reconciles the smoke's bookings with the DATABASE (never with what a response said): every
+ * pending request on a smoke quote is cancelled, then the effective blockers (the availability
+ * engine's predicate) are counted. Success means no smoke booking blocks inventory any more.
+ * A confirmed request, more than one live request on a quote, or a blocker that remains is
+ * UNRESOLVED/FAILED — never "succeeded".
+ */
+export async function reconcileSmokeBookings(db, organizationId, quoteIds, emails) {
+  const unresolved = [];
+  let requests = 0;
+  let cancelled = 0;
+  const quotes = await smokeQuotes(db, organizationId, quoteIds, emails);
+  for (const q of quotes) {
+    const { rows } = await db.query(
+      `select b.status::text as status from public.booking_requests b
+       where b.organization_id = $1 and b.quote_id = $2`,
+      [organizationId, q.id],
+    );
+    requests += rows.length;
+    const pending = rows.filter((r) => r.status === "pending");
+    if (rows.some((r) => r.status === "confirmed")) {
+      unresolved.push(
+        `quote ${q.quoteNumber}: a confirmed booking request (not cancelled by the smoke)`,
+      );
+      continue;
+    }
+    if (pending.length > 1) {
+      unresolved.push(
+        `quote ${q.quoteNumber}: ${String(pending.length)} live booking requests (ambiguous)`,
+      );
+      continue;
+    }
+    if (pending.length === 1) {
+      await cancelSmokeBooking(db, organizationId, q.id);
+      cancelled++;
+    }
+  }
+  const ids = quotes.map((q) => q.id);
+  const { rows: blockers } = await db.query(
+    `select q.quote_number, count(*)::int as n
+     from public.booking_requests b
+     join public.quotes q on q.id = b.quote_id
+     join public.reservation_allocations a on a.reservation_id = b.reservation_id and a.organization_id = $1
+     where b.organization_id = $1 and b.quote_id = any($2::uuid[])
+       and app.allocation_is_active(a.status, a.hold_expires_at)
+     group by q.quote_number`,
+    [organizationId, ids],
+  );
+  for (const b of blockers)
+    unresolved.push(
+      `quote ${b.quote_number}: ${String(b.n)} active allocation(s) still block inventory`,
+    );
+  return { quotes: quotes.length, requests, cancelled, unresolved };
+}
+
+/**
+ * Everything this run created or may have created, and what happened to it — ONE object for the
+ * normal path, a failed check, a thrown error, SIGINT and SIGTERM. Mutation intent is registered
+ * BEFORE a request is sent (quote ids, the smoke's customer emails), so cleanup can reconcile a
+ * booking whose response never arrived. `run()` is idempotent.
  */
 export function createSmokeCleanup(db, tag) {
   if (!SMOKE_TAG.test(tag ?? "")) throw new Error("invalid smoke tag");
   const state = {
     tag,
     organizationId: null,
-    booking: null, // { quoteId, quoteNumber }
+    quoteIds: new Set(),
+    customerEmails: new Set(),
     block: null, // { id, productId }
     bookingCleanup: "not attempted",
     blockCleanup: "not created",
+    unresolved: [],
     stopping: false,
+    inFlight: null, // the HTTP request in progress, if any
   };
   let running = null;
-  async function run() {
+  /**
+   * `waitForInFlightMs`: on an interrupt, first let a request already sent settle (bounded), so a
+   * mutation it commits is reconciled too; the reconciliation does not depend on its response.
+   */
+  async function run({ waitForInFlightMs = 0 } = {}) {
+    if (state.inFlight && waitForInFlightMs > 0) {
+      let timer;
+      await Promise.race([
+        Promise.resolve(state.inFlight).catch(() => undefined),
+        new Promise((r) => {
+          timer = setTimeout(r, waitForInFlightMs);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
     running ??= (async () => {
-      if (state.organizationId && state.booking) {
+      if (state.organizationId && (state.quoteIds.size > 0 || state.customerEmails.size > 0)) {
         try {
-          const status = await bookingStatus(db, state.organizationId, state.booking.quoteId);
-          if (status === "pending") {
-            await cancelSmokeBooking(db, state.organizationId, state.booking.quoteId);
-          }
-          const now = await bookingStatus(db, state.organizationId, state.booking.quoteId);
-          state.bookingCleanup = now === "pending" ? "failed" : `succeeded (${String(now)})`;
+          const r = await reconcileSmokeBookings(
+            db,
+            state.organizationId,
+            state.quoteIds,
+            state.customerEmails,
+          );
+          state.unresolved = r.unresolved;
+          state.bookingCleanup = r.unresolved.length
+            ? `unresolved (${r.unresolved.length} issue(s))`
+            : r.requests === 0
+              ? "succeeded (no booking request was committed)"
+              : `succeeded (released; ${String(r.cancelled)} cancelled now)`;
         } catch {
-          state.bookingCleanup = "failed";
+          state.bookingCleanup = "failed (database error during reconciliation)";
         }
       }
       if (state.organizationId && state.block) {
@@ -278,20 +383,24 @@ export function createSmokeCleanup(db, tag) {
           state.blockCleanup = removed === 1 ? "succeeded" : "failed (not found)";
           if (removed === 1) state.block = null;
         } catch {
-          state.blockCleanup = "failed";
+          state.blockCleanup = "failed (database error)";
         }
       }
     })();
-    await running;
-    running = null;
+    try {
+      await running;
+    } finally {
+      running = null;
+    }
     return state;
   }
-  /** Safe identifiers to clean up by hand if cleanup failed or the process was killed. */
+  /** Safe identifiers to clean up by hand when cleanup is not proven (no hash, no token, no URL). */
   function recovery() {
     const lines = [];
     if (state.block) lines.push(`availability block id ${state.block.id} (notes "${tag}")`);
-    if (state.booking && !state.bookingCleanup.startsWith("succeeded")) {
-      lines.push(`booking request of quote ${state.booking.quoteNumber} (smoke tag ${tag})`);
+    if (!state.bookingCleanup.startsWith("succeeded") && state.bookingCleanup !== "not attempted") {
+      lines.push(`booking requests of the smoke's quotes (tag ${tag}): ${state.bookingCleanup}`);
+      for (const u of state.unresolved) lines.push(`  ${u}`);
     }
     return lines;
   }

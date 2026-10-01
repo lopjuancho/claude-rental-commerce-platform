@@ -193,9 +193,20 @@ export async function handleAssistantPost(request: Request): Promise<Response> {
     );
   }
   const status = result.errorCode === "IN_PROGRESS" || result.errorCode === "BUSY" ? 409 : 200;
+  const { observation, ...turnBody } = result;
   return NextResponse.json(
-    { ...result, blocks: result.blocks.map(publicBlock), correlationId },
-    { status, headers: noStore },
+    { ...turnBody, blocks: result.blocks.map(publicBlock), correlationId },
+    {
+      status,
+      headers: {
+        ...noStore,
+        // Observability only (no data): provider calls made by THIS request and whether their
+        // telemetry is complete — what the live smoke checks a replay against.
+        "X-Assistant-Model-Calls": String(observation?.modelCalls ?? 0),
+        "X-Assistant-Telemetry":
+          observation?.telemetryComplete === false ? "incomplete" : "complete",
+      },
+    },
   );
 }
 

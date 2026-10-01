@@ -29,7 +29,9 @@ import {
   expectedWhen,
   freshAvailabilityVerdict,
   leaksServerRefs,
+  providerObservationVerdict,
   safeExcerpt,
+  smokeExitCode,
   unsupportedStateClaims,
 } from "./ai-smoke-checks.mjs";
 import {
@@ -75,7 +77,7 @@ async function finish(code, why) {
   finishing = true;
   cleanup.state.stopping = true;
   if (why) console.error(why);
-  const state = await cleanup.run().catch(() => cleanup.state);
+  const state = await cleanup.run({ waitForInFlightMs: 20_000 }).catch(() => cleanup.state);
   console.log(`cleanup: booking ${state.bookingCleanup}; availability block ${state.blockCleanup}`);
   const recovery = cleanup.recovery();
   if (recovery.length) {
@@ -117,13 +119,24 @@ const sleep = (ms) =>
 async function turn(message, { requestId = newId(), page, jar = cookies } = {}) {
   for (let attempt = 0; ; attempt++) {
     if (cleanup.state.stopping) throw new Error("stopping");
-    const res = await fetch(new URL("/api/assistant", base), {
+    // The request in progress is known to cleanup: an interrupt lets it settle (bounded) before
+    // reconciling what it may have committed.
+    const sent = fetch(new URL("/api/assistant", base), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
       body: JSON.stringify({ message, requestId, ...(page ? { page } : {}) }),
+    }).then(async (r) => ({ r, raw: await r.text() }));
+    cleanup.state.inFlight = sent;
+    const { r: res, raw } = await sent.finally(() => {
+      if (cleanup.state.inFlight === sent) cleanup.state.inFlight = null;
     });
     remember(res, jar);
-    const raw = await res.text();
+    // What THIS request did with the model, reported by the server in-process.
+    const calls = res.headers.get("x-assistant-model-calls");
+    const observed = {
+      modelCalls: calls === null ? null : Number(calls),
+      telemetry: res.headers.get("x-assistant-telemetry"),
+    };
     let body = {};
     try {
       body = JSON.parse(raw);
@@ -134,7 +147,7 @@ async function turn(message, { requestId = newId(), page, jar = cookies } = {}) 
       await sleep(8_000);
       continue;
     }
-    return { http: res.status, requestId, blocks: [], ...body, raw };
+    return { http: res.status, requestId, blocks: [], ...body, raw, observed };
   }
 }
 
@@ -213,6 +226,7 @@ async function main() {
 
   // 5. customer/event → quote (with a lost response retried).
   const email = `ai-smoke-${randomUUID().slice(0, 8)}@example.test`;
+  cleanup.state.customerEmails.add(email); // before the customer exists: cleanup can find it
   const contact = await turn(`My name is Smoke Test, email ${email}.`);
   check("create_customer accepted", contact.status === "ok");
   const event = await turn(`The party is on ${date} from 12:00 to 16:00 and I will pick up.`);
@@ -259,6 +273,7 @@ async function main() {
   //    must not book either until the customer says which.
   const jarB = new Map();
   const emailB = `ai-smoke-b-${randomUUID().slice(0, 8)}@example.test`;
+  cleanup.state.customerEmails.add(emailB);
   remember(await fetch(base), jarB);
   await turn(`My name is Other Session, email ${emailB}.`, { jar: jarB });
   const bQuote = await turn(
@@ -287,6 +302,8 @@ async function main() {
     );
   }
 
+  // Mutation intent BEFORE the request: whatever it commits, cleanup reconciles by exact quote.
+  if (quoteA) cleanup.state.quoteIds.add(quoteA.id);
   // 9. booking request → pending hold, never confirmed.
   const booking = await turn(`Please request the booking for quote ${q3?.quoteNumber ?? ""}.`);
   const b = one(booking, "booking");
@@ -296,10 +313,6 @@ async function main() {
     b?.status ?? booking.errorCode ?? "",
   );
   check("the booking reply never claims confirmed/paid", !FALSE_CLAIM.test(booking.reply ?? ""));
-
-  if (quoteA && b?.status === "hold_placed") {
-    cleanup.state.booking = { quoteId: quoteA.id, quoteNumber: quoteA.quoteNumber };
-  }
 
   // 12. LIVE booking-state replay. A booking-status reply is stored; the smoke's OWN booking
   //     request is then cancelled in the database (the quote page's cancel function — it also
@@ -352,8 +365,6 @@ async function main() {
           ? `${release.requestStatus}, ${String(release.blockingAllocations)} blocking`
           : "none",
       );
-      if (now === "cancelled")
-        cleanup.state.bookingCleanup = "succeeded (cancelled by the replay check)";
       const replay = await turn(statusQuestion, { requestId: statusKey });
       const after = await conversationCounters(db, org, session());
       const callsAfter = await modelCalls(db, org, session());
@@ -363,10 +374,16 @@ async function main() {
         replay.replayed === true,
         `http ${String(replay.http)}`,
       );
+      const observation = providerObservationVerdict({
+        first: first?.observed,
+        replay: replay.observed,
+        dbBefore: callsBefore,
+        dbAfter: callsAfter,
+      });
       check(
-        "live replay: the provider (model) is NOT called again (model_call telemetry unchanged)",
-        callsBefore > 0 && callsAfter === callsBefore,
-        `${String(callsBefore)} → ${String(callsAfter)}`,
+        "live replay: PROVEN no provider (model) call (complete in-process observation + durable count unchanged)",
+        observation.ok,
+        observation.reasons.join("; "),
       );
       check(
         "live replay: nothing is appended (messages, actions, attempts unchanged)",
@@ -635,7 +652,15 @@ async function main() {
     for (const line of recovery) console.log(`  - ${line}`);
   }
   await db.end();
-  process.exit(failed.length ? 1 : 0);
+  // Non-zero on ANY failed check, unproven cleanup, or needed manual cleanup.
+  process.exit(
+    smokeExitCode({
+      failedChecks: failed.length,
+      bookingCleanup: state.bookingCleanup,
+      blockCleanup: state.blockCleanup,
+      recovery,
+    }),
+  );
 }
 
 main().catch(async (e) => {
