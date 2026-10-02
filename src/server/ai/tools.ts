@@ -22,6 +22,7 @@ import {
   requestPublicBooking,
   submitQuoteRequest,
 } from "@/server/public/quotes";
+import { bookingRequested } from "@/domain/assistant/booking-intent";
 import { loadProductBySlug, loadShell, searchProducts } from "@/server/public/storefront";
 import { generateQuoteToken, hashQuoteToken } from "@/server/quotes/token";
 import type {
@@ -65,13 +66,32 @@ import {
  */
 
 const dbOf = (ctx: ToolContext) => ctx.db ?? createPublicClient();
+
+/**
+ * One read per turn for catalog data several tools of the same turn need (the storefront shell,
+ * a product by slug): every read is an outbound request, and a Worker request has a budget of
+ * them. Availability, pricing and every write are never memoized. A failed read is not kept.
+ */
+function perTurn<T>(ctx: ToolContext, key: string, load: () => Promise<T>): Promise<T> {
+  const memo = (ctx.memo ??= new Map<string, Promise<unknown>>());
+  let p = memo.get(key) as Promise<T> | undefined;
+  if (!p) {
+    p = load();
+    memo.set(key, p);
+    p.catch(() => memo.delete(key));
+  }
+  return p;
+}
+const shellOf = (ctx: ToolContext) => perTurn(ctx, "shell", () => loadShell(ctx.tenant, dbOf(ctx)));
 const money = (cents: number, ctx: ToolContext) => formatCents(cents, ctx.tenant.currency);
 const at = (ctx: ToolContext) => ctx.now().toISOString();
 
 // ── shared resolution ───────────────────────────────────────────────────────
 
 async function resolveProduct(ctx: ToolContext, slug: string): Promise<Product> {
-  const product = await loadProductBySlug(ctx.tenant, slug, dbOf(ctx));
+  const product = await perTurn(ctx, `product:${slug}`, () =>
+    loadProductBySlug(ctx.tenant, slug, dbOf(ctx)),
+  );
   if (!product) {
     throw new ToolError(
       "NOT_FOUND",
@@ -388,7 +408,7 @@ async function searchProductsTool(
   ctx: ToolContext,
   args: ToolArgs<"search_products">,
 ): Promise<ToolOutcome> {
-  const shell = await loadShell(ctx.tenant, dbOf(ctx));
+  const shell = await shellOf(ctx);
   const category = args.categorySlug
     ? shell.categories.find((c) => c.slug === args.categorySlug)
     : undefined;
@@ -446,7 +466,7 @@ async function productDetailsTool(
   args: ToolArgs<"get_product_details">,
 ): Promise<ToolOutcome> {
   const product = await resolveProduct(ctx, args.productSlug);
-  const shell = await loadShell(ctx.tenant, dbOf(ctx));
+  const shell = await shellOf(ctx);
   const safetyPolicy = shell.profile.policies.find((p) => /weather|safety/.test(p.type));
   return {
     status: "ok",
@@ -864,6 +884,13 @@ function quoteBlock(
   };
 }
 
+/** The active quote's link token, if this chat holds it sealed and it matches the quote. */
+async function activeLink(ctx: ToolContext, q: { tokenHash: string; sealedLink?: string }) {
+  if (!q.sealedLink) return null;
+  const token = await ctx.sealer.open(q.sealedLink);
+  return token && (await hashQuoteToken(token)) === q.tokenHash ? token : null;
+}
+
 async function viewOf(ctx: ToolContext, tokenHash: string) {
   return getPublicQuote(ctx.tenant, { tokenHash }, ctx.deps);
 }
@@ -880,6 +907,8 @@ function committedQuote(
     basis: QuoteBasis;
     staged: Extract<MutationRef, { type: "quote" }>["staged"];
     replaces: string | null;
+    /** The link token sealed to the session, when `token` is this quote's link. */
+    sealedLink?: string | undefined;
   },
 ): Committed {
   // The committed quote is the authority: the recorded basis is trusted only if the quote in the
@@ -895,6 +924,7 @@ function committedQuote(
       staged: q.staged,
       replaces: q.replaces,
       verified,
+      ...(q.token && q.sealedLink ? { sealedLink: q.sealedLink } : {}),
     },
     outcome: {
       status: view.priceIsFinal ? "ok" : "manual_review",
@@ -946,7 +976,9 @@ async function quoteFromStaging(ctx: ToolContext, message?: string): Promise<Too
           note: "The current quote already matches these details; nothing new was created.",
           ...quoteSummary(ctx, view),
         },
-        blocks: [quoteBlock(ctx, view, null, null)],
+        // Its link again, when this chat holds it (sealed to this session) and it is exactly this
+        // quote's link; otherwise no link.
+        blocks: [quoteBlock(ctx, view, await activeLink(ctx, active), null)],
         evidence: [quoteEvidence(ctx, view)],
       };
     }
@@ -1021,6 +1053,7 @@ async function quoteMutation(
         basis: p.basis,
         staged: p.staged,
         replaces: p.replaces,
+        sealedLink: p.sealedToken,
       });
     },
     perform: async (raw, businessKey) => {
@@ -1051,6 +1084,7 @@ async function quoteMutation(
         basis: p.basis,
         staged: p.staged,
         replaces: p.replaces,
+        sealedLink: p.sealedToken,
       });
     },
   });
@@ -1507,6 +1541,20 @@ async function requestBookingTool(
         const refused = refusal[step.kind];
         if (refused) throw new BookingRefusal(refuse(refused));
         if (step.kind === "holding") throw new BookingRefusal(holding(step.until));
+        // A NEW hold only when the customer asked for it in this message (or said yes to the
+        // assistant's offer): it places a real inventory hold, and the model offering one — or
+        // the customer asking for a quote — is not the customer's request. (A quote's existing
+        // booking status above is reported either way.)
+        if (
+          ctx.customerTurn &&
+          !bookingRequested(ctx.customerTurn.message, ctx.customerTurn.previousAssistant)
+        ) {
+          throw new ToolError(
+            "BOOKING_NOT_REQUESTED",
+            "The customer has not asked to request a booking in this message, so nothing was held. Ask whether they want you to request the booking (it places a temporary hold).",
+            "rejected_policy",
+          );
+        }
         const hold = await requestPublicBooking(
           ctx.tenant,
           { tokenHash: target.tokenHash },

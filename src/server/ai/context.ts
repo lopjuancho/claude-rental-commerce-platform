@@ -58,6 +58,11 @@ const activeQuoteSchema = z.strictObject({
   basis: quoteBasisSchema,
   /** False when a recovered quote's database contents did not match the recorded input. */
   verified: z.boolean().default(true),
+  /**
+   * The quote's link token SEALED to this browser session (seal.ts) — never in clear — so the
+   * existing quote can be shown again with its link. Absent when this chat never had the token.
+   */
+  sealedLink: z.string().max(400).optional(),
 });
 export type ActiveQuote = z.infer<typeof activeQuoteSchema>;
 
@@ -113,6 +118,8 @@ export const mutationRefSchema = z.discriminatedUnion("type", [
     }),
     replaces: z.string().max(40).nullable(),
     verified: z.boolean().default(true),
+    /** The link token sealed to the session (only when this chat chose it; see ActiveQuote). */
+    sealedLink: z.string().max(400).optional(),
   }),
   z.strictObject({
     type: z.literal("booking"),
@@ -136,6 +143,7 @@ export function applyMutationRef(state: AssistantState, ref: MutationRef) {
       origin: "assistant",
       basis: ref.basis,
       verified: ref.verified,
+      ...(ref.sealedLink ? { sealedLink: ref.sealedLink } : {}),
     };
   }
   // A booking request changes nothing in the staging: its status is read from the quote.
@@ -196,6 +204,14 @@ export interface ToolContext {
   pageQuote?: { tokenHash: string; quoteNumber: string } | null;
   /** How many times each request-scoped mutation ran in this turn (see requestScopedKey). */
   ordinals?: Map<string, number>;
+  /**
+   * The customer's message of this turn and the assistant's previous reply: request_booking
+   * places a real hold only when the customer asked for it (domain/assistant/booking-intent.ts).
+   * Always set by runTurn.
+   */
+  customerTurn?: { message: string; previousAssistant: string | null };
+  /** Per-turn reads shared by the tools of one turn (storefront shell, products by slug). */
+  memo?: Map<string, Promise<unknown>>;
 }
 
 // UI blocks are shared with the chat component (types only).

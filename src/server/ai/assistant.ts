@@ -129,6 +129,15 @@ function today(timeZone: string, now: Date): string {
   return `${date} (${weekday})`;
 }
 
+/** The assistant's last reply to the customer (text, not a tool call), if any. */
+export function lastAssistantText(history: LlmMessage[]): string | null {
+  for (const m of [...history].reverse()) {
+    if (m.role === "assistant" && !m.toolCalls?.length && m.content) return m.content;
+    if (m.role === "user") return null;
+  }
+  return null;
+}
+
 /** Stored messages → provider messages, starting at a user message and within the char budget. */
 export function historyToMessages(rows: AiStoredMessage[], maxChars: number): LlmMessage[] {
   const out: LlmMessage[] = [];
@@ -481,6 +490,7 @@ async function turn(
 
     const ctx: ToolContext = {
       tenant: input.tenant,
+      customerTurn: { message, previousAssistant: lastAssistantText(history) },
       meta: {
         ...input.meta,
         actor: "ai",

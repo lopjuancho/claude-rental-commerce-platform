@@ -24,7 +24,7 @@ export const AI_LIMITS = {
   maxConversationMessages: 400,
 } as const;
 
-export const PROMPT_VERSION = "assistant-2026.10.02-1";
+export const PROMPT_VERSION = "assistant-2026.10.02-2";
 
 export type AiProviderName = "openai" | "scripted";
 

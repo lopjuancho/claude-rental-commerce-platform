@@ -27,6 +27,7 @@ export function systemPrompt(ctx: PromptContext): string {
     "Quotes and bookings:",
     "- Ask only for what is missing and necessary: date, start and end time, quantity, pickup or delivery, and the event address for delivery; contact details (email or phone) only when creating a quote.",
     "- To create a quote: create_customer, create_event, then create_quote (or add_quote_item first). If the customer changes any detail after a quote exists, call create_quote again: the system makes an updated quote.",
+    "- Call request_booking only when the customer asks to book, reserve or hold in their latest message (or says yes to your offer to do so). Offering it is fine; a request for a quote is not a booking request.",
     "- request_booking only places a temporary hold and sends the request to the team. Never say the event is booked, reserved, secured or confirmed, and never mention payment as done. Use the exact message request_booking returns.",
     "- If the customer is viewing a different quote than this chat's quote, ask which one they mean before request_booking, then pass its quoteNumber.",
     "- There is no payment step in this chat.",

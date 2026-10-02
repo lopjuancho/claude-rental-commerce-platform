@@ -912,7 +912,7 @@ describeRest("recovery restores the ORIGINAL committed basis (H3)", () => {
     const key = randomUUID();
     // add_quote_item makes quote B (quantity 2); both journal commits fail; the provider fails.
     const failed = await c.turn(
-      "add one more castle",
+      "add one more castle and request the booking",
       deps(
         model([
           tool("add_quote_item", { productSlug: "bounce-castle", quantity: 1 }),
@@ -926,7 +926,7 @@ describeRest("recovery restores the ORIGINAL committed basis (H3)", () => {
     // Retry of the same message: staging now says 2, so "+1" would compute 3 — but the recorded
     // input (and the quote in the database) is 2.
     const retried = await c.turn(
-      "add one more castle",
+      "add one more castle and request the booking",
       deps(
         model([
           tool("add_quote_item", { productSlug: "bounce-castle", quantity: 1 }),
@@ -957,7 +957,7 @@ describeRest("recovery restores the ORIGINAL committed basis (H3)", () => {
       const c = conversation();
       const key = randomUUID();
       await c.turn(
-        "Please create my quote",
+        "Please create my quote and request the booking",
         deps(
           model([
             ...c.setup,
@@ -995,7 +995,7 @@ describeRest("recovery restores the ORIGINAL committed basis (H3)", () => {
         ]);
       }
       const retry = await c.turn(
-        "Please create my quote",
+        "Please create my quote and request the booking",
         deps(
           model([
             ...c.setup,
