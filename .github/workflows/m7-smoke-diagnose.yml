@@ -1,0 +1,43 @@
+name: M7 Smoke Diagnose (read-only)
+
+# Read-only journal dump for one live smoke run (scripts/ai-smoke-diagnose.mjs). Never writes.
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: Organization id
+        required: true
+      from:
+        description: Window start (ISO-8601)
+        required: true
+      to:
+        description: Window end (ISO-8601)
+        required: true
+      quotes:
+        description: Comma-separated exact quote ids (optional)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Diagnose (read-only)
+        run: node scripts/ai-smoke-diagnose.mjs
+        env:
+          AI_DIAG_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          AI_DIAG_ORG: ${{ inputs.org }}
+          AI_DIAG_FROM: ${{ inputs.from }}
+          AI_DIAG_TO: ${{ inputs.to }}
+          AI_DIAG_QUOTES: ${{ inputs.quotes }}
