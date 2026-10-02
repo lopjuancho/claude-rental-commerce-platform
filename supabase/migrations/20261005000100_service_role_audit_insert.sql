@@ -1,0 +1,12 @@
+-- Live staging smoke (M7): the system gateway writes audit rows with a DIRECT table insert
+-- (src/server/trusted/gateway.ts recordAudit), after the business write it records — e.g. after a
+-- quote is created (submitQuoteRequest) or a booking request is placed. Every other system write
+-- goes through a function with an explicit EXECUTE grant; this one relied on the platform's default
+-- table privileges for API roles, which a hosted project does not necessarily apply. Without INSERT
+-- the audit insert fails AFTER the quote exists, so the assistant reports a failure and its journal
+-- keeps the mutation 'started'.
+--
+-- Grant exactly what the gateway needs: INSERT (supabase-js inserts with return=minimal, so no
+-- SELECT). service_role still cannot update, delete or truncate (20260928000300_audit.sql), and the
+-- append-only triggers still apply. No other role changes.
+grant insert on public.audit_logs to service_role;
